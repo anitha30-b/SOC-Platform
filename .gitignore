@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+env/
+ENV/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Node / React
+node_modules/
+dist/
+build/
+.vite/
+
+# Generated reports
+backend/generated_reports/
+reports/generated/
+*.pdf
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Database / local files
+*.sqlite
+*.sqlite3
+
+# Temporary files
+tmp/
+temp/
