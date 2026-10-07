@@ -1,0 +1,15 @@
+{
+  "id": "access-validation",
+  "name": "Access / Impact Validation",
+  "stage": "07 Post-Exploitation",
+  "category": "Post-Exploitation",
+  "execution_type": "workflow",
+  "executable": null,
+  "target_types": [
+    "case",
+    "finding"
+  ],
+  "enabled": true,
+  "integrated": false,
+  "description": "Document and validate authorized security impact"
+}

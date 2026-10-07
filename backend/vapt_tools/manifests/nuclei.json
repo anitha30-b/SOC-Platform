@@ -1,0 +1,16 @@
+{
+  "id": "nuclei",
+  "name": "Nuclei",
+  "stage": "03 Vulnerability Discovery",
+  "category": "Vulnerability Discovery",
+  "execution_type": "scanner",
+  "executable": "nuclei",
+  "target_types": [
+    "url",
+    "host",
+    "ip"
+  ],
+  "enabled": true,
+  "integrated": false,
+  "description": "Template-based vulnerability discovery"
+}

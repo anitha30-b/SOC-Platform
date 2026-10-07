@@ -1,0 +1,16 @@
+{
+  "id": "nikto",
+  "name": "Nikto",
+  "stage": "03 Vulnerability Discovery",
+  "category": "Vulnerability Discovery",
+  "execution_type": "scanner",
+  "executable": "nikto",
+  "target_types": [
+    "url",
+    "host",
+    "ip"
+  ],
+  "enabled": true,
+  "integrated": true,
+  "description": "Web server security assessment"
+}

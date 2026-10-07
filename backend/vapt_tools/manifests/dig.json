@@ -1,0 +1,15 @@
+{
+  "id": "dig",
+  "name": "dig",
+  "stage": "01 Reconnaissance",
+  "category": "Reconnaissance",
+  "execution_type": "scanner",
+  "executable": "dig",
+  "target_types": [
+    "domain",
+    "ip"
+  ],
+  "enabled": true,
+  "integrated": true,
+  "description": "DNS record query utility"
+}

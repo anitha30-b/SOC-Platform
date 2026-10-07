@@ -1,0 +1,14 @@
+{
+  "id": "dns-recon",
+  "name": "DNS Recon",
+  "stage": "01 Reconnaissance",
+  "category": "Reconnaissance",
+  "execution_type": "scanner",
+  "executable": "dnsrecon",
+  "target_types": [
+    "domain"
+  ],
+  "enabled": true,
+  "integrated": true,
+  "description": "DNS record and host discovery workflow"
+}

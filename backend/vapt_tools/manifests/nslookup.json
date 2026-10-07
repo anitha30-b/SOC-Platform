@@ -1,0 +1,15 @@
+{
+  "id": "nslookup",
+  "name": "nslookup",
+  "stage": "01 Reconnaissance",
+  "category": "Reconnaissance",
+  "execution_type": "scanner",
+  "executable": "nslookup",
+  "target_types": [
+    "domain",
+    "ip"
+  ],
+  "enabled": true,
+  "integrated": true,
+  "description": "DNS lookup utility"
+}

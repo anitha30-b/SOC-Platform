@@ -1,0 +1,15 @@
+{
+  "id": "john",
+  "name": "John the Ripper",
+  "stage": "06 Credential Testing",
+  "category": "Credential Testing",
+  "execution_type": "password_cracker",
+  "executable": "john",
+  "target_types": [
+    "file",
+    "hash"
+  ],
+  "enabled": true,
+  "integrated": false,
+  "description": "Password hash auditing and recovery tool for authorized security assessments"
+}

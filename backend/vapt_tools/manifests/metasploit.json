@@ -1,0 +1,17 @@
+{
+  "id": "metasploit",
+  "name": "Metasploit",
+  "stage": "05 Validation / Exploitation",
+  "category": "Validation / Exploitation",
+  "execution_type": "validator",
+  "executable": "msfconsole",
+  "target_types": [
+    "host",
+    "ip",
+    "service"
+  ],
+  "enabled": true,
+  "integrated": false,
+  "description": "Authorized vulnerability validation framework",
+  "permission_name": "Metasploit Framework"
+}

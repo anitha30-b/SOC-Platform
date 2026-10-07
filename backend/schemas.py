@@ -298,6 +298,64 @@ class QARecordResponse(BaseModel):
 
 
 # ==================================================
+# SECURITY TOOL PERMISSIONS
+# ==================================================
+
+class SecurityToolResponse(BaseModel):
+    id: int
+    name: str
+    category: str
+    description: Optional[str] = None
+    tool_type: str
+    enabled: bool
+
+    class Config:
+        from_attributes = True
+
+
+class UserToolPermissionResponse(BaseModel):
+    id: int
+    user_id: int
+    tool_id: int
+    allowed: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ToolPermissionItem(BaseModel):
+    tool_id: int
+    allowed: bool
+
+
+class UserToolPermissionsUpdate(BaseModel):
+    permissions: list[ToolPermissionItem] = Field(
+        default_factory=list
+    )
+
+
+class UserToolPermissionDetail(BaseModel):
+    user_id: int
+    username: str
+    email: EmailStr
+    tool_id: int
+    tool_name: str
+    category: str
+    description: Optional[str] = None
+    tool_type: str
+    tool_enabled: bool
+    allowed: bool
+
+
+class UserToolPermissionCheckResponse(BaseModel):
+    user_id: int
+    tool_id: int
+    allowed: bool
+
+
+# ==================================================
 # SUPPORT TICKET — CREATE
 # ==================================================
 

@@ -1,0 +1,14 @@
+env:
+  contexts:
+    - name: juice-shop
+      urls:
+        - http://172.17.5.198:3000
+      includePaths:
+        - http://172.17.5.198:3000.*
+
+jobs:
+  - type: activeScan
+    parameters:
+      context: juice-shop
+      url: http://172.17.5.198:3000
+      policy: Default Policy

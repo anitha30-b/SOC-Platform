@@ -1,0 +1,17 @@
+{
+  "id": "nmap",
+  "name": "Nmap",
+  "stage": "02 Scanning & Enumeration",
+  "category": "Scanning & Enumeration",
+  "execution_type": "scanner",
+  "executable": "nmap",
+  "target_types": [
+    "host",
+    "ip",
+    "cidr",
+    "domain"
+  ],
+  "enabled": true,
+  "integrated": true,
+  "description": "Network discovery and service enumeration"
+}

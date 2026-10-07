@@ -1,0 +1,15 @@
+{
+  "id": "wireshark",
+  "name": "Wireshark",
+  "stage": "04 Network Security Testing",
+  "category": "Network Security Testing",
+  "execution_type": "analyzer",
+  "executable": "wireshark",
+  "target_types": [
+    "pcap",
+    "interface"
+  ],
+  "enabled": true,
+  "integrated": false,
+  "description": "Interactive packet and protocol analysis"
+}

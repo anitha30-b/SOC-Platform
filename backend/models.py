@@ -9,6 +9,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
@@ -187,6 +188,12 @@ class User(Base):
 
     support_tickets = relationship(
         "SupportTicket",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+    tool_permissions = relationship(
+        "UserToolPermission",
         back_populates="user",
         cascade="all, delete-orphan",
     )
@@ -563,6 +570,77 @@ class SecurityTool(Base):
         nullable=False,
     )
 
+    permissions = relationship(
+        "UserToolPermission",
+        back_populates="tool",
+        cascade="all, delete-orphan",
+    )
+
+
+# ============================================================
+# USER TOOL PERMISSION
+# ============================================================
+
+class UserToolPermission(Base):
+    __tablename__ = "user_tool_permissions"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    tool_id = Column(
+        Integer,
+        ForeignKey("security_tools.id"),
+        nullable=False,
+        index=True,
+    )
+
+    allowed = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship(
+        "User",
+        back_populates="tool_permissions",
+    )
+
+    tool = relationship(
+        "SecurityTool",
+        back_populates="permissions",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "tool_id",
+            name="uq_user_tool_permission",
+        ),
+    )
+
 
 # ============================================================
 # SECURITY FINDING
@@ -799,6 +877,126 @@ class SecurityFinding(Base):
     assessment = relationship(
         "Assessment",
         back_populates="security_findings",
+    )
+
+
+# ============================================================
+# POST-EXPLOITATION ACCESS / IMPACT VALIDATION
+# ============================================================
+
+class PostExploitationValidation(Base):
+    __tablename__ = "post_exploitation_validations"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    validation_id = Column(
+        String(100),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    job_id = Column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    assessment_id = Column(
+        Integer,
+        ForeignKey("assessments.id"),
+        nullable=False,
+        index=True,
+    )
+
+    finding_id = Column(
+        String(50),
+        ForeignKey("security_findings.finding_id"),
+        nullable=False,
+        index=True,
+    )
+
+    status = Column(
+        String(30),
+        nullable=False,
+        default="RUNNING",
+    )
+
+    validation_result = Column(
+        String(50),
+        nullable=True,
+    )
+
+    access_validated = Column(
+        Boolean,
+        nullable=True,
+    )
+
+    impact_validated = Column(
+        Boolean,
+        nullable=True,
+    )
+
+    evidence = Column(
+        Text,
+        nullable=True,
+    )
+
+    impact_details = Column(
+        Text,
+        nullable=True,
+    )
+
+    validation_notes = Column(
+        Text,
+        nullable=True,
+    )
+
+    started_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    completed_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship(
+        "User",
+    )
+
+    assessment = relationship(
+        "Assessment",
+    )
+
+    finding = relationship(
+        "SecurityFinding",
     )
 
 
@@ -1106,6 +1304,137 @@ class AuditLog(Base):
 
 
 
+
+# ============================================================
+# RISK ASSESSMENT
+# ============================================================
+
+class RiskAssessmentRun(Base):
+    __tablename__ = "risk_assessment_runs"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    assessment_run_id = Column(
+        String(100),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    job_id = Column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    assessment_id = Column(
+        Integer,
+        ForeignKey("assessments.id"),
+        nullable=False,
+        index=True,
+    )
+
+    status = Column(
+        String(30),
+        nullable=False,
+        default="RUNNING",
+    )
+
+    total_findings = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    average_cvss = Column(
+        Float,
+        nullable=False,
+        default=0.0,
+    )
+
+    highest_cvss = Column(
+        Float,
+        nullable=False,
+        default=0.0,
+    )
+
+    overall_risk = Column(
+        String(30),
+        nullable=True,
+    )
+
+    severity_summary = Column(
+        Text,
+        nullable=True,
+    )
+
+    risk_level_summary = Column(
+        Text,
+        nullable=True,
+    )
+
+    status_summary = Column(
+        Text,
+        nullable=True,
+    )
+
+    validation_summary = Column(
+        Text,
+        nullable=True,
+    )
+
+    findings_snapshot = Column(
+        Text,
+        nullable=True,
+    )
+
+    assessment_notes = Column(
+        Text,
+        nullable=True,
+    )
+
+    started_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    completed_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+    user = relationship(
+        "User",
+    )
+
+    assessment = relationship(
+        "Assessment",
+    )
+
+
+
 # ============================================================
 # GENERATED SECURITY REPORT
 # ============================================================
@@ -1296,3 +1625,357 @@ class ReportIssue(Base):
         "SupportTicket",
     )
 
+
+# ============================================================
+# SECURITY EVENT
+# ============================================================
+
+class SecurityEvent(Base):
+    __tablename__ = "security_events"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    event_id = Column(
+        String(255),
+        nullable=True,
+        index=True,
+    )
+
+    timestamp = Column(
+        DateTime,
+        nullable=False,
+        index=True,
+    )
+
+    source = Column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+
+    event_type = Column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+
+    severity = Column(
+        String(50),
+        nullable=False,
+        index=True,
+    )
+
+    message = Column(
+        Text,
+        nullable=False,
+    )
+
+    target = Column(
+        String(255),
+        nullable=True,
+        index=True,
+    )
+
+    assessment_id = Column(
+        Integer,
+        nullable=True,
+        index=True,
+    )
+
+    mitre_technique_id = Column(
+        String(50),
+        nullable=True,
+        index=True,
+    )
+
+    mitre_technique_name = Column(
+        String(255),
+        nullable=True,
+    )
+
+    mitre_tactic = Column(
+        String(100),
+        nullable=True,
+    )
+
+    mitre_mapping_source = Column(
+        String(100),
+        nullable=True,
+    )
+
+    mitre_confidence = Column(
+        String(50),
+        nullable=True,
+    )
+
+    mitre_evidence = Column(
+        Text,
+        nullable=True,
+    )
+
+    raw_event = Column(
+        Text,
+        nullable=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+        index=True,
+    )
+
+    alert_status = Column(
+        String(30),
+        nullable=False,
+        default="ACTIVE",
+        index=True,
+    )
+
+    acknowledged_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    resolved_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+
+# ============================================================
+# NOTIFICATION POLICY
+# ============================================================
+
+class NotificationPolicy(Base):
+    __tablename__ = "notification_policies"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    name = Column(String(150), unique=True, nullable=False, index=True)
+
+    enabled = Column(Boolean, nullable=False, default=True, index=True)
+
+    source = Column(String(100), nullable=True, index=True)
+
+    event_type = Column(String(100), nullable=True, index=True)
+
+    minimum_severity = Column(
+        String(50),
+        nullable=False,
+        default="INFO",
+        index=True,
+    )
+
+    email_enabled = Column(Boolean, nullable=False, default=False)
+
+    slack_enabled = Column(Boolean, nullable=False, default=False)
+
+    teams_enabled = Column(Boolean, nullable=False, default=False)
+
+    webhook_enabled = Column(Boolean, nullable=False, default=False)
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+
+# ============================================================
+# ADMIN NOTIFICATION
+# ============================================================
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    notification_id = Column(
+        String(100),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    event_id = Column(
+        String(255),
+        nullable=True,
+        index=True,
+    )
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=True,
+        index=True,
+    )
+
+    assessment_id = Column(
+        Integer,
+        ForeignKey("assessments.id"),
+        nullable=True,
+        index=True,
+    )
+
+    source = Column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+
+    event_type = Column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+
+    severity = Column(
+        String(50),
+        nullable=False,
+        index=True,
+    )
+
+    title = Column(
+        String(255),
+        nullable=False,
+    )
+
+    message = Column(
+        Text,
+        nullable=False,
+    )
+
+    target = Column(
+        String(255),
+        nullable=True,
+    )
+
+    is_read = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        index=True,
+    )
+
+    read_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+        index=True,
+    )
+
+    user = relationship("User")
+    assessment = relationship("Assessment")
+
+
+
+
+# ============================================================
+# NOTIFICATION CHANNEL CONFIGURATION
+# ============================================================
+
+class NotificationChannelConfig(Base):
+    __tablename__ = "notification_channel_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    channel = Column(
+        String(30),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    enabled = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        index=True,
+    )
+
+    # Generic destination/configuration fields.
+    endpoint = Column(
+        String(1000),
+        nullable=True,
+    )
+
+    username = Column(
+        String(255),
+        nullable=True,
+    )
+
+    # Stored secret/token/password.
+    secret = Column(
+        Text,
+        nullable=True,
+    )
+
+    # Optional JSON configuration for channel-specific settings.
+    configuration = Column(
+        Text,
+        nullable=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+
+
+# ============================================================
+# USER VAPT REPORT RUN
+# ============================================================
+
+class VAPTReportRun(Base):
+    __tablename__ = "vapt_report_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    report_run_id = Column(String(100), unique=True, nullable=False, index=True)
+    job_id = Column(String(100), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    assessment_id = Column(Integer, ForeignKey("assessments.id"), nullable=False, index=True)
+    risk_assessment_run_id = Column(Integer, ForeignKey("risk_assessment_runs.id"), nullable=True, index=True)
+
+    status = Column(String(30), nullable=False, default="RUNNING")
+    report_type = Column(String(30), nullable=False, default="COMPLETE")
+    formats = Column(Text, nullable=True)
+    canonical_data = Column(Text, nullable=True)
+
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User")
+    assessment = relationship("Assessment")
+    risk_assessment_run = relationship("RiskAssessmentRun")

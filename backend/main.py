@@ -1,3 +1,11 @@
+from network_realtime_router import router as network_realtime_router
+from credential_realtime_router import router as credential_realtime_router
+from metasploit_realtime_router import router as metasploit_realtime_router
+from access_validation_router import router as access_validation_router
+from risk_assessment_router import router as risk_assessment_router
+from tshark_snort_realtime_router import router as tshark_snort_realtime_router
+from zap_router import router as zap_router
+from juice_shop_router import router as juice_shop_router
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -9,6 +17,7 @@ from analyst import router as analyst_router
 from client import router as client_router
 from client_portal import router as client_portal_router
 from vapt import router as vapt_router
+from vapt_registry_router import router as vapt_registry_router
 from qa import router as qa_router
 from logs import router as logs_router
 from support import router as support_router
@@ -17,15 +26,39 @@ from security_findings import router as security_findings_router
 from cve import router as cve_router
 from uptime import router as uptime_router
 from server_config import router as server_config_router
+from system_health_router import router as system_health_router
 from audit import router as audit_router
 from reports import router as reports_router
 from report_generator import router as report_generator_router
+from vapt_reporting_router import router as vapt_reporting_router
+from code_security_router import router as code_security_router
 
 # Report Issues / Remediation
 from report_issues import router as report_issues_router
 
 # Security Copilot
 from copilot import router as copilot_router
+
+# MITRE ATT&CK
+from mitre_router import router as mitre_router
+
+# SOC Security Events
+from security_events_router import router as security_events_router
+
+# SOC Real-Time Events
+from realtime_router import router as realtime_router
+
+# SOC PostgreSQL Real-Time Event Listener
+from postgres_event_listener import postgres_event_listener
+from admin_notifications_router import router as admin_notifications_router
+from user_notifications_router import router as user_notifications_router
+from user_notifications_realtime_router import router as user_notifications_realtime_router
+from admin_notifications_realtime_router import router as admin_notifications_realtime_router
+from admin_notification_policies_router import router as admin_notification_policies_router
+from admin_notification_channels_router import router as admin_notification_channels_router
+
+# SOC Incident Management
+from incident import router as incident_router
 
 
 # ============================================================
@@ -44,6 +77,15 @@ app = FastAPI(
     description="Security Operations Center Platform API",
     version="1.0.0",
 )
+
+
+# ============================================================
+# POSTGRESQL REAL-TIME EVENT LISTENER
+# ============================================================
+
+@app.on_event("startup")
+def start_postgres_event_listener():
+    postgres_event_listener.start()
 
 
 # ============================================================
@@ -81,6 +123,19 @@ app.include_router(client_portal_router)
 
 # VAPT
 app.include_router(vapt_router)
+app.include_router(vapt_registry_router)
+app.include_router(network_realtime_router)
+app.include_router(metasploit_realtime_router)
+app.include_router(access_validation_router)
+app.include_router(risk_assessment_router)
+app.include_router(credential_realtime_router)
+app.include_router(tshark_snort_realtime_router)
+
+# OWASP ZAP dedicated integration
+app.include_router(zap_router)
+
+# OWASP Juice Shop Lab Integration
+app.include_router(juice_shop_router)
 
 # QA
 app.include_router(qa_router)
@@ -108,6 +163,7 @@ app.include_router(uptime_router)
 
 # Server Configuration
 app.include_router(server_config_router)
+app.include_router(system_health_router)
 
 # Audit Trail
 app.include_router(audit_router)
@@ -117,9 +173,29 @@ app.include_router(reports_router)
 
 # Reports - PDF Generator
 app.include_router(report_generator_router)
+app.include_router(vapt_reporting_router)
+app.include_router(code_security_router)
 
 # Reports - Issues / Remediation
 app.include_router(report_issues_router)
+
+# MITRE ATT&CK
+app.include_router(mitre_router)
+
+# SOC Security Events
+app.include_router(security_events_router)
+
+# SOC Real-Time Events
+app.include_router(realtime_router)
+app.include_router(admin_notifications_router)
+app.include_router(user_notifications_router)
+app.include_router(user_notifications_realtime_router)
+app.include_router(admin_notifications_realtime_router)
+app.include_router(admin_notification_policies_router)
+app.include_router(admin_notification_channels_router)
+
+# SOC Incident Management
+app.include_router(incident_router)
 
 
 # ============================================================

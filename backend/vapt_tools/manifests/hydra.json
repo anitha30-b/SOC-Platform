@@ -1,0 +1,16 @@
+{
+  "id": "hydra",
+  "name": "Hydra",
+  "stage": "06 Credential Testing",
+  "category": "Credential Testing",
+  "execution_type": "credential_tester",
+  "executable": "hydra",
+  "target_types": [
+    "host",
+    "ip",
+    "url"
+  ],
+  "enabled": true,
+  "integrated": false,
+  "description": "Network login credential testing tool for authorized security assessments"
+}

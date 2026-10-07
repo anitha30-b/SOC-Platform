@@ -1,0 +1,16 @@
+{
+  "id": "masscan",
+  "name": "Masscan",
+  "stage": "02 Scanning & Enumeration",
+  "category": "Scanning & Enumeration",
+  "execution_type": "scanner",
+  "executable": "masscan",
+  "target_types": [
+    "host",
+    "ip",
+    "cidr"
+  ],
+  "enabled": true,
+  "integrated": false,
+  "description": "High-speed port discovery"
+}

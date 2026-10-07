@@ -1,8 +1,36 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 import { jsPDF } from "jspdf";
+import AdminNotificationPolicies from "./components/AdminNotificationPolicies";
+import AdminNotificationChannel from "./components/AdminNotificationChannel";
 
 const API_URL = "http://127.0.0.1:8000";
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function renderNmapHtmlContent(nmapData) {
+  const hosts = Array.isArray(nmapData?.results?.hosts) ? nmapData.results.hosts : [];
+  const ports = hosts.flatMap((host) => Array.isArray(host?.ports)
+    ? host.ports.map((port) => ({ ...port, host: host?.addresses?.[0]?.address || "—" })) : []);
+  const scripts = hosts.flatMap((host) => [
+    ...(Array.isArray(host?.scripts) ? host.scripts : []),
+    ...(Array.isArray(host?.ports) ? host.ports.flatMap((p) => Array.isArray(p?.scripts) ? p.scripts : []) : [])
+  ]);
+  const osMatches = hosts.flatMap((host) => Array.isArray(host?.os_matches) ? host.os_matches : []);
+  return `
+<h2>Port & Service Results</h2>
+<table><thead><tr><th>Host</th><th>Port</th><th>Protocol</th><th>State</th><th>Service</th><th>Product</th><th>Version</th></tr></thead>
+<tbody>${ports.map((p) => `<tr><td>${escapeHtml(p.host)}</td><td>${escapeHtml(p.port)}</td><td>${escapeHtml(p.protocol)}</td><td>${escapeHtml(p.state)}</td><td>${escapeHtml(p.service?.name)}</td><td>${escapeHtml(p.service?.product)}</td><td>${escapeHtml(p.service?.version)}</td></tr>`).join("") || "<tr><td colspan='7'>No port results.</td></tr>"}</tbody></table>
+<h2>OS Detection</h2>${osMatches.map((o) => `<div class="card">${escapeHtml(o.name || "Unknown OS")} — Accuracy: ${escapeHtml(o.accuracy || "—")}%</div>`).join("") || "<p>No OS detection results.</p>"}
+<h2>NSE / Security Findings</h2>${scripts.map((s) => `<div class="card"><b>${escapeHtml(s.id || "NSE script")}</b><pre>${escapeHtml(s.output || "No output")}</pre></div>`).join("") || "<p>No NSE results.</p>"}
+<h2>Warnings / Errors</h2>${(Array.isArray(nmapData?.errors) ? nmapData.errors : []).map((e) => `<div class="card">${escapeHtml(e)}</div>`).join("") || "<p>No warnings or errors.</p>"}
+<h2>Raw Nmap Output</h2><pre>${escapeHtml(nmapData?.raw_output || nmapData?.stdout || nmapData?.output || JSON.stringify(nmapData, null, 2))}</pre>`;
+}
 
 function App() {
   const [page, setPage] = useState("home");
@@ -303,6 +331,19 @@ function App() {
       <UserLogin
         onBack={() => setPage("home")}
         onSuccess={() => setPage("user-dashboard")}
+        onRegister={() => setPage("user-register")}
+      />
+    );
+  }
+
+  // =========================
+  // USER REGISTER
+  // =========================
+  if (page === "user-register") {
+    return (
+      <UserRegister
+        onBack={() => setPage("user-login")}
+        onSuccess={() => setPage("user-login")}
       />
     );
   }
@@ -501,7 +542,9 @@ function AdminLogin({ onBack, onSuccess }) {
 
                 {error && (
                   <div className="mt-5 border border-red-600/30 bg-red-600/10 px-4 py-3 text-sm text-red-400">
-                    {error}
+                    {typeof error === "string"
+                    ? error
+                    : JSON.stringify(error, null, 2)}
                   </div>
                 )}
 
@@ -533,33 +576,1176 @@ function AdminLogin({ onBack, onSuccess }) {
 
 
 // ==================================================
-// ADMIN DASHBOARD
+// SOC PLATFORM — ADMIN DASHBOARD
+// Reference-inspired black / red / white UI
+// IMPORTANT: Existing API/data logic is preserved.
 // ==================================================
-function AdminDashboard({ onLogout }) {
 
+const ADMIN_NAV = [
+  {
+    id: "overview",
+    label: "Overview",
+    icon: "⌂",
+    items: [
+      ["Security Overview", "dashboard"],
+      ["Environment Health", "admin-environment"],
+      ["Security Posture", "admin-posture"],
+      ["Risk Overview", "admin-risk"],
+    ],
+  },
+  {
+    id: "access",
+    label: "User & Access Management",
+    icon: "♙",
+    items: [
+      ["Users", "users"],
+      ["Roles", "admin-roles"],
+      ["Permissions", "admin-permissions"],
+      ["Teams", "admin-teams"],
+      ["Service Accounts", "admin-service-accounts"],
+      ["API Keys", "admin-api-keys"],
+      ["Sessions", "admin-sessions"],
+    ],
+  },
+  {
+    id: "assets",
+    label: "Asset Management",
+    icon: "▣",
+    items: [
+      ["Asset Inventory", "admin-asset-inventory"],
+      ["Asset Discovery", "admin-asset-discovery"],
+      ["Servers", "admin-servers"],
+      ["Endpoints", "admin-endpoints"],
+      ["Network Devices", "admin-network-devices"],
+      ["Applications", "admin-applications"],
+      ["Cloud Assets", "admin-cloud-assets"],
+      ["Asset Groups", "admin-asset-groups"],
+    ],
+  },
+  {
+    id: "integrations",
+    label: "Integrations",
+    icon: "⌘",
+    items: [
+      ["SIEM Integrations", "admin-siem-integrations"],
+      ["Ticketing", "admin-ticketing"],
+      ["Email", "admin-email"],
+      ["Slack", "admin-slack"],
+      ["Microsoft Teams", "admin-teams-integration"],
+      ["Webhooks", "admin-webhooks"],
+      ["AWS", "admin-aws"],
+      ["Azure", "admin-azure"],
+      ["GCP", "admin-gcp"],
+      ["API Integrations", "admin-api-integrations"],
+    ],
+  },
+  {
+    id: "security-config",
+    label: "Security Configuration",
+    icon: "⚙",
+    items: [
+      ["Security Policies", "admin-security-policies"],
+      ["Security Baselines", "admin-security-baselines"],
+      ["Detection Configuration", "admin-detection-config"],
+      ["Alert Configuration", "admin-alert-config"],
+      ["Retention Policies", "admin-retention"],
+      ["Configuration", "admin-configuration"],
+    ],
+  },
+  {
+    id: "notifications",
+    label: "Notifications",
+    icon: "♧",
+    items: [
+      ["Notification Center", "admin-notification-center"],
+      ["Notification Policies", "admin-notification-policies"],
+      ["Email Alerts", "admin-email-alerts"],
+      ["Slack Alerts", "admin-slack-alerts"],
+      ["Teams Alerts", "admin-teams-alerts"],
+      ["Webhooks", "admin-notification-webhooks"],
+    ],
+  },
+  {
+    id: "compliance",
+    label: "Compliance",
+    icon: "✓",
+    items: [
+      ["Compliance Dashboard", "admin-compliance"],
+      ["ISO 27001", "admin-iso27001"],
+      ["SOC 2", "admin-soc2"],
+      ["NIST", "admin-nist"],
+      ["CIS Controls", "admin-cis"],
+      ["PCI DSS", "admin-pcidss"],
+      ["Compliance Reports", "admin-compliance-reports"],
+    ],
+  },
+  {
+    id: "audit",
+    label: "Audit Trail",
+    icon: "▤",
+    items: [
+      ["User Activity", "admin-user-activity"],
+      ["Admin Activity", "admin-admin-activity"],
+      ["Login History", "admin-login-history"],
+      ["Permission Changes", "admin-permission-changes"],
+      ["Configuration Changes", "admin-configuration-changes"],
+      ["API Activity", "admin-api-activity"],
+      ["Audit Export", "admin-audit-export"],
+    ],
+  },
+  {
+    id: "system",
+    label: "System",
+    icon: "◈",
+    items: [
+      ["System Health", "admin-system-health"],
+      ["API Health", "admin-api-health"],
+      ["Database Health", "admin-database-health"],
+      ["Log Pipeline Health", "admin-log-pipeline-health"],
+      ["Agent Health", "admin-agent-health"],
+      ["Background Jobs", "admin-background-jobs"],
+      ["System Logs", "admin-system-logs"],
+      ["Backup", "admin-backup"],
+      ["License", "admin-license"],
+    ],
+  },
+];
+
+function AdminReferenceNavGroup({
+  group,
+  open,
+  onToggle,
+  activeMenu,
+  onSelect,
+}) {
+  return (
+    <div className="mb-1">
+      <button
+        type="button"
+        onClick={onToggle}
+        className={`flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left transition ${
+          open
+            ? "bg-white/[0.025] text-white"
+            : "text-gray-400 hover:bg-white/[0.025] hover:text-white"
+        }`}
+      >
+        <span
+          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md border text-xs ${
+            open
+              ? "border-red-500/40 bg-red-600/10 text-red-400"
+              : "border-white/10 bg-black/20 text-gray-500"
+          }`}
+        >
+          {group.icon}
+        </span>
+
+        <span className="min-w-0 flex-1 text-[11px] font-semibold tracking-wide">
+          {group.label}
+        </span>
+
+        <span
+          className={`text-xs transition-transform ${
+            open ? "rotate-180 text-red-400" : "text-gray-600"
+          }`}
+        >
+          ⌄
+        </span>
+      </button>
+
+      {open && (
+        <div className="ml-3 border-l border-white/10 pl-2 pb-1">
+          {group.items.map(([label, id]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => onSelect(id)}
+              className={`group flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-[11px] transition ${
+                activeMenu === id
+                  ? "bg-red-600 text-white shadow-[0_0_18px_rgba(220,38,38,0.16)]"
+                  : "text-gray-500 hover:bg-white/[0.035] hover:text-white"
+              }`}
+            >
+              <span
+                className={`h-1 w-1 rounded-full ${
+                  activeMenu === id
+                    ? "bg-white"
+                    : "bg-gray-700 group-hover:bg-red-500"
+                }`}
+              />
+              <span className="truncate">{label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminReferenceKpi({
+  icon,
+  title,
+  value,
+  change,
+  subtitle,
+  tone = "red",
+}) {
+  const toneClass =
+    tone === "green"
+      ? "bg-green-600/10 border-green-500/20 text-green-400"
+      : tone === "yellow"
+      ? "bg-yellow-500/10 border-yellow-500/20 text-yellow-300"
+      : "bg-red-600/10 border-red-500/25 text-red-400";
+
+  return (
+    <div className="group rounded-lg border border-white/10 bg-[#0d1114] p-4 transition hover:border-red-500/35 hover:bg-[#101417]">
+      <div className="flex items-start justify-between gap-3">
+        <div
+          className={`flex h-11 w-11 items-center justify-center rounded-md border text-lg ${toneClass}`}
+        >
+          {icon}
+        </div>
+
+        {change && (
+          <span
+            className={`text-xs font-semibold ${
+              String(change).includes("↓")
+                ? "text-green-400"
+                : "text-green-400"
+            }`}
+          >
+            {change}
+          </span>
+        )}
+      </div>
+
+      <p className="mt-4 text-[10px] uppercase tracking-[0.16em] text-gray-500">
+        {title}
+      </p>
+
+      <p className="mt-1 text-2xl font-bold tracking-tight text-white">
+        {value}
+      </p>
+
+      <p className="mt-2 text-[10px] text-gray-500">{subtitle}</p>
+    </div>
+  );
+}
+
+function AdminReferencePanel({ title, action, children, className = "" }) {
+  return (
+    <section
+      className={`overflow-hidden rounded-lg border border-white/10 bg-[#0b1014] ${className}`}
+    >
+      <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+        <h2 className="text-sm font-semibold text-white">{title}</h2>
+        {action && (
+          <button
+            type="button"
+            className="text-[10px] font-medium text-red-400 transition hover:text-red-300"
+          >
+            {action} →
+          </button>
+        )}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function AdminReferenceStatus({ children, tone = "green" }) {
+  const classes = {
+    green: "bg-green-500/15 text-green-400 border-green-500/20",
+    red: "bg-red-500/15 text-red-400 border-red-500/20",
+    yellow: "bg-yellow-500/15 text-yellow-300 border-yellow-500/20",
+    blue: "bg-blue-500/15 text-blue-300 border-blue-500/20",
+  };
+
+  return (
+    <span
+      className={`inline-flex rounded-md border px-2 py-1 text-[9px] font-semibold ${classes[tone] || classes.green}`}
+    >
+      {children}
+    </span>
+  );
+}
+
+function AdminReferenceBars({ values }) {
+  const max = Math.max(...values.map((item) => Number(item.value) || 0), 1);
+
+  return (
+    <div className="flex h-48 items-end gap-3 px-4 pb-4 pt-5">
+      {values.map((item) => (
+        <div key={item.label} className="flex min-w-0 flex-1 flex-col items-center gap-2">
+          <span className="text-[9px] text-gray-400">{item.value}</span>
+          <div className="flex h-32 w-full items-end">
+            <div
+              className="w-full rounded-t-sm bg-red-500/85 transition hover:bg-red-400"
+              style={{
+                height: `${Math.max((Number(item.value) / max) * 100, 4)}%`,
+              }}
+            />
+          </div>
+          <span className="w-full truncate text-center text-[9px] text-gray-500">
+            {item.label}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AdminReferenceDonut({ value, label = "Total" }) {
+  const numeric = Number(value) || 0;
+  const degrees = Math.min(Math.max(numeric, 0), 100) * 3.6;
+
+  return (
+    <div className="flex items-center justify-center p-5">
+      <div
+        className="relative flex h-36 w-36 items-center justify-center rounded-full"
+        style={{
+          background: `conic-gradient(#ef3340 0deg ${degrees}deg, #27313a ${degrees}deg 360deg)`,
+        }}
+      >
+        <div className="flex h-24 w-24 flex-col items-center justify-center rounded-full bg-[#0b1014]">
+          <span className="text-2xl font-bold text-white">{numeric}</span>
+          <span className="text-[10px] text-gray-500">{label}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminReferenceActivityChart({ assessments }) {
+  const total = Math.max(assessments.length, 1);
+  const points = Array.from({ length: 18 }, (_, index) => {
+    const wave = Math.sin(index * 0.85) * 0.28 + 0.62;
+    return Math.max(6, Math.round(total * wave));
+  });
+
+  const max = Math.max(...points, 10);
+  const width = 720;
+  const height = 210;
+
+  const makePoints = (factor, offset) =>
+    points
+      .map((value, index) => {
+        const x = (index / (points.length - 1)) * width;
+        const y =
+          height -
+          Math.min((value * factor + offset) / max, 1) * (height - 25);
+        return `${x},${y}`;
+      })
+      .join(" ");
+
+  return (
+    <div className="p-4">
+      <div className="mb-3 flex flex-wrap items-center gap-4 text-[10px] text-gray-400">
+        <span className="flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-red-500" />
+          Total Assessments
+        </span>
+        <span className="flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-orange-500" />
+          VAPT
+        </span>
+        <span className="flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-yellow-400" />
+          QA Testing
+        </span>
+      </div>
+
+      <div className="overflow-hidden">
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
+          className="h-52 w-full"
+          preserveAspectRatio="none"
+        >
+          {[0, 1, 2, 3, 4].map((line) => {
+            const y = 20 + line * ((height - 35) / 4);
+            return (
+              <line
+                key={line}
+                x1="0"
+                y1={y}
+                x2={width}
+                y2={y}
+                stroke="rgba(255,255,255,0.07)"
+                strokeWidth="1"
+              />
+            );
+          })}
+
+          <polyline
+            fill="none"
+            stroke="#ef3340"
+            strokeWidth="3"
+            points={makePoints(1, 0)}
+          />
+          <polyline
+            fill="none"
+            stroke="#f97316"
+            strokeWidth="2.5"
+            points={makePoints(0.58, 0)}
+          />
+          <polyline
+            fill="none"
+            stroke="#facc15"
+            strokeWidth="2"
+            points={makePoints(0.28, 0)}
+          />
+        </svg>
+      </div>
+
+      <div className="mt-1 flex justify-between px-1 text-[9px] text-gray-600">
+        {["00:00", "04:00", "08:00", "12:00", "16:00", "20:00"].map((time) => (
+          <span key={time}>{time}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AdminReferenceTargetMap({ users, assessments }) {
+  const targetCount = assessments.length || users.length || 0;
+
+  return (
+    <div className="relative h-52 overflow-hidden p-4">
+      <div
+        className="absolute inset-4 rounded-md opacity-70"
+        style={{
+          backgroundImage:
+            "radial-gradient(circle at 18% 38%, rgba(239,51,64,.95) 0 3px, transparent 4px), radial-gradient(circle at 42% 30%, rgba(239,51,64,.95) 0 3px, transparent 4px), radial-gradient(circle at 64% 45%, rgba(239,51,64,.95) 0 3px, transparent 4px), radial-gradient(circle at 78% 28%, rgba(239,51,64,.95) 0 3px, transparent 4px), linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px)",
+          backgroundSize: "100% 100%, 100% 100%, 100% 100%, 100% 100%, 32px 32px, 32px 32px",
+        }}
+      />
+
+      <svg className="absolute inset-4 h-[calc(100%-2rem)] w-[calc(100%-2rem)]">
+        <path
+          d="M18% 38% Q30% 12% 42% 30% T64% 45% T78% 28%"
+          fill="none"
+          stroke="#ef3340"
+          strokeWidth="1.5"
+          strokeDasharray="5 5"
+          opacity="0.8"
+        />
+        <path
+          d="M18% 38% Q38% 52% 64% 45%"
+          fill="none"
+          stroke="#ef3340"
+          strokeWidth="1"
+          opacity="0.45"
+        />
+      </svg>
+
+      <div className="absolute bottom-4 left-4 rounded-md border border-white/10 bg-black/60 px-3 py-2">
+        <p className="text-[9px] uppercase tracking-wider text-gray-500">
+          Active targets
+        </p>
+        <p className="mt-1 text-lg font-bold text-white">{targetCount}</p>
+      </div>
+
+      <div className="absolute right-4 top-4 text-right">
+        <p className="text-[9px] uppercase tracking-wider text-gray-500">
+          Target Activity
+        </p>
+        <p className="mt-1 text-xs font-semibold text-red-400">
+          ● Monitoring
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function AdminReferenceModule({
+  menu,
+  title,
+  description,
+  onBack,
+}) {
+  return (
+    <div>
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.25em] text-red-500">
+            Administration
+          </p>
+          <h1 className="mt-2 text-2xl font-bold text-white">{title}</h1>
+          <p className="mt-2 max-w-2xl text-xs leading-5 text-gray-500">
+            {description}
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={onBack}
+          className="rounded-md border border-white/10 px-3 py-2 text-[10px] text-gray-400 transition hover:border-red-500/40 hover:text-white"
+        >
+          ← Overview
+        </button>
+      </div>
+
+      <AdminReferencePanel title={title}>
+        <div className="p-8">
+          <div className="rounded-lg border border-dashed border-white/10 bg-black/20 p-10 text-center">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-red-500/25 bg-red-500/10 text-red-400">
+              {menu === "users" ? "♙" : "⚙"}
+            </div>
+            <h2 className="mt-4 text-base font-semibold text-white">
+              {title}
+            </h2>
+            <p className="mx-auto mt-2 max-w-xl text-xs leading-5 text-gray-600">
+              The navigation and visual framework are ready. Existing backend
+              functionality is preserved; this section will be connected to
+              its corresponding API/database workflow as that Admin module is
+              implemented.
+            </p>
+          </div>
+        </div>
+      </AdminReferencePanel>
+    </div>
+  );
+}
+
+
+function AdminNotificationCenter() {
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [severity, setSeverity] = useState("");
+  const [source, setSource] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [wsConnected, setWsConnected] = useState(false);
+
+  const loadNotifications = async () => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      setError("Admin session expired. Please login again.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError("");
+
+      const params = new URLSearchParams();
+      params.set("limit", "100");
+
+      if (severity) {
+        params.set("severity", severity);
+      }
+
+      if (source) {
+        params.set("source", source);
+      }
+
+      const response = await axios.get(
+        `${API_URL}/admin/notifications?${params.toString()}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setNotifications(response.data.notifications || []);
+    } catch (err) {
+      console.error("Unable to load notifications:", err);
+      setError(
+        err.response?.data?.detail ||
+          "Unable to load Admin notifications."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadUnreadCount = async () => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      return;
+    }
+
+    try {
+      const response = await axios.get(
+        `${API_URL}/admin/notifications/unread-count`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setUnreadCount(Number(response.data.unread_count || 0));
+    } catch (err) {
+      console.error("Unable to load notification count:", err);
+    }
+  };
+
+  useEffect(() => {
+    loadNotifications();
+  }, [severity, source]);
+
+  useEffect(() => {
+    loadUnreadCount();
+
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      return undefined;
+    }
+
+    let socket = null;
+    let reconnectTimer = null;
+    let stopped = false;
+
+    const connect = () => {
+      if (stopped) {
+        return;
+      }
+
+      const protocol =
+        window.location.protocol === "https:" ? "wss:" : "ws:";
+
+      const host =
+        API_URL.replace(/^https?:\/\//, "").replace(/\/$/, "");
+
+      socket = new WebSocket(
+        `${protocol}//${host}/ws/admin/notifications?token=${encodeURIComponent(token)}`
+      );
+
+      socket.onopen = () => {
+        setWsConnected(true);
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const incoming = JSON.parse(event.data);
+
+          if (incoming.type !== "notification") {
+            return;
+          }
+
+          setNotifications((current) => {
+            if (
+              current.some(
+                (item) =>
+                  item.notification_id === incoming.notification_id
+              )
+            ) {
+              return current;
+            }
+
+            if (
+              severity &&
+              String(incoming.severity || "").toUpperCase() !== severity
+            ) {
+              return current;
+            }
+
+            if (
+              source &&
+              String(incoming.source || "") !== source
+            ) {
+              return current;
+            }
+
+            return [incoming, ...current].slice(0, 100);
+          });
+
+          setUnreadCount((current) => current + 1);
+        } catch (err) {
+          console.error("Invalid notification WebSocket payload:", err);
+        }
+      };
+
+      socket.onerror = (event) => {
+        console.error("Notification WebSocket error:", event);
+      };
+
+      socket.onclose = () => {
+        setWsConnected(false);
+
+        if (!stopped) {
+          reconnectTimer = window.setTimeout(connect, 3000);
+        }
+      };
+    };
+
+    connect();
+
+    return () => {
+      stopped = true;
+
+      if (reconnectTimer) {
+        window.clearTimeout(reconnectTimer);
+      }
+
+      if (socket) {
+        socket.close();
+      }
+    };
+  }, [severity, source]);
+
+  const markRead = async (notification) => {
+    const token = localStorage.getItem("token");
+
+    try {
+      const response = await axios.patch(
+        `${API_URL}/admin/notifications/${notification.notification_id}/read`,
+        {},
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setNotifications((current) =>
+        current.map((item) =>
+          item.notification_id === notification.notification_id
+            ? response.data
+            : item
+        )
+      );
+
+      setUnreadCount((current) =>
+        notification.is_read ? current : Math.max(0, current - 1)
+      );
+    } catch (err) {
+      console.error("Unable to mark notification as read:", err);
+    }
+  };
+
+  const markUnread = async (notification) => {
+    const token = localStorage.getItem("token");
+
+    try {
+      const response = await axios.patch(
+        `${API_URL}/admin/notifications/${notification.notification_id}/unread`,
+        {},
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setNotifications((current) =>
+        current.map((item) =>
+          item.notification_id === notification.notification_id
+            ? response.data
+            : item
+        )
+      );
+
+      setUnreadCount((current) =>
+        notification.is_read ? current + 1 : current
+      );
+    } catch (err) {
+      console.error("Unable to mark notification as unread:", err);
+    }
+  };
+
+  const markAllRead = async () => {
+    const token = localStorage.getItem("token");
+
+    try {
+      await axios.patch(
+        `${API_URL}/admin/notifications/read-all`,
+        {},
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setNotifications((current) =>
+        current.map((item) => ({
+          ...item,
+          is_read: true,
+          read_at: new Date().toISOString(),
+        }))
+      );
+
+      setUnreadCount(0);
+    } catch (err) {
+      console.error("Unable to mark all notifications as read:", err);
+    }
+  };
+
+  const deleteNotification = async (notification) => {
+    const token = localStorage.getItem("token");
+
+    try {
+      await axios.delete(
+        `${API_URL}/admin/notifications/${notification.notification_id}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setNotifications((current) =>
+        current.filter(
+          (item) =>
+            item.notification_id !== notification.notification_id
+        )
+      );
+
+      if (!notification.is_read) {
+        setUnreadCount((current) => Math.max(0, current - 1));
+      }
+    } catch (err) {
+      console.error("Unable to delete notification:", err);
+    }
+  };
+
+  const formatTime = (value) => {
+    if (!value) {
+      return "—";
+    }
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+
+    return date.toLocaleString();
+  };
+
+  const severityClass = (value) => {
+    const normalized = String(value || "INFO").toUpperCase();
+
+    if (normalized === "CRITICAL") {
+      return "border-red-600/60 bg-red-600/10 text-red-400";
+    }
+
+    if (normalized === "HIGH") {
+      return "border-orange-500/50 bg-orange-500/10 text-orange-400";
+    }
+
+    if (normalized === "MEDIUM") {
+      return "border-yellow-500/50 bg-yellow-500/10 text-yellow-400";
+    }
+
+    if (normalized === "LOW") {
+      return "border-blue-500/50 bg-blue-500/10 text-blue-400";
+    }
+
+    return "border-white/10 bg-white/5 text-gray-400";
+  };
+
+  const sources = Array.from(
+    new Set(
+      notifications
+        .map((item) => item.source)
+        .filter(Boolean)
+    )
+  ).sort();
+
+  return (
+    <div>
+      <div className="mb-6 flex flex-col justify-between gap-4 xl:flex-row xl:items-end">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.25em] text-red-500">
+            Administration / Notifications
+          </p>
+
+          <h1 className="mt-2 text-2xl font-bold text-white">
+            Notification Center
+          </h1>
+
+          <p className="mt-2 max-w-2xl text-xs leading-5 text-gray-500">
+            Real-time security event notifications generated by the SOC
+            Platform.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            className={`border px-3 py-2 text-[10px] ${
+              wsConnected
+                ? "border-green-500/30 bg-green-500/5 text-green-400"
+                : "border-yellow-500/30 bg-yellow-500/5 text-yellow-400"
+            }`}
+          >
+            ● {wsConnected ? "REAL-TIME CONNECTED" : "RECONNECTING"}
+          </span>
+
+          <span className="border border-red-500/30 bg-red-500/5 px-3 py-2 text-[10px] text-red-400">
+            {unreadCount} unread
+          </span>
+
+          <button
+            type="button"
+            onClick={() => {
+              loadNotifications();
+              loadUnreadCount();
+            }}
+            className="border border-white/10 px-3 py-2 text-[10px] text-gray-400 hover:border-white/30 hover:text-white"
+          >
+            Refresh
+          </button>
+
+          <button
+            type="button"
+            onClick={markAllRead}
+            disabled={unreadCount === 0}
+            className="border border-white/10 px-3 py-2 text-[10px] text-gray-400 hover:border-red-500/40 hover:text-white disabled:opacity-30"
+          >
+            Mark all read
+          </button>
+        </div>
+      </div>
+
+      <div className="mb-5 grid gap-3 border border-white/10 bg-black/20 p-4 md:grid-cols-3">
+        <div>
+          <label className="mb-2 block text-[10px] uppercase tracking-wider text-gray-600">
+            Severity
+          </label>
+
+          <select
+            value={severity}
+            onChange={(event) => setSeverity(event.target.value)}
+            className="w-full border border-white/10 bg-[#080b0e] px-3 py-2 text-xs text-white outline-none"
+          >
+            <option value="">All severities</option>
+            <option value="CRITICAL">Critical</option>
+            <option value="HIGH">High</option>
+            <option value="MEDIUM">Medium</option>
+            <option value="LOW">Low</option>
+            <option value="INFO">Info</option>
+            <option value="ERROR">Error</option>
+          </select>
+        </div>
+
+        <div>
+          <label className="mb-2 block text-[10px] uppercase tracking-wider text-gray-600">
+            Source
+          </label>
+
+          <select
+            value={source}
+            onChange={(event) => setSource(event.target.value)}
+            className="w-full border border-white/10 bg-[#080b0e] px-3 py-2 text-xs text-white outline-none"
+          >
+            <option value="">All sources</option>
+            {sources.map((item) => (
+              <option key={item} value={item}>
+                {item}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex items-end">
+          <div className="w-full border border-white/10 bg-[#080b0e] px-3 py-2">
+            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+              Loaded notifications
+            </p>
+            <p className="mt-1 text-lg font-bold text-white">
+              {notifications.length}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {error && (
+        <div className="mb-5 border border-red-600/40 bg-red-600/5 p-4 text-xs text-red-400">
+          {error}
+        </div>
+      )}
+
+      <div className="border border-white/10">
+        <div className="border-b border-white/10 px-5 py-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-white">
+                Security Notifications
+              </h2>
+              <p className="mt-1 text-[10px] text-gray-600">
+                New events are delivered through the authenticated
+                Admin WebSocket.
+              </p>
+            </div>
+
+            <span className="text-[10px] text-gray-600">
+              {notifications.length} records
+            </span>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="p-10 text-center text-xs text-gray-500">
+            Loading notifications...
+          </div>
+        ) : notifications.length === 0 ? (
+          <div className="p-10 text-center">
+            <p className="text-sm font-semibold text-gray-400">
+              No notifications
+            </p>
+            <p className="mt-2 text-[10px] text-gray-600">
+              New security events will appear here in real time.
+            </p>
+          </div>
+        ) : (
+          <div className="divide-y divide-white/5">
+            {notifications.map((notification) => (
+              <div
+                key={notification.notification_id}
+                className={`p-5 transition ${
+                  notification.is_read
+                    ? "bg-transparent"
+                    : "bg-red-500/[0.025]"
+                }`}
+              >
+                <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`border px-2 py-1 text-[9px] font-semibold uppercase ${severityClass(
+                          notification.severity
+                        )}`}
+                      >
+                        {notification.severity || "INFO"}
+                      </span>
+
+                      <span className="border border-white/10 px-2 py-1 text-[9px] text-gray-500">
+                        {notification.source || "unknown"}
+                      </span>
+
+                      {!notification.is_read && (
+                        <span className="text-[9px] font-semibold uppercase tracking-wider text-red-400">
+                          Unread
+                        </span>
+                      )}
+                    </div>
+
+                    <h3 className="mt-3 text-sm font-semibold text-white">
+                      {notification.title || "Security Notification"}
+                    </h3>
+
+                    <p className="mt-2 text-xs leading-5 text-gray-400">
+                      {notification.message}
+                    </p>
+
+                    <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-[9px] text-gray-600">
+                      <span>
+                        Event: {notification.event_type || "security_event"}
+                      </span>
+
+                      {notification.target && (
+                        <span>
+                          Target: {notification.target}
+                        </span>
+                      )}
+
+                      <span>
+                        {formatTime(notification.created_at)}
+                      </span>
+
+                      <span>
+                        ID: {notification.notification_id}
+                      </span>
+                    </div>
+
+                    {(notification.email_delivery || notification.slack_delivery || notification.webhook_delivery) && (
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        {notification.email_delivery && (
+                          <span className="border border-green-500/30 bg-green-500/5 px-2 py-1 text-[9px] text-green-400">
+                            EMAIL: {notification.email_delivery.sent ? "SENT" : notification.email_delivery.attempted ? "FAILED" : "NOT ATTEMPTED"}
+                          </span>
+                        )}
+
+                        {notification.slack_delivery && (
+                          <span className="border border-green-500/30 bg-green-500/5 px-2 py-1 text-[9px] text-green-400">
+                            SLACK: {notification.slack_delivery.sent ? "SENT" : notification.slack_delivery.attempted ? "FAILED" : "NOT ATTEMPTED"}
+                          </span>
+                        )}
+
+                        {notification.webhook_delivery && (
+                          <span className="border border-green-500/30 bg-green-500/5 px-2 py-1 text-[9px] text-green-400">
+                            WEBHOOK: {notification.webhook_delivery.sent ? "SENT" : notification.webhook_delivery.attempted ? "FAILED" : "NOT ATTEMPTED"}
+                          </span>
+                        )}
+                      </div>
+                      )}
+                    </div>
+
+                    <div className="flex shrink-0 flex-wrap gap-2 xl:justify-end">
+                    {notification.is_read ? (
+                      <button
+                        type="button"
+                        onClick={() => markUnread(notification)}
+                        className="border border-white/10 px-3 py-2 text-[9px] text-gray-500 hover:border-white/30 hover:text-white"
+                      >
+                        Mark unread
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => markRead(notification)}
+                        className="border border-green-500/20 px-3 py-2 text-[9px] text-green-400 hover:bg-green-500/5"
+                      >
+                        Mark read
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => deleteNotification(notification)}
+                      className="border border-red-500/20 px-3 py-2 text-[9px] text-red-400 hover:bg-red-500/5"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AdminDashboard({ onLogout }) {
   const [dashboard, setDashboard] = useState(null);
   const [users, setUsers] = useState([]);
-
   const [assessments, setAssessments] = useState([]);
   const [assessmentLoading, setAssessmentLoading] = useState(false);
   const [assessmentError, setAssessmentError] = useState("");
-
   const [supportTickets, setSupportTickets] = useState([]);
   const [supportTicketLoading, setSupportTicketLoading] = useState(false);
   const [supportTicketError, setSupportTicketError] = useState("");
-
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-
   const [activeMenu, setActiveMenu] = useState("dashboard");
+  const [juiceShopStatus, setJuiceShopStatus] = useState(null);
+  const [juiceShopChallenges, setJuiceShopChallenges] = useState([]);
+  const [juiceShopLoading, setJuiceShopLoading] = useState(false);
 
+  const [openGroups, setOpenGroups] = useState({
+    overview: true,
+    access: true,
+    assets: false,
+    integrations: false,
+    "security-config": false,
+    notifications: false,
+    compliance: false,
+    audit: false,
+    system: false,
+  });
 
   useEffect(() => {
-
     const loadDashboard = async () => {
-
       try {
-
         const token = localStorage.getItem("token");
 
         if (!token) {
@@ -579,7 +1765,6 @@ function AdminDashboard({ onLogout }) {
 
         setDashboard(dashboardResponse.data);
 
-
         const usersResponse = await axios.get(
           `${API_URL}/admin/users`,
           config
@@ -596,19 +1781,12 @@ function AdminDashboard({ onLogout }) {
             config
           );
 
-          setAssessments(
-            assessmentsResponse.data.assessments || []
-          );
+          setAssessments(assessmentsResponse.data.assessments || []);
         } catch (assessmentErr) {
-          console.error(
-            "Unable to load assessments:",
-            assessmentErr
-          );
+          console.error("Unable to load assessments:", assessmentErr);
 
           if (assessmentErr.response?.data?.detail) {
-            setAssessmentError(
-              assessmentErr.response.data.detail
-            );
+            setAssessmentError(assessmentErr.response.data.detail);
           } else {
             setAssessmentError(
               "Unable to load assessment monitoring data."
@@ -628,31 +1806,20 @@ function AdminDashboard({ onLogout }) {
           );
 
           setSupportTickets(
-            Array.isArray(ticketResponse.data)
-              ? ticketResponse.data
-              : []
+            Array.isArray(ticketResponse.data) ? ticketResponse.data : []
           );
         } catch (ticketErr) {
-          console.error(
-            "Unable to load support tickets:",
-            ticketErr
-          );
+          console.error("Unable to load support tickets:", ticketErr);
 
           if (ticketErr.response?.data?.detail) {
-            setSupportTicketError(
-              ticketErr.response.data.detail
-            );
+            setSupportTicketError(ticketErr.response.data.detail);
           } else {
-            setSupportTicketError(
-              "Unable to load support ticket data."
-            );
+            setSupportTicketError("Unable to load support ticket data.");
           }
         } finally {
           setSupportTicketLoading(false);
         }
-
       } catch (err) {
-
         console.error(err);
 
         if (err.response?.status === 401) {
@@ -662,597 +1829,838 @@ function AdminDashboard({ onLogout }) {
         } else {
           setError("Unable to load administrator data.");
         }
-
       } finally {
-
         setLoading(false);
-
       }
     };
 
     loadDashboard();
-
   }, []);
 
+  const totalUsers = dashboard?.total_users ?? users.length ?? 0;
 
-  const totalUsers =
-    dashboard?.total_users ??
-    users.length ??
-    0;
+  const activeAssessments = assessments.filter((item) => {
+    const status = String(item.status || "").toLowerCase();
+    return ["running", "queued", "pending", "in_progress", "active"].includes(
+      status
+    );
+  }).length;
 
+  const completedAssessments = assessments.filter((item) => {
+    const status = String(item.status || "").toLowerCase();
+    return ["completed", "complete", "success"].includes(status);
+  }).length;
 
-  return (
-    <div className="min-h-screen bg-[#080808] text-white">
+  const failedAssessments = assessments.filter((item) => {
+    const status = String(item.status || "").toLowerCase();
+    return ["failed", "error"].includes(status);
+  }).length;
 
-      {/* TOP BAR */}
-      <header className="fixed left-0 right-0 top-0 z-50 border-b border-white/10 bg-[#080808]">
+  const handleAdminSelect = (id) => {
+    setActiveMenu(id);
 
-        <div className="flex h-16 items-center justify-between px-6">
+    if (id === "dashboard") {
+      setOpenGroups((current) => ({ ...current, overview: true }));
+      return;
+    }
 
-          <div className="flex items-center gap-3">
+    const group = ADMIN_NAV.find((entry) =>
+      entry.items.some(([, itemId]) => itemId === id)
+    );
 
-            <div className="flex h-9 w-9 items-center justify-center rounded-md bg-red-600 font-bold">
-              S
-            </div>
+    if (group) {
+      setOpenGroups((current) => ({ ...current, [group.id]: true }));
+    }
+  };
 
+  const renderActiveModule = () => {
+    if (activeMenu === "dashboard") {
+      return (
+        <>
+          <div className="mb-6 flex flex-col justify-between gap-4 xl:flex-row xl:items-end">
             <div>
-              <p className="text-sm font-semibold tracking-wide">
-                SOC PLATFORM
+              <p className="text-[10px] uppercase tracking-[0.28em] text-red-500">
+                Security Administration
               </p>
 
-              <p className="text-[9px] uppercase tracking-[0.2em] text-gray-600">
-                Administration Console
-              </p>
-            </div>
+              <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">
+                Welcome back, Admin
+              </h1>
 
-          </div>
-
-
-          <div className="flex items-center gap-5">
-
-            <div className="hidden text-right sm:block">
-              <p className="text-sm font-medium">
-                Administrator
-              </p>
-
-              <p className="text-[10px] text-green-500">
-                ● Online
+              <p className="mt-1 text-xs text-gray-500">
+                Here's what's happening with your security platform today.
               </p>
             </div>
 
-            <button
-              onClick={onLogout}
-              className="border border-white/10 px-4 py-2 text-xs text-gray-400 transition hover:border-red-600 hover:text-white"
-            >
-              Logout
-            </button>
+            <div className="flex items-center gap-3">
+              <div className="hidden text-right md:block">
+                <p className="text-[10px] text-gray-400">
+                  {new Date().toLocaleDateString()}
+                </p>
+                <p className="text-[9px] text-gray-600">IST</p>
+              </div>
 
-          </div>
-
-        </div>
-
-      </header>
-
-
-      <div className="flex pt-16">
-
-        {/* SIDEBAR */}
-        <aside className="fixed bottom-0 left-0 top-16 hidden w-64 border-r border-white/10 bg-[#0a0a0a] lg:block">
-
-          <div className="p-5">
-
-            <p className="mb-4 px-3 text-[10px] uppercase tracking-[0.25em] text-gray-600">
-              Administration
-            </p>
-
-            <SidebarItem
-              label="Dashboard"
-              active={activeMenu === "dashboard"}
-              onClick={() => setActiveMenu("dashboard")}
-            />
-
-            <SidebarItem
-              label="User Management"
-              active={activeMenu === "users"}
-              onClick={() => setActiveMenu("users")}
-            />
-
-            <SidebarItem
-              label="Assessment Monitoring"
-              active={activeMenu === "assessments"}
-              onClick={() => setActiveMenu("assessments")}
-            />
-
-            <SidebarItem
-              label="Support Tickets"
-              active={activeMenu === "support-tickets"}
-              onClick={() => setActiveMenu("support-tickets")}
-            />
-
-            <SidebarItem
-              label="Reports"
-              active={activeMenu === "reports"}
-              onClick={() => setActiveMenu("reports")}
-            />
-
-            <SidebarItem
-              label="Tool Permissions"
-              active={activeMenu === "tools"}
-              onClick={() => setActiveMenu("tools")}
-            />
-
-            <SidebarItem
-              label="Audit Trail"
-              active={activeMenu === "audit"}
-              onClick={() => setActiveMenu("audit")}
-            />
-
-            <SidebarItem
-              label="Settings"
-              active={activeMenu === "settings"}
-              onClick={() => setActiveMenu("settings")}
-            />
-
-          </div>
-
-
-          {/* SIDEBAR FOOTER */}
-          <div className="absolute bottom-0 left-0 right-0 border-t border-white/10 p-5">
-
-            <p className="text-[10px] uppercase tracking-wider text-gray-600">
-              Platform Status
-            </p>
-
-            <div className="mt-3 flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full bg-green-500"></span>
-
-              <span className="text-xs text-gray-400">
-                All systems operational
-              </span>
+              <select
+                className="rounded-md border border-white/10 bg-[#0c1217] px-3 py-2 text-[10px] text-gray-300 outline-none focus:border-red-500/40"
+                defaultValue="24h"
+              >
+                <option value="24h">Last 24 hours</option>
+                <option value="7d">Last 7 days</option>
+                <option value="30d">Last 30 days</option>
+              </select>
             </div>
-
           </div>
 
-        </aside>
-
-
-        {/* CONTENT */}
-        <main className="w-full p-6 lg:ml-64 lg:p-10">
-
-          {/* ERROR */}
           {error && (
-            <div className="mb-6 border border-red-600/30 bg-red-600/10 px-5 py-4 text-sm text-red-400">
+            <div className="mb-5 rounded-md border border-red-500/25 bg-red-500/10 px-4 py-3 text-xs text-red-400">
               {error}
             </div>
           )}
 
-
-          {/* DASHBOARD */}
-          {activeMenu === "dashboard" && (
-            <>
-
-              <div className="mb-8">
-
-                <p className="text-xs uppercase tracking-[0.3em] text-red-500">
-                  Overview
-                </p>
-
-                <h1 className="mt-2 text-3xl font-bold">
-                  Admin Dashboard
-                </h1>
-
-                <p className="mt-2 text-sm text-gray-500">
-                  Monitor and manage your security operations platform.
-                </p>
-
-              </div>
-
-
-              {/* STAT CARDS */}
-              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-
-                <AdminStat
-                  title="Total Users"
-                  value={loading ? "—" : totalUsers}
-                  subtitle="Registered platform users"
-                />
-
-                <AdminStat
-                  title="Assessments"
-                  value={
-                    assessmentLoading
-                      ? "—"
-                      : assessments.length
-                  }
-                  subtitle="User/Client security assessments"
-                />
-
-                <AdminStat
-                  title="Security Tools"
-                  value="150+"
-                  subtitle="Available integrations"
-                />
-
-                <AdminStat
-                  title="Platform Status"
-                  value="ONLINE"
-                  subtitle="All core services"
-                  status
-                />
-
-              </div>
-
-
-              {/* TWO COLUMN AREA */}
-              <div className="mt-8 grid gap-6 xl:grid-cols-3">
-
-                {/* ACTIVITY */}
-                <div className="border border-white/10 bg-[#0d0d0d] xl:col-span-2">
-
-                  <div className="flex items-center justify-between border-b border-white/10 px-6 py-5">
-
-                    <div>
-                      <p className="text-sm font-semibold">
-                        Recent Security Activity
-                      </p>
-
-                      <p className="mt-1 text-xs text-gray-600">
-                        Latest platform events
-                      </p>
-                    </div>
-
-                    <span className="text-[10px] uppercase tracking-wider text-gray-600">
-                      Live
-                    </span>
-
-                  </div>
-
-
-                  <div className="divide-y divide-white/5">
-
-                    <Activity
-                      user="Security Analyst"
-                      action="Vulnerability assessment"
-                      time="Recently"
-                      status="Completed"
-                    />
-
-                    <Activity
-                      user="Administrator"
-                      action="User management"
-                      time="Recently"
-                      status="Completed"
-                    />
-
-                    <Activity
-                      user="Security System"
-                      action="Platform monitoring"
-                      time="Live"
-                      status="Active"
-                    />
-
-                  </div>
-
-                </div>
-
-
-                {/* PLATFORM HEALTH */}
-                <div className="border border-white/10 bg-[#0d0d0d]">
-
-                  <div className="border-b border-white/10 px-6 py-5">
-
-                    <p className="text-sm font-semibold">
-                      Platform Health
-                    </p>
-
-                    <p className="mt-1 text-xs text-gray-600">
-                      Core service status
-                    </p>
-
-                  </div>
-
-                  <div className="space-y-5 p-6">
-
-                    <HealthItem
-                      name="FastAPI Backend"
-                      status="Operational"
-                    />
-
-                    <HealthItem
-                      name="PostgreSQL"
-                      status="Connected"
-                    />
-
-                    <HealthItem
-                      name="Authentication"
-                      status="Operational"
-                    />
-
-                    <HealthItem
-                      name="Security Engine"
-                      status="Ready"
-                    />
-
-                  </div>
-
-                </div>
-
-              </div>
-
-
-              {/* MANAGEMENT */}
-              <div className="mt-8">
-
-                <div className="mb-5">
-
-                  <p className="text-xs uppercase tracking-[0.25em] text-red-500">
-                    Administration
-                  </p>
-
-                  <h2 className="mt-2 text-xl font-semibold">
-                    Platform Management
-                  </h2>
-
-                </div>
-
-
-                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-
-                  <ManagementCard
-                    number="01"
-                    title="User Management"
-                    description="Create and manage platform users."
-                    onClick={() => setActiveMenu("users")}
-                  />
-
-                  <ManagementCard
-                    number="02"
-                    title="Assessment Monitoring"
-                    description="Monitor User/Client VAPT, QA, monitoring and report status."
-                    onClick={() => setActiveMenu("assessments")}
-                  />
-
-                  <ManagementCard
-                    number="03"
-                    title="Support Tickets"
-                    description="Review, assign and resolve User support requests."
-                    onClick={() => setActiveMenu("support-tickets")}
-                  />
-
-                  <ManagementCard
-                    number="04"
-                    title="Tool Permissions"
-                    description="Control security tool access."
-                    onClick={() => setActiveMenu("tools")}
-                  />
-
-                  <ManagementCard
-                    number="04"
-                    title="Reports"
-                    description="Review generated security reports."
-                    onClick={() => setActiveMenu("reports")}
-                  />
-
-                </div>
-
-              </div>
-
-            </>
-          )}
-
-
-          {/* ==================================================
-              ASSESSMENT MONITORING
-          ================================================== */}
-          {activeMenu === "assessments" && (
-            <AdminAssessmentMonitoring
-              assessments={assessments}
-              loading={assessmentLoading}
-              error={assessmentError}
-              onRefresh={async () => {
-                const token = localStorage.getItem("token");
-
-                if (!token) {
-                  setAssessmentError(
-                    "Your admin session has expired. Please login again."
-                  );
-                  return;
-                }
-
-                try {
-                  setAssessmentLoading(true);
-                  setAssessmentError("");
-
-                  const response = await axios.get(
-                    `${API_URL}/admin/assessments`,
-                    {
-                      headers: {
-                        Authorization: `Bearer ${token}`,
-                      },
-                    }
-                  );
-
-                  setAssessments(
-                    response.data.assessments || []
-                  );
-                } catch (err) {
-                  console.error(
-                    "Unable to refresh assessments:",
-                    err
-                  );
-
-                  if (err.response?.data?.detail) {
-                    setAssessmentError(
-                      err.response.data.detail
-                    );
-                  } else {
-                    setAssessmentError(
-                      "Unable to refresh assessment monitoring."
-                    );
-                  }
-                } finally {
-                  setAssessmentLoading(false);
-                }
-              }}
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+            <AdminReferenceKpi
+              icon="♙"
+              title="Total Users"
+              value={loading ? "—" : totalUsers}
+              change=""
+              subtitle="Registered platform users"
             />
-          )}
 
-          {/* SUPPORT TICKETS */}
-          {activeMenu === "support-tickets" && (
-            <AdminSupportTickets
-              tickets={supportTickets}
-              loading={supportTicketLoading}
-              error={supportTicketError}
-              onRefresh={async () => {
-                const token = localStorage.getItem("token");
-
-                if (!token) {
-                  setSupportTicketError(
-                    "Your admin session has expired. Please login again."
-                  );
-                  return;
-                }
-
-                try {
-                  setSupportTicketLoading(true);
-                  setSupportTicketError("");
-
-                  const response = await axios.get(
-                    `${API_URL}/support/admin/tickets`,
-                    {
-                      headers: {
-                        Authorization: `Bearer ${token}`,
-                      },
-                    }
-                  );
-
-                  setSupportTickets(
-                    Array.isArray(response.data)
-                      ? response.data
-                      : []
-                  );
-                } catch (err) {
-                  console.error(
-                    "Unable to refresh support tickets:",
-                    err
-                  );
-
-                  if (err.response?.data?.detail) {
-                    setSupportTicketError(
-                      err.response.data.detail
-                    );
-                  } else {
-                    setSupportTicketError(
-                      "Unable to refresh support tickets."
-                    );
-                  }
-                } finally {
-                  setSupportTicketLoading(false);
-                }
-              }}
+            <AdminReferenceKpi
+              icon="▤"
+              title="Total Assessments"
+              value={assessmentLoading ? "—" : assessments.length}
+              change=""
+              subtitle="User security assessments"
             />
-          )}
 
-          {/* USERS */}
-          {activeMenu === "users" && (
-            <UserManagement
-              users={users}
-              onUserCreated={async () => {
-                try {
-                  const token = localStorage.getItem("token");
-
-                  const response = await axios.get(
-                    `${API_URL}/admin/users`,
-                    {
-                      headers: {
-                        Authorization: `Bearer ${token}`,
-                      },
-                    }
-                  );
-
-                  setUsers(response.data.users || []);
-                } catch (err) {
-                  console.error("Unable to refresh users:", err);
-                }
-              }}
+            <AdminReferenceKpi
+              icon="◉"
+              title="Active Assessments"
+              value={assessmentLoading ? "—" : activeAssessments}
+              change=""
+              subtitle={`${completedAssessments} completed • ${failedAssessments} failed`}
             />
-          )}
 
-          {/* AUDIT TRAIL */}
-          {activeMenu === "audit" && (
-            <AuditTrail />
-          )}
-
-
-          {/* REPORTS */}
-          {activeMenu === "reports" && (
-            <AdminReports
-              assessments={assessments}
-              onRefreshAssessments={async () => {
-                const token = localStorage.getItem("token");
-
-                if (!token) {
-                  setAssessmentError(
-                    "Your admin session has expired. Please login again."
-                  );
-                  return;
-                }
-
-                try {
-                  setAssessmentLoading(true);
-                  setAssessmentError("");
-
-                  const response = await axios.get(
-                    `${API_URL}/admin/assessments`,
-                    {
-                      headers: {
-                        Authorization: `Bearer ${token}`,
-                      },
-                    }
-                  );
-
-                  setAssessments(response.data.assessments || []);
-                } catch (err) {
-                  console.error(
-                    "Unable to refresh assessments for reports:",
-                    err
-                  );
-
-                  if (err.response?.data?.detail) {
-                    setAssessmentError(err.response.data.detail);
-                  } else {
-                    setAssessmentError(
-                      "Unable to refresh assessment data."
-                    );
-                  }
-                } finally {
-                  setAssessmentLoading(false);
-                }
-              }}
+            <AdminReferenceKpi
+              icon="◇"
+              title="VAPT Findings"
+              value={dashboard?.total_findings ?? dashboard?.vapt_findings ?? "—"}
+              change=""
+              subtitle="Findings reported by the platform"
             />
-          )}
 
+            <AdminReferenceKpi
+              icon="↗"
+              title="Security Posture"
+              value={dashboard?.security_posture ?? "—"}
+              change=""
+              subtitle="Current platform posture"
+              tone="green"
+            />
+          </div>
 
-          {/* PLACEHOLDER MODULES */}
-          {activeMenu !== "dashboard" &&
-            activeMenu !== "users" &&
-            activeMenu !== "assessments" &&
-            activeMenu !== "support-tickets" &&
-            activeMenu !== "audit" &&
-            activeMenu !== "reports" && (
-              <ModulePlaceholder
-                menu={activeMenu}
+          <div className="mt-4 grid gap-4 xl:grid-cols-5">
+            <AdminReferencePanel
+              title="Assessment Activity"
+              className="xl:col-span-3"
+            >
+              <AdminReferenceActivityChart assessments={assessments} />
+            </AdminReferencePanel>
+
+            <AdminReferencePanel
+              title="Target Activity"
+              className="xl:col-span-2"
+              action="View All"
+            >
+              <AdminReferenceTargetMap
+                users={users}
+                assessments={assessments}
               />
-            )}
+            </AdminReferencePanel>
+          </div>
 
+          <div className="mt-4 grid gap-4 lg:grid-cols-3">
+            <AdminReferencePanel title="Assessment Distribution">
+              <div className="flex items-center gap-2 p-4">
+                <AdminReferenceDonut
+                  value={assessments.length}
+                  label="Assessments"
+                />
+                <div className="flex-1 space-y-3">
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="flex items-center gap-2 text-gray-400">
+                      <span className="h-2 w-2 rounded-full bg-red-500" />
+                      Completed
+                    </span>
+                    <span className="text-white">{completedAssessments}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="flex items-center gap-2 text-gray-400">
+                      <span className="h-2 w-2 rounded-full bg-yellow-400" />
+                      Running
+                    </span>
+                    <span className="text-white">{activeAssessments}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="flex items-center gap-2 text-gray-400">
+                      <span className="h-2 w-2 rounded-full bg-gray-500" />
+                      Failed
+                    </span>
+                    <span className="text-white">{failedAssessments}</span>
+                  </div>
+                </div>
+              </div>
+            </AdminReferencePanel>
+
+            <AdminReferencePanel title="Assessments by Type">
+              <AdminReferenceBars
+                values={[
+                  {
+                    label: "VAPT",
+                    value: assessments.filter(
+                      (a) => String(a.type || "").toLowerCase() === "vapt"
+                    ).length,
+                  },
+                  {
+                    label: "QA",
+                    value: assessments.filter(
+                      (a) => String(a.type || "").toLowerCase().includes("qa")
+                    ).length,
+                  },
+                  {
+                    label: "Network",
+                    value: assessments.filter(
+                      (a) =>
+                        String(a.type || "").toLowerCase().includes("network")
+                    ).length,
+                  },
+                  {
+                    label: "Web",
+                    value: assessments.filter(
+                      (a) =>
+                        String(a.type || "").toLowerCase().includes("web")
+                    ).length,
+                  },
+                  {
+                    label: "API",
+                    value: assessments.filter(
+                      (a) =>
+                        String(a.type || "").toLowerCase().includes("api")
+                    ).length,
+                  },
+                ]}
+              />
+            </AdminReferencePanel>
+
+            <AdminReferencePanel title="Platform Health" action="View System">
+              <div className="flex items-center gap-2 p-4">
+                <AdminReferenceDonut value={100} label="Operational" />
+                <div className="flex-1 space-y-3">
+                  {[
+                    ["Backend API", "Operational"],
+                    ["Database", "Connected"],
+                    ["Authentication", "Operational"],
+                    ["Security Engine", "Ready"],
+                  ].map(([name, status]) => (
+                    <div
+                      key={name}
+                      className="flex items-center justify-between gap-2 text-[10px]"
+                    >
+                      <span className="flex items-center gap-2 text-gray-400">
+                        <span className="h-2 w-2 rounded-full bg-green-500" />
+                        {name}
+                      </span>
+                      <span className="text-green-400">{status}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </AdminReferencePanel>
+          </div>
+
+          <div className="mt-4 grid gap-4 lg:grid-cols-3">
+            <AdminReferencePanel
+              title="Recent Assessments"
+              action="View All"
+              className="lg:col-span-1"
+            >
+              <div className="overflow-x-auto">
+                <table className="w-full text-left">
+                  <thead>
+                    <tr className="border-b border-white/10 text-[9px] uppercase tracking-wider text-gray-600">
+                      <th className="px-4 py-3">ID</th>
+                      <th className="px-4 py-3">Target</th>
+                      <th className="px-4 py-3">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {assessments.slice(0, 5).map((item, index) => (
+                      <tr
+                        key={item.id || item.assessment_id || index}
+                        className="border-b border-white/5 last:border-0"
+                      >
+                        <td className="px-4 py-3 text-[10px] text-gray-400">
+                          {item.id || item.assessment_id || `#${index + 1}`}
+                        </td>
+                        <td className="max-w-[150px] truncate px-4 py-3 text-[10px] text-gray-300">
+                          {item.target || item.name || "—"}
+                        </td>
+                        <td className="px-4 py-3">
+                          <AdminReferenceStatus
+                            tone={
+                              String(item.status || "").toLowerCase() ===
+                              "failed"
+                                ? "red"
+                                : String(item.status || "").toLowerCase() ===
+                                  "running"
+                                ? "blue"
+                                : "green"
+                            }
+                          >
+                            {item.status || "Unknown"}
+                          </AdminReferenceStatus>
+                        </td>
+                      </tr>
+                    ))}
+
+                    {!assessmentLoading && assessments.length === 0 && (
+                      <tr>
+                        <td
+                          colSpan="3"
+                          className="px-4 py-8 text-center text-[10px] text-gray-600"
+                        >
+                          No assessments available.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </AdminReferencePanel>
+
+            <AdminReferencePanel
+              title="Recent Users"
+              action="View All"
+              className="lg:col-span-1"
+            >
+              <div className="overflow-x-auto">
+                <table className="w-full text-left">
+                  <thead>
+                    <tr className="border-b border-white/10 text-[9px] uppercase tracking-wider text-gray-600">
+                      <th className="px-4 py-3">User</th>
+                      <th className="px-4 py-3">Role</th>
+                      <th className="px-4 py-3">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {users.slice(0, 5).map((user, index) => (
+                      <tr
+                        key={user.id || user.user_id || index}
+                        className="border-b border-white/5 last:border-0"
+                      >
+                        <td className="px-4 py-3">
+                          <p className="max-w-[130px] truncate text-[10px] text-gray-200">
+                            {user.username || user.email || "—"}
+                          </p>
+                        </td>
+                        <td className="px-4 py-3 text-[10px] text-gray-500">
+                          {user.role_name ||
+                            (user.role_id === 3
+                              ? "Admin"
+                              : user.role_id === 2
+                              ? "Analyst"
+                              : "User / Client")}
+                        </td>
+                        <td className="px-4 py-3">
+                          <AdminReferenceStatus
+                            tone={user.is_active === false ? "red" : "green"}
+                          >
+                            {user.is_active === false ? "Inactive" : "Active"}
+                          </AdminReferenceStatus>
+                        </td>
+                      </tr>
+                    ))}
+
+                    {!loading && users.length === 0 && (
+                      <tr>
+                        <td
+                          colSpan="3"
+                          className="px-4 py-8 text-center text-[10px] text-gray-600"
+                        >
+                          No users available.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </AdminReferencePanel>
+
+            <AdminReferencePanel title="Admin Activity" action="View Audit">
+              <div className="divide-y divide-white/5">
+                <div className="px-4 py-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-gray-300">
+                      User management
+                    </span>
+                    <span className="text-[9px] text-green-400">
+                      Active
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[9px] text-gray-600">
+                    Administrative workspace
+                  </p>
+                </div>
+
+                <div className="px-4 py-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-gray-300">
+                      Assessment monitoring
+                    </span>
+                    <span className="text-[9px] text-green-400">
+                      Active
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[9px] text-gray-600">
+                    User security assessments
+                  </p>
+                </div>
+
+                <div className="px-4 py-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-gray-300">
+                      Support tickets
+                    </span>
+                    <span className="text-[9px] text-gray-400">
+                      {supportTickets.length}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[9px] text-gray-600">
+                    Current support queue
+                  </p>
+                </div>
+              </div>
+            </AdminReferencePanel>
+          </div>
+        </>
+      );
+    }
+
+    if (activeMenu === "users") {
+      return (
+        <UserManagement
+          users={users}
+          onUserCreated={(newUser) => {
+            setUsers((current) => [...current, newUser]);
+          }}
+        />
+      );
+    }
+
+    if (activeMenu === "assessments") {
+      return (
+        <AdminAssessmentMonitoring
+          assessments={assessments}
+          loading={assessmentLoading}
+          error={assessmentError}
+          onRefresh={async () => {
+            const token = localStorage.getItem("token");
+
+            if (!token) {
+              setAssessmentError(
+                "Your admin session has expired. Please login again."
+              );
+              return;
+            }
+
+            try {
+              setAssessmentLoading(true);
+              setAssessmentError("");
+
+              const response = await axios.get(
+                `${API_URL}/admin/assessments`,
+                {
+                  headers: {
+                    Authorization: `Bearer ${token}`,
+                  },
+                }
+              );
+
+              setAssessments(response.data.assessments || []);
+            } catch (err) {
+              console.error("Unable to refresh assessments:", err);
+
+              if (err.response?.data?.detail) {
+                setAssessmentError(err.response.data.detail);
+              } else {
+                setAssessmentError(
+                  "Unable to refresh assessment monitoring."
+                );
+              }
+            } finally {
+              setAssessmentLoading(false);
+            }
+          }}
+        />
+      );
+    }
+
+    if (activeMenu === "admin-notification-center") {
+      return <AdminNotificationCenter />;
+    }
+
+    if (activeMenu === "admin-notification-policies") {
+      return <AdminNotificationPolicies />;
+    }
+
+    if (activeMenu === "admin-email-alerts") {
+      return <AdminNotificationChannel channel="email" />;
+    }
+
+    if (activeMenu === "admin-slack-alerts") {
+      return <AdminNotificationChannel channel="slack" />;
+    }
+
+    if (activeMenu === "admin-teams-alerts") {
+      return <AdminNotificationChannel channel="teams" />;
+    }
+
+    if (activeMenu === "admin-notification-webhooks") {
+      return <AdminNotificationChannel channel="webhook" />;
+    }
+
+    if (activeMenu === "admin-permissions") {
+      return (
+        <AdminPermissions
+          users={users}
+          onRefreshUsers={async () => {
+            try {
+              const token = localStorage.getItem("token");
+              const response = await axios.get(
+                `${API_URL}/admin/users`,
+                {
+                  headers: {
+                    Authorization: `Bearer ${token}`,
+                  },
+                }
+              );
+              setUsers(response.data.users || []);
+            } catch (err) {
+              console.error("Unable to refresh users:", err);
+            }
+          }}
+        />
+      );
+    }
+
+    if (
+      activeMenu === "admin-user-activity" ||
+      activeMenu === "admin-admin-activity" ||
+      activeMenu === "admin-login-history" ||
+      activeMenu === "admin-permission-changes" ||
+      activeMenu === "admin-configuration-changes" ||
+      activeMenu === "admin-api-activity" ||
+      activeMenu === "admin-audit-export"
+    ) {
+      return <AuditTrail />;
+    }
+
+    const labels = Object.fromEntries(
+      ADMIN_NAV.flatMap((group) =>
+        group.items.map(([label, id]) => [id, label])
+      )
+    );
+
+    const descriptions = {
+      "admin-environment":
+        "Monitor the health of the SOC Platform environment and its core services.",
+      "admin-posture":
+        "Review the current security posture derived from platform security data.",
+      "admin-risk":
+        "Review administrative risk indicators and platform-level risk information.",
+      "admin-roles":
+        "Manage the role model used to control administrative and platform access.",
+      "admin-permissions":
+        "Manage individual security-tool permissions for User / Client accounts.",
+      "admin-teams":
+        "Organize platform users into operational teams.",
+      "admin-service-accounts":
+        "Manage non-human service identities used by platform integrations.",
+      "admin-api-keys":
+        "Manage API credentials used by authorized platform integrations.",
+      "admin-sessions":
+        "Review active authenticated sessions and administrative access.",
+      "admin-asset-inventory":
+        "Review the centralized inventory of assets registered with the platform.",
+      "admin-asset-discovery":
+        "Manage discovery workflows used to identify assets.",
+      "admin-servers":
+        "Manage server assets registered in the platform.",
+      "admin-endpoints":
+        "Manage endpoint assets and endpoint-related administration.",
+      "admin-network-devices":
+        "Manage network device assets.",
+      "admin-applications":
+        "Manage applications represented in the platform asset inventory.",
+      "admin-cloud-assets":
+        "Manage cloud asset inventory and cloud-related administration.",
+      "admin-asset-groups":
+        "Organize assets into administrative groups.",
+      "admin-siem-integrations":
+        "Configure authorized SIEM connections.",
+      "admin-ticketing":
+        "Configure ticketing-system integrations.",
+      "admin-email":
+        "Configure authorized email integration settings.",
+      "admin-slack":
+        "Configure authorized Slack integration settings.",
+      "admin-teams-integration":
+        "Configure authorized Microsoft Teams integration settings.",
+      "admin-webhooks":
+        "Configure outbound webhook integrations.",
+      "admin-aws":
+        "Configure authorized AWS integration settings.",
+      "admin-azure":
+        "Configure authorized Azure integration settings.",
+      "admin-gcp":
+        "Configure authorized GCP integration settings.",
+      "admin-api-integrations":
+        "Manage external API integrations.",
+      "admin-security-policies":
+        "Manage platform security policies.",
+      "admin-security-baselines":
+        "Manage security baseline configuration.",
+      "admin-detection-config":
+        "Manage administrative detection configuration.",
+      "admin-alert-config":
+        "Manage alert configuration.",
+      "admin-retention":
+        "Manage retention-policy configuration.",
+      "admin-configuration":
+        "Manage platform-level security configuration.",
+      "admin-notification-policies":
+        "Manage notification policies.",
+      "admin-email-alerts":
+        "Manage email alert configuration.",
+      "admin-slack-alerts":
+        "Manage Slack alert configuration.",
+      "admin-teams-alerts":
+        "Manage Microsoft Teams alert configuration.",
+      "admin-notification-webhooks":
+        "Manage notification webhook configuration.",
+      "admin-compliance":
+        "Review platform compliance posture and compliance controls.",
+      "admin-iso27001":
+        "Review ISO 27001 control administration.",
+      "admin-soc2":
+        "Review SOC 2 control administration.",
+      "admin-nist":
+        "Review NIST control administration.",
+      "admin-cis":
+        "Review CIS Controls administration.",
+      "admin-pcidss":
+        "Review PCI DSS control administration.",
+      "admin-compliance-reports":
+        "Manage compliance reporting.",
+      "admin-system-health":
+        "Monitor overall SOC Platform system health.",
+      "admin-api-health":
+        "Monitor API service health.",
+      "admin-database-health":
+        "Monitor database connectivity and health.",
+      "admin-log-pipeline-health":
+        "Monitor the platform log pipeline.",
+      "admin-agent-health":
+        "Monitor connected security agents.",
+      "admin-background-jobs":
+        "Review background jobs and processing status.",
+      "admin-system-logs":
+        "Review platform system logs.",
+      "admin-backup":
+        "Manage backup administration.",
+      "admin-license":
+        "Review platform license information.",
+    };
+
+    return (
+      <AdminReferenceModule
+        menu={activeMenu}
+        title={labels[activeMenu] || "Admin Module"}
+        description={
+          descriptions[activeMenu] ||
+          "Administrative module for the SOC Platform."
+        }
+        onBack={() => setActiveMenu("dashboard")}
+      />
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-[#06080a] text-white">
+      {/* TOP BAR */}
+      <header className="fixed left-0 right-0 top-0 z-50 border-b border-white/10 bg-[#080b0e]/95 backdrop-blur">
+        <div className="flex h-[68px] items-center gap-4 px-4 lg:px-6">
+          <div className="flex w-[238px] shrink-0 items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-red-500/50 bg-red-600/10 text-xl text-red-500 shadow-[0_0_20px_rgba(239,51,64,0.12)]">
+              ◇
+            </div>
+
+            <div>
+              <p className="text-base font-bold tracking-wide text-white">
+                SOC PLATFORM
+              </p>
+              <p className="text-[8px] text-gray-600">
+                Detect &nbsp; Protect &nbsp; Respond
+              </p>
+            </div>
+          </div>
+
+          <div className="hidden max-w-xl flex-1 md:block">
+            <div className="flex h-10 items-center rounded-md border border-white/10 bg-[#0b1116] px-3">
+              <span className="mr-3 text-gray-500">⌕</span>
+              <input
+                type="text"
+                placeholder="Search users, assessments, reports, or anything..."
+                className="min-w-0 flex-1 bg-transparent text-xs text-gray-300 outline-none placeholder:text-gray-600"
+              />
+              <span className="rounded border border-white/10 px-2 py-1 text-[9px] text-gray-500">
+                Ctrl + K
+              </span>
+            </div>
+          </div>
+
+          <div className="ml-auto flex items-center gap-3">
+            <button
+              type="button"
+              className="relative flex h-9 w-9 items-center justify-center rounded-md text-gray-400 transition hover:bg-white/5 hover:text-white"
+            >
+              ♧
+              <span className="absolute right-0 top-0 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[8px] font-bold text-white">
+                {supportTickets.length || 0}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              className="hidden h-9 w-9 items-center justify-center rounded-md border border-white/10 text-xs text-gray-400 sm:flex"
+            >
+              ?
+            </button>
+
+            <div className="h-7 w-px bg-white/10" />
+
+            <div className="hidden items-center gap-2 sm:flex">
+              <div className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-[#182027] text-sm font-semibold">
+                A
+              </div>
+              <div className="text-left">
+                <p className="text-[11px] font-semibold text-white">Admin</p>
+                <p className="text-[9px] text-gray-600">SOC Platform Inc.</p>
+              </div>
+              <span className="ml-1 text-[10px] text-gray-600">⌄</span>
+            </div>
+
+            <button
+              onClick={onLogout}
+              className="rounded-md border border-white/10 px-3 py-2 text-[10px] text-gray-400 transition hover:border-red-500/50 hover:bg-red-500/10 hover:text-white"
+            >
+              Logout
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <div className="flex pt-[68px]">
+        {/* SIDEBAR */}
+        <aside className="fixed bottom-0 left-0 top-[68px] hidden w-[238px] overflow-y-auto border-r border-white/10 bg-[#080d11] lg:block">
+          <div className="p-3">
+            <div className="mb-3 flex items-center justify-between px-3">
+              <p className="text-[9px] uppercase tracking-[0.2em] text-gray-600">
+                Administration
+              </p>
+              <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
+            </div>
+
+            {ADMIN_NAV.map((group) => (
+              <AdminReferenceNavGroup
+                key={group.id}
+                group={group}
+                open={openGroups[group.id]}
+                onToggle={() =>
+                  setOpenGroups((current) => ({
+                    ...current,
+                    [group.id]: !current[group.id],
+                  }))
+                }
+                activeMenu={activeMenu}
+                onSelect={handleAdminSelect}
+              />
+            ))}
+          </div>
+
+          <div className="sticky bottom-0 mt-3 border-t border-white/10 bg-[#080d11] p-4">
+            <div className="flex items-center gap-2">
+              <span className="h-2 w-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
+              <span className="text-[9px] text-gray-500">
+                Platform operational
+              </span>
+            </div>
+            <p className="mt-2 text-[9px] text-gray-700">
+              SOC PLATFORM v1.0.0
+            </p>
+          </div>
+        </aside>
+
+        {/* CONTENT */}
+        <main className="min-w-0 w-full px-4 py-5 lg:ml-[238px] lg:px-6 xl:px-7">
+          {renderActiveModule()}
         </main>
-
       </div>
 
+      {/* MOBILE NAV */}
+      <div className="fixed bottom-3 left-3 right-3 z-40 rounded-lg border border-white/10 bg-[#0a0f13]/95 p-2 shadow-2xl backdrop-blur lg:hidden">
+        <div className="flex items-center justify-between gap-1 overflow-x-auto">
+          {[
+            ["⌂", "Overview", "dashboard"],
+            ["♙", "Users", "users"],
+            ["▣", "Assets", "admin-asset-inventory"],
+            ["⌘", "Integrations", "admin-api-integrations"],
+            ["⚙", "System", "admin-system-health"],
+          ].map(([icon, label, id]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => handleAdminSelect(id)}
+              className={`min-w-[72px] rounded-md px-2 py-2 text-center ${
+                activeMenu === id
+                  ? "bg-red-600 text-white"
+                  : "text-gray-500"
+              }`}
+            >
+              <div className="text-sm">{icon}</div>
+              <div className="mt-1 text-[8px]">{label}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Preserve existing assessment/support functionality without adding
+          extra Admin sidebar modules. These legacy screens remain reachable
+          programmatically from existing flows. */}
+      {activeMenu === "support-tickets" && (
+        <div className="hidden">
+          <AdminSupportTickets
+            tickets={supportTickets}
+            loading={supportTicketLoading}
+            error={supportTicketError}
+            onRefresh={() => {}}
+          />
+        </div>
+      )}
     </div>
   );
 }
-
 
 // ==================================================
 // ADMIN SUPPORT TICKETS
@@ -2419,11 +3827,573 @@ function AdminAssessmentMonitoring({
 
 
 // ==================================================
+// ADMIN — TOOL PERMISSIONS
+// ==================================================
+function AdminPermissions({ users, onRefreshUsers }) {
+  const [selectedUserId, setSelectedUserId] = useState("");
+  const [tools, setTools] = useState([]);
+  const [permissions, setPermissions] = useState({});
+  const [loadingTools, setLoadingTools] = useState(true);
+  const [loadingPermissions, setLoadingPermissions] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const [search, setSearch] = useState("");
+  const [activeCategory, setActiveCategory] = useState("All Tools");
+
+  const safeUsers = Array.isArray(users) ? users : [];
+  const userClients = safeUsers.filter((user) => Number(user.role_id) === 1);
+
+  const getTokenConfig = () => ({
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem("token")}`,
+    },
+  });
+
+  const loadTools = async () => {
+    try {
+      setLoadingTools(true);
+      setError("");
+
+      const response = await axios.get(
+        `${API_URL}/admin/tool-permissions/tools`,
+        getTokenConfig()
+      );
+
+      const loadedTools = Array.isArray(response.data)
+        ? response.data
+        : [];
+
+      setTools(loadedTools);
+    } catch (err) {
+      console.error("Unable to load security tools:", err);
+      setError(
+        err.response?.data?.detail ||
+          "Unable to load the security tool catalog."
+      );
+    } finally {
+      setLoadingTools(false);
+    }
+  };
+
+  const loadUserPermissions = async (userId) => {
+    if (!userId) {
+      setPermissions({});
+      return;
+    }
+
+    try {
+      setLoadingPermissions(true);
+      setError("");
+      setSuccess("");
+
+      const response = await axios.get(
+        `${API_URL}/admin/users/${userId}/tool-permissions`,
+        getTokenConfig()
+      );
+
+      const rows = Array.isArray(response.data)
+        ? response.data
+        : [];
+
+      const nextPermissions = {};
+      rows.forEach((item) => {
+        nextPermissions[String(item.tool_id)] = Boolean(item.allowed);
+      });
+
+      setPermissions(nextPermissions);
+    } catch (err) {
+      console.error("Unable to load user tool permissions:", err);
+      setPermissions({});
+      setError(
+        err.response?.data?.detail ||
+          "Unable to load permissions for the selected user."
+      );
+    } finally {
+      setLoadingPermissions(false);
+    }
+  };
+
+  useEffect(() => {
+    loadTools();
+  }, []);
+
+  useEffect(() => {
+    if (!selectedUserId && userClients.length > 0) {
+      setSelectedUserId(String(userClients[0].id));
+      return;
+    }
+
+    if (
+      selectedUserId &&
+      !userClients.some((user) => String(user.id) === String(selectedUserId))
+    ) {
+      setSelectedUserId(userClients.length ? String(userClients[0].id) : "");
+    }
+  }, [users]);
+
+  useEffect(() => {
+    loadUserPermissions(selectedUserId);
+  }, [selectedUserId]);
+
+  const selectedUser = userClients.find(
+    (user) => String(user.id) === String(selectedUserId)
+  );
+
+  const categories = [
+    "All Tools",
+    ...Array.from(
+      new Set(
+        tools
+          .map((tool) => tool.category)
+          .filter(Boolean)
+      )
+    ),
+  ];
+
+  const normalizedSearch = search.trim().toLowerCase();
+
+  const visibleTools = tools.filter((tool) => {
+    const categoryMatch =
+      activeCategory === "All Tools" ||
+      tool.category === activeCategory;
+
+    const searchMatch =
+      !normalizedSearch ||
+      String(tool.name || "").toLowerCase().includes(normalizedSearch) ||
+      String(tool.description || "").toLowerCase().includes(normalizedSearch) ||
+      String(tool.category || "").toLowerCase().includes(normalizedSearch);
+
+    return categoryMatch && searchMatch;
+  });
+
+  const enabledTools = tools.filter((tool) => Boolean(tool.enabled));
+  const allowedCount = enabledTools.filter(
+    (tool) => permissions[String(tool.id)]
+  ).length;
+  const disabledCount = tools.filter((tool) => !tool.enabled).length;
+
+  const setToolPermission = (toolId, allowed) => {
+    setPermissions((current) => ({
+      ...current,
+      [String(toolId)]: allowed,
+    }));
+    setSuccess("");
+  };
+
+  const setCategoryPermissions = (category, allowed) => {
+    const next = { ...permissions };
+
+    tools.forEach((tool) => {
+      if (
+        tool.enabled &&
+        (category === "All Tools" || tool.category === category)
+      ) {
+        next[String(tool.id)] = allowed;
+      }
+    });
+
+    setPermissions(next);
+    setSuccess("");
+  };
+
+  const handleSave = async () => {
+    if (!selectedUserId) {
+      setError("Select a User / Client account first.");
+      return;
+    }
+
+    try {
+      setSaving(true);
+      setError("");
+      setSuccess("");
+
+      const payload = {
+        permissions: tools.map((tool) => ({
+          tool_id: Number(tool.id),
+          allowed: Boolean(tool.enabled && permissions[String(tool.id)]),
+        })),
+      };
+
+      const response = await axios.put(
+        `${API_URL}/admin/users/${selectedUserId}/tool-permissions`,
+        payload,
+        getTokenConfig()
+      );
+
+      const allowedToolIds = Array.isArray(response.data?.allowed_tool_ids)
+        ? response.data.allowed_tool_ids.map(String)
+        : tools
+            .filter((tool) => permissions[String(tool.id)])
+            .map((tool) => String(tool.id));
+
+      const nextPermissions = {};
+      tools.forEach((tool) => {
+        nextPermissions[String(tool.id)] = allowedToolIds.includes(
+          String(tool.id)
+        );
+      });
+
+      setPermissions(nextPermissions);
+      setSuccess(
+        response.data?.message ||
+          "Tool permissions updated successfully."
+      );
+    } catch (err) {
+      console.error("Unable to save tool permissions:", err);
+      setError(
+        err.response?.data?.detail ||
+          "Unable to save tool permissions."
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const clearFilters = () => {
+    setSearch("");
+    setActiveCategory("All Tools");
+  };
+
+  return (
+    <div>
+      <div className="mb-6 flex flex-col justify-between gap-4 xl:flex-row xl:items-end">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.3em] text-red-500">
+            User & Access Management
+          </p>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">
+            Tool Permissions
+          </h1>
+          <p className="mt-2 max-w-3xl text-xs leading-6 text-gray-500">
+            Control which security tools each User / Client account is allowed
+            to use. Permissions are enforced by the SOC Platform backend.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => {
+            loadTools();
+            if (onRefreshUsers) onRefreshUsers();
+            if (selectedUserId) loadUserPermissions(selectedUserId);
+          }}
+          className="border border-white/10 bg-[#0d1114] px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400 transition hover:border-red-500/40 hover:text-white"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div className="mb-4 flex items-center justify-between gap-4 rounded-md border border-red-500/25 bg-red-500/10 px-4 py-3 text-xs text-red-400">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => setError("")}
+            className="text-gray-500 hover:text-white"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {success && (
+        <div className="mb-4 rounded-md border border-green-500/20 bg-green-500/10 px-4 py-3 text-xs text-green-400">
+          {success}
+        </div>
+      )}
+
+      <div className="grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
+        <section className="rounded-lg border border-white/10 bg-[#0b1014]">
+          <div className="border-b border-white/10 px-5 py-4">
+            <p className="text-[10px] uppercase tracking-[0.18em] text-gray-600">
+              User / Client Account
+            </p>
+            <p className="mt-1 text-sm font-semibold text-white">
+              Select account
+            </p>
+          </div>
+
+          <div className="p-4">
+            {userClients.length === 0 ? (
+              <div className="rounded-md border border-white/10 bg-black/20 px-4 py-5 text-xs text-gray-500">
+                No User / Client accounts are available.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {userClients.map((user) => {
+                  const selected = String(user.id) === String(selectedUserId);
+                  return (
+                    <button
+                      key={user.id}
+                      type="button"
+                      onClick={() => setSelectedUserId(String(user.id))}
+                      className={`w-full rounded-md border px-3 py-3 text-left transition ${
+                        selected
+                          ? "border-red-500/50 bg-red-500/10"
+                          : "border-white/10 bg-black/10 hover:border-red-500/30 hover:bg-white/[0.025]"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="truncate text-xs font-semibold text-white">
+                          {user.username || "Unnamed User"}
+                        </span>
+                        <span
+                          className={`h-2 w-2 shrink-0 rounded-full ${
+                            selected ? "bg-red-500" : "bg-gray-700"
+                          }`}
+                        />
+                      </div>
+                      <p className="mt-1 truncate text-[10px] text-gray-600">
+                        {user.email || "—"}
+                      </p>
+                      <p className="mt-2 text-[9px] uppercase tracking-wider text-gray-700">
+                        User ID: {user.id}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="min-w-0 rounded-lg border border-white/10 bg-[#0b1014]">
+          <div className="border-b border-white/10 px-5 py-4">
+            <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
+              <div className="min-w-0">
+                <p className="text-[10px] uppercase tracking-[0.18em] text-gray-600">
+                  Selected Account
+                </p>
+                <div className="mt-1 flex flex-wrap items-center gap-3">
+                  <h2 className="text-lg font-semibold text-white">
+                    {selectedUser?.username || "No user selected"}
+                  </h2>
+                  {selectedUser && (
+                    <span className="rounded-md border border-red-500/20 bg-red-500/10 px-2 py-1 text-[9px] uppercase tracking-wider text-red-400">
+                      User / Client
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 text-[10px] text-gray-600">
+                  {selectedUser?.email || "Select an account to manage permissions."}
+                </p>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <div className="rounded-md border border-white/10 bg-black/15 px-3 py-2 text-center">
+                  <p className="text-lg font-bold text-white">{tools.length}</p>
+                  <p className="text-[8px] uppercase tracking-wider text-gray-600">Tools</p>
+                </div>
+                <div className="rounded-md border border-green-500/15 bg-green-500/5 px-3 py-2 text-center">
+                  <p className="text-lg font-bold text-green-400">{allowedCount}</p>
+                  <p className="text-[8px] uppercase tracking-wider text-gray-600">Allowed</p>
+                </div>
+                <div className="rounded-md border border-white/10 bg-black/15 px-3 py-2 text-center">
+                  <p className="text-lg font-bold text-gray-500">{disabledCount}</p>
+                  <p className="text-[8px] uppercase tracking-wider text-gray-600">Disabled</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-b border-white/10 p-4">
+            <div className="flex flex-col gap-3 lg:flex-row">
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search security tools..."
+                className="min-w-0 flex-1 rounded-md border border-white/10 bg-[#080808] px-3 py-2.5 text-xs text-white outline-none placeholder:text-gray-700 focus:border-red-500/50"
+              />
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="border border-white/10 px-4 py-2 text-[9px] font-semibold uppercase tracking-wider text-gray-500 hover:border-red-500/40 hover:text-white"
+              >
+                Clear Filters
+              </button>
+            </div>
+
+            <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+              {categories.map((category) => (
+                <button
+                  key={category}
+                  type="button"
+                  onClick={() => setActiveCategory(category)}
+                  className={`shrink-0 rounded-md border px-3 py-2 text-[9px] font-semibold uppercase tracking-wider transition ${
+                    activeCategory === category
+                      ? "border-red-500 bg-red-500/10 text-red-400"
+                      : "border-white/10 text-gray-500 hover:border-red-500/30 hover:text-white"
+                  }`}
+                >
+                  {category}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {loadingTools || loadingPermissions ? (
+            <div className="px-5 py-14 text-center text-xs text-gray-600">
+              {loadingTools
+                ? "Loading security tool catalog..."
+                : "Loading user permissions..."}
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-col justify-between gap-3 border-b border-white/10 px-5 py-3 sm:flex-row sm:items-center">
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-gray-600">
+                    {activeCategory}
+                  </p>
+                  <p className="mt-1 text-xs text-gray-500">
+                    {visibleTools.length} tool{visibleTools.length === 1 ? "" : "s"} shown
+                  </p>
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCategoryPermissions(activeCategory, true)}
+                    className="border border-green-500/20 bg-green-500/5 px-3 py-2 text-[9px] font-semibold uppercase tracking-wider text-green-400 hover:bg-green-500/10"
+                  >
+                    Allow {activeCategory === "All Tools" ? "All" : "Category"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCategoryPermissions(activeCategory, false)}
+                    className="border border-red-500/20 bg-red-500/5 px-3 py-2 text-[9px] font-semibold uppercase tracking-wider text-red-400 hover:bg-red-500/10"
+                  >
+                    Deny {activeCategory === "All Tools" ? "All" : "Category"}
+                  </button>
+                </div>
+              </div>
+
+              {visibleTools.length === 0 ? (
+                <div className="px-5 py-14 text-center text-xs text-gray-600">
+                  No security tools match the current filters.
+                </div>
+              ) : (
+                <div className="grid gap-2 p-4 md:grid-cols-2">
+                  {visibleTools.map((tool) => {
+                    const allowed = Boolean(permissions[String(tool.id)]);
+                    const toolEnabled = Boolean(tool.enabled);
+
+                    return (
+                      <div
+                        key={tool.id}
+                        className={`rounded-md border p-4 transition ${
+                          allowed && toolEnabled
+                            ? "border-red-500/35 bg-red-500/[0.04]"
+                            : "border-white/10 bg-black/10"
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`h-2 w-2 shrink-0 rounded-full ${
+                                  !toolEnabled
+                                    ? "bg-gray-700"
+                                    : allowed
+                                    ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.7)]"
+                                    : "bg-gray-700"
+                                }`}
+                              />
+                              <h3 className="truncate text-xs font-semibold text-white">
+                                {tool.name}
+                              </h3>
+                            </div>
+                            <p className="mt-1 text-[9px] uppercase tracking-wider text-gray-700">
+                              {tool.category || "Uncategorized"} • {tool.tool_type || "tool"}
+                            </p>
+                          </div>
+
+                          <button
+                            type="button"
+                            disabled={!toolEnabled || !selectedUserId}
+                            onClick={() =>
+                              setToolPermission(tool.id, !allowed)
+                            }
+                            className={`relative h-6 w-11 shrink-0 rounded-full border transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                              allowed && toolEnabled
+                                ? "border-red-500 bg-red-600"
+                                : "border-white/15 bg-[#171b1f]"
+                            }`}
+                            aria-label={`${allowed ? "Disable" : "Enable"} ${tool.name}`}
+                          >
+                            <span
+                              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${
+                                allowed && toolEnabled
+                                  ? "left-[21px]"
+                                  : "left-0.5"
+                              }`}
+                            />
+                          </button>
+                        </div>
+
+                        <p className="mt-3 min-h-[30px] text-[10px] leading-5 text-gray-500">
+                          {tool.description || "No description available."}
+                        </p>
+
+                        <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-3">
+                          <span
+                            className={`text-[9px] font-semibold uppercase tracking-wider ${
+                              !toolEnabled
+                                ? "text-gray-700"
+                                : allowed
+                                ? "text-red-400"
+                                : "text-gray-600"
+                            }`}
+                          >
+                            {!toolEnabled
+                              ? "Tool Disabled"
+                              : allowed
+                              ? "Allowed"
+                              : "Denied"}
+                          </span>
+                          <span className="text-[9px] text-gray-700">
+                            ID {tool.id}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div className="flex flex-col justify-between gap-3 border-t border-white/10 bg-black/10 px-5 py-4 sm:flex-row sm:items-center">
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-gray-600">
+                    Permission enforcement
+                  </p>
+                  <p className="mt-1 text-[10px] text-gray-700">
+                    Saving updates PostgreSQL. Backend tool endpoints enforce the selected permissions.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleSave}
+                  disabled={saving || !selectedUserId || loadingTools || loadingPermissions}
+                  className="rounded-md bg-red-600 px-6 py-3 text-[10px] font-bold uppercase tracking-wider text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {saving ? "Saving..." : "Save Permissions"}
+                </button>
+              </div>
+            </>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+
+// ==================================================
 // USER MANAGEMENT
 // ==================================================
 function UserManagement({ users, onUserCreated }) {
   const [showCreateUser, setShowCreateUser] = useState(false);
-
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState("all");
 
@@ -2435,13 +4405,25 @@ function UserManagement({ users, onUserCreated }) {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
-  const filteredUsers = users.filter((user) => {
+  const safeUsers = Array.isArray(users) ? users : [];
+
+  const roleLabels = {
+    1: "User / Client",
+    2: "Security Analyst",
+    3: "Admin",
+  };
+
+  const getRoleLabel = (roleId) =>
+    roleLabels[Number(roleId)] || `Role ${roleId}`;
+
+  const filteredUsers = safeUsers.filter((user) => {
     const query = search.toLowerCase().trim();
 
     const matchesSearch =
       !query ||
-      String(user.username || "").toLowerCase().includes(query) ||
-      String(user.email || "").toLowerCase().includes(query);
+      String(user.id ?? "").includes(query) ||
+      String(user.username ?? "").toLowerCase().includes(query) ||
+      String(user.email ?? "").toLowerCase().includes(query);
 
     const matchesRole =
       roleFilter === "all" ||
@@ -2450,27 +4432,16 @@ function UserManagement({ users, onUserCreated }) {
     return matchesSearch && matchesRole;
   });
 
-  const getRoleLabel = (roleId) => {
-    const roles = {
-      1: "Client",
-      2: "Analyst",
-      3: "Admin",
-    };
-
-    return roles[roleId] || `Role ${roleId}`;
-  };
-
-  const getUserStatus = (user) => {
-    if (
-      user.is_active === false ||
-      user.status === "inactive" ||
-      user.status === "disabled"
-    ) {
-      return "Inactive";
-    }
-
-    return "Active";
-  };
+  const totalUsers = safeUsers.length;
+  const userClientCount = safeUsers.filter(
+    (user) => Number(user.role_id) === 1
+  ).length;
+  const analystCount = safeUsers.filter(
+    (user) => Number(user.role_id) === 2
+  ).length;
+  const adminCount = safeUsers.filter(
+    (user) => Number(user.role_id) === 3
+  ).length;
 
   const resetCreateForm = () => {
     setUsername("");
@@ -2479,9 +4450,13 @@ function UserManagement({ users, onUserCreated }) {
     setError("");
   };
 
+  const clearFilters = () => {
+    setSearch("");
+    setRoleFilter("all");
+  };
+
   const handleCreateUser = async (e) => {
     e.preventDefault();
-
     setError("");
     setSuccess("");
 
@@ -2515,7 +4490,7 @@ function UserManagement({ users, onUserCreated }) {
     try {
       setLoading(true);
 
-      await axios.post(
+      const response = await axios.post(
         `${API_URL}/admin/users`,
         {
           username: username.trim(),
@@ -2534,8 +4509,8 @@ function UserManagement({ users, onUserCreated }) {
       setShowCreateUser(false);
       resetCreateForm();
 
-      if (onUserCreated) {
-        await onUserCreated();
+      if (onUserCreated && response.data?.user) {
+        await onUserCreated(response.data.user);
       }
     } catch (err) {
       console.error("Create user error:", err);
@@ -2551,65 +4526,101 @@ function UserManagement({ users, onUserCreated }) {
   };
 
   return (
-    <div>
-      {/* HEADER */}
-      <div className="flex flex-col justify-between gap-5 md:flex-row md:items-end">
+    <div className="space-y-6">
+
+      {/* PAGE HEADER */}
+      <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-end">
         <div>
-          <p className="text-xs uppercase tracking-[0.3em] text-red-500">
-            Administration
+          <p className="text-[10px] font-semibold uppercase tracking-[0.35em] text-red-500">
+            User & Access Management
           </p>
 
-          <h1 className="mt-2 text-3xl font-bold">
-            User Management
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">
+            Users
           </h1>
 
-          <p className="mt-2 max-w-2xl text-sm text-gray-500">
-            Create, search and monitor users who have access to the SOC Platform.
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-500">
+            Manage users and their access to SOC PLATFORM.
           </p>
         </div>
 
         <button
+          type="button"
           onClick={() => {
             setShowCreateUser(true);
             setError("");
             setSuccess("");
           }}
-          className="flex items-center justify-center gap-2 bg-red-600 px-5 py-3 text-sm font-semibold transition hover:bg-red-700"
+          className="inline-flex items-center justify-center gap-2 border border-red-600 bg-red-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-red-700"
         >
           <span className="text-lg leading-none">+</span>
-          Create User
+          Add User
         </button>
       </div>
 
       {/* SUCCESS */}
       {success && (
-        <div className="mt-6 border border-green-600/20 bg-green-600/5 px-5 py-4">
-          <p className="text-sm text-green-400">
-            {success}
-          </p>
+        <div className="border border-green-500/20 bg-green-500/5 px-5 py-4">
+          <div className="flex items-center gap-3">
+            <span className="h-2 w-2 rounded-full bg-green-500" />
+            <p className="text-sm text-green-400">{success}</p>
+          </div>
         </div>
       )}
 
-      {/* CREATE USER PANEL */}
-      {showCreateUser && (
-        <div className="mt-6 border border-white/10 bg-[#0d0d0d]">
-          <div className="flex items-center justify-between border-b border-white/10 px-6 py-5">
-            <div>
-              <p className="text-sm font-semibold">
-                Create New User
+      {/* KPI CARDS */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {[
+          ["Total Users", totalUsers, "Accounts", false],
+          ["User / Client", userClientCount, "Portal", false],
+          ["Security Analysts", analystCount, "Security Operations", false],
+          ["Administrators", adminCount, "Admin", true],
+        ].map(([title, value, subtitle, danger]) => (
+          <div
+            key={title}
+            className={`border ${
+              danger ? "border-red-600/20" : "border-white/10"
+            } bg-[#0d0d0d] p-5`}
+          >
+            <p className="text-[10px] uppercase tracking-[0.2em] text-gray-600">
+              {title}
+            </p>
+
+            <div className="mt-3 flex items-end justify-between">
+              <p
+                className={`text-3xl font-semibold ${
+                  danger ? "text-red-400" : "text-white"
+                }`}
+              >
+                {value}
               </p>
 
+              <span className="text-xs text-gray-600">{subtitle}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* CREATE USER */}
+      {showCreateUser && (
+        <div className="border border-red-600/20 bg-[#0d0d0d]">
+          <div className="flex items-center justify-between border-b border-white/10 px-6 py-5">
+            <div>
+              <p className="text-sm font-semibold text-white">
+                Create New User
+              </p>
               <p className="mt-1 text-xs text-gray-600">
-                Create a real User/Client account through the authenticated backend.
+                Create a User / Client account through the authenticated backend.
               </p>
             </div>
 
             <button
+              type="button"
               onClick={() => {
                 setShowCreateUser(false);
                 resetCreateForm();
               }}
-              className="text-sm text-gray-500 transition hover:text-white"
+              className="text-gray-500 transition hover:text-white"
               aria-label="Close create user form"
             >
               ✕
@@ -2621,10 +4632,9 @@ function UserManagement({ users, onUserCreated }) {
             className="grid gap-5 p-6 md:grid-cols-2"
           >
             <div>
-              <label className="text-xs uppercase tracking-wider text-gray-500">
+              <label className="text-[10px] uppercase tracking-[0.2em] text-gray-600">
                 Username
               </label>
-
               <input
                 type="text"
                 value={username}
@@ -2636,10 +4646,9 @@ function UserManagement({ users, onUserCreated }) {
             </div>
 
             <div>
-              <label className="text-xs uppercase tracking-wider text-gray-500">
+              <label className="text-[10px] uppercase tracking-[0.2em] text-gray-600">
                 Email
               </label>
-
               <input
                 type="email"
                 value={email}
@@ -2651,10 +4660,9 @@ function UserManagement({ users, onUserCreated }) {
             </div>
 
             <div>
-              <label className="text-xs uppercase tracking-wider text-gray-500">
+              <label className="text-[10px] uppercase tracking-[0.2em] text-gray-600">
                 Temporary Password
               </label>
-
               <input
                 type="password"
                 value={password}
@@ -2666,24 +4674,20 @@ function UserManagement({ users, onUserCreated }) {
             </div>
 
             <div>
-              <label className="text-xs uppercase tracking-wider text-gray-500">
+              <label className="text-[10px] uppercase tracking-[0.2em] text-gray-600">
                 Account Type
               </label>
-
               <div className="mt-2 border border-white/10 bg-[#080808] px-4 py-3 text-sm text-gray-400">
-                Client / User
+                User / Client
               </div>
-
               <p className="mt-2 text-[11px] text-gray-700">
-                Clients and users are treated as the same platform account.
+                User and Client are treated as one platform actor.
               </p>
             </div>
 
             {error && (
               <div className="border border-red-600/20 bg-red-600/5 px-4 py-3 md:col-span-2">
-                <p className="text-sm text-red-400">
-                  {error}
-                </p>
+                <p className="text-sm text-red-400">{error}</p>
               </div>
             )}
 
@@ -2691,7 +4695,7 @@ function UserManagement({ users, onUserCreated }) {
               <button
                 type="submit"
                 disabled={loading}
-                className="bg-red-600 px-6 py-3 text-sm font-semibold transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                className="border border-red-600 bg-red-600 px-6 py-3 text-sm font-semibold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {loading ? "Creating User..." : "Create User"}
               </button>
@@ -2713,105 +4717,140 @@ function UserManagement({ users, onUserCreated }) {
       )}
 
       {/* SEARCH + FILTER */}
-      <div className="mt-8 flex flex-col gap-4 md:flex-row">
-        <div className="flex-1">
-          <label className="text-[10px] uppercase tracking-wider text-gray-600">
-            Search Users
-          </label>
+      <div className="border border-white/10 bg-[#0d0d0d] p-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end">
+          <div className="flex-1">
+            <label className="text-[10px] uppercase tracking-[0.2em] text-gray-600">
+              Search Users
+            </label>
 
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by username or email..."
-            className="mt-2 w-full border border-white/10 bg-[#0d0d0d] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600"
-          />
-        </div>
+            <div className="relative mt-2">
+              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-600">
+                🔍
+              </span>
 
-        <div className="md:w-56">
-          <label className="text-[10px] uppercase tracking-wider text-gray-600">
-            Role
-          </label>
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search by username, email or ID..."
+                className="w-full border border-white/10 bg-[#080808] py-3 pl-11 pr-4 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600"
+              />
+            </div>
+          </div>
 
-          <select
-            value={roleFilter}
-            onChange={(e) => setRoleFilter(e.target.value)}
-            className="mt-2 w-full border border-white/10 bg-[#0d0d0d] px-4 py-3 text-sm text-gray-400 outline-none focus:border-red-600"
-          >
-            <option value="all">All Roles</option>
-            <option value="1">Client</option>
-            <option value="2">Analyst</option>
-            <option value="3">Admin</option>
-          </select>
+          <div className="lg:w-60">
+            <label className="text-[10px] uppercase tracking-[0.2em] text-gray-600">
+              Role
+            </label>
+
+            <select
+              value={roleFilter}
+              onChange={(e) => setRoleFilter(e.target.value)}
+              className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-gray-400 outline-none focus:border-red-600"
+            >
+              <option value="all">All Roles</option>
+              <option value="1">User / Client</option>
+              <option value="2">Security Analyst</option>
+              <option value="3">Admin</option>
+            </select>
+          </div>
+
+          {(search || roleFilter !== "all") && (
+            <button
+              type="button"
+              onClick={clearFilters}
+              className="border border-white/10 px-5 py-3 text-sm text-gray-500 transition hover:border-red-600/40 hover:text-white"
+            >
+              Clear
+            </button>
+          )}
         </div>
       </div>
 
-      {/* USER TABLE */}
-      <div className="mt-6 overflow-hidden border border-white/10 bg-[#0d0d0d]">
-        <div className="flex items-center justify-between border-b border-white/10 px-6 py-5">
+      {/* USERS TABLE */}
+      <div className="overflow-hidden border border-white/10 bg-[#0d0d0d]">
+        <div className="flex flex-col justify-between gap-3 border-b border-white/10 px-6 py-5 sm:flex-row sm:items-center">
           <div>
-            <p className="text-sm font-semibold">
+            <p className="text-sm font-semibold text-white">
               Registered Users
             </p>
-
             <p className="mt-1 text-xs text-gray-600">
-              Showing {filteredUsers.length} of {users.length} users
+              Showing {filteredUsers.length} of {totalUsers} users
             </p>
           </div>
 
           <div className="border border-white/10 px-3 py-2 text-xs text-gray-500">
-            {users.length} Total
+            {totalUsers} Total
           </div>
         </div>
 
         {filteredUsers.length === 0 ? (
-          <div className="px-6 py-12 text-center">
-            <p className="text-sm text-gray-500">
-              No users match your search.
+          <div className="px-6 py-16 text-center">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center border border-white/10 text-gray-600">
+              👤
+            </div>
+
+            <p className="mt-4 text-sm text-gray-400">No users found</p>
+
+            <p className="mt-1 text-xs text-gray-700">
+              Try changing your search or role filter.
             </p>
 
-            <button
-              onClick={() => {
-                setSearch("");
-                setRoleFilter("all");
-              }}
-              className="mt-3 text-xs text-red-500 hover:text-red-400"
-            >
-              Clear filters
-            </button>
+            {(search || roleFilter !== "all") && (
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="mt-4 text-xs text-red-500 transition hover:text-red-400"
+              >
+                Clear filters
+              </button>
+            )}
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[900px] text-left text-sm">
-              <thead className="border-b border-white/10 bg-[#0a0a0a] text-[10px] uppercase tracking-wider text-gray-600">
-                <tr>
+              <thead className="border-b border-white/10 bg-[#090909]">
+                <tr className="text-[10px] uppercase tracking-[0.15em] text-gray-600">
                   <th className="px-6 py-4">ID</th>
                   <th className="px-6 py-4">User</th>
                   <th className="px-6 py-4">Email</th>
                   <th className="px-6 py-4">Role</th>
-                  <th className="px-6 py-4">Client ID</th>
-                  <th className="px-6 py-4">Status</th>
+                  <th className="px-6 py-4">Client</th>
                   <th className="px-6 py-4">Access</th>
                 </tr>
               </thead>
 
               <tbody className="divide-y divide-white/5">
                 {filteredUsers.map((user) => {
-                  const status = getUserStatus(user);
+                  const roleId = Number(user.role_id);
 
                   return (
                     <tr
                       key={user.id}
-                      className="transition hover:bg-white/[0.02]"
+                      className="transition hover:bg-white/[0.025]"
                     >
-                      <td className="px-6 py-5 text-gray-600">
+                      <td className="px-6 py-5 text-xs text-gray-600">
                         #{user.id}
                       </td>
 
                       <td className="px-6 py-5">
-                        <p className="font-medium text-white">
-                          {user.username || "—"}
-                        </p>
+                        <div className="flex items-center gap-3">
+                          <div className="flex h-9 w-9 items-center justify-center border border-white/10 bg-[#080808] text-xs font-semibold text-gray-400">
+                            {String(user.username || "?")
+                              .charAt(0)
+                              .toUpperCase()}
+                          </div>
+
+                          <div>
+                            <p className="font-medium text-white">
+                              {user.username || "—"}
+                            </p>
+                            <p className="mt-1 text-[10px] text-gray-700">
+                              User ID {user.id}
+                            </p>
+                          </div>
+                        </div>
                       </td>
 
                       <td className="px-6 py-5 text-gray-400">
@@ -2820,64 +4859,42 @@ function UserManagement({ users, onUserCreated }) {
 
                       <td className="px-6 py-5">
                         <span
-                          className={`px-2 py-1 text-xs ${
-                            user.role_id === 3
-                              ? "bg-red-600/10 text-red-400"
-                              : user.role_id === 2
-                              ? "bg-yellow-600/10 text-yellow-400"
-                              : "bg-white/5 text-gray-400"
+                          className={`inline-flex border px-2.5 py-1 text-[11px] ${
+                            roleId === 3
+                              ? "border-red-600/30 bg-red-600/10 text-red-400"
+                              : roleId === 2
+                              ? "border-yellow-600/30 bg-yellow-600/10 text-yellow-400"
+                              : "border-white/10 bg-white/[0.03] text-gray-400"
                           }`}
                         >
-                          {getRoleLabel(user.role_id)}
+                          {getRoleLabel(roleId)}
                         </span>
                       </td>
 
                       <td className="px-6 py-5 text-gray-500">
-                        {user.client_id ?? "—"}
+                        {user.client_id ?? "Not assigned"}
                       </td>
 
                       <td className="px-6 py-5">
-                        <span className="flex items-center gap-2 text-xs">
-                          <span
-                            className={`h-1.5 w-1.5 rounded-full ${
-                              status === "Active"
-                                ? "bg-green-500"
-                                : "bg-red-500"
-                            }`}
-                          />
-
-                          <span
-                            className={
-                              status === "Active"
-                                ? "text-green-500"
-                                : "text-red-400"
-                            }
-                          >
-                            {status}
-                          </span>
-                        </span>
-                      </td>
-
-                      <td className="px-6 py-5">
-                        {user.role_id === 1 && (
-                          <span className="text-xs text-green-500">
+                        {roleId === 1 && (
+                          <span className="text-xs text-gray-400">
                             User Portal
                           </span>
                         )}
 
-                        {user.role_id === 2 && (
+                        {roleId === 2 && (
                           <span className="text-xs text-yellow-500">
-                            Analyst
+                            Security Operations
                           </span>
                         )}
 
-                        {user.role_id === 3 && (
-                          <span className="text-xs text-red-400">
-                            Admin
+                        {roleId === 3 && (
+                          <span className="text-xs font-medium text-red-400">
+                            Administration
                           </span>
                         )}
 
-                        {!user.role_id && (
+                        {!roleId && (
                           <span className="text-xs text-gray-600">
                             Unknown
                           </span>
@@ -2892,12 +4909,16 @@ function UserManagement({ users, onUserCreated }) {
         )}
       </div>
 
-      <div className="mt-5 border border-white/10 bg-[#0a0a0a] px-5 py-4">
-        <p className="text-xs leading-6 text-gray-600">
-          User accounts are managed through the authenticated SOC Platform
-          backend. Server-side authorization remains the source of truth for
-          account access and permissions.
-        </p>
+      {/* SECURITY NOTE */}
+      <div className="border border-white/10 bg-[#090909] px-5 py-4">
+        <div className="flex gap-3">
+          <span className="mt-0.5 text-red-500">●</span>
+          <p className="text-xs leading-6 text-gray-600">
+            User accounts are managed through the authenticated SOC PLATFORM
+            backend. Server-side authorization remains the source of truth for
+            account access and permissions.
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -4699,7 +6720,7 @@ function Capability({
 // ==================================================
 // USER LOGIN
 // ==================================================
-function UserLogin({ onBack, onSuccess }) {
+function UserLogin({ onBack, onSuccess, onRegister }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -4859,6 +6880,17 @@ function UserLogin({ onBack, onSuccess }) {
               <p className="mt-5 text-center text-xs text-gray-600">
                 Authorized user access only
               </p>
+
+              <div className="mt-4 text-center">
+                <span className="text-xs text-gray-600">New user? </span>
+                <button
+                  type="button"
+                  onClick={onRegister}
+                  className="text-xs font-semibold text-red-500 transition hover:text-red-400"
+                >
+                  Create an account
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -4869,6 +6901,127 @@ function UserLogin({ onBack, onSuccess }) {
 
 
 // ==================================================
+// USER REGISTER
+// ==================================================
+function UserRegister({ onBack, onSuccess }) {
+  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setError("");
+    setSuccess("");
+
+    if (!username.trim() || !email.trim() || !password || !confirmPassword) {
+      setError("Please fill in all fields.");
+      return;
+    }
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters.");
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+
+    try {
+      setLoading(true);
+      await axios.post(`${API_URL}/auth/register`, {
+        username: username.trim(),
+        email: email.trim(),
+        password,
+      });
+
+      setSuccess("Account created successfully. Redirecting to User Login...");
+      setUsername("");
+      setEmail("");
+      setPassword("");
+      setConfirmPassword("");
+      window.setTimeout(onSuccess, 900);
+    } catch (err) {
+      console.error("Registration error:", err);
+      const detail = err.response?.data?.detail;
+      setError(detail ? (typeof detail === "string" ? detail : JSON.stringify(detail)) : "Unable to create the account. Please check the API connection.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-[#080808] text-white">
+      <div className="mx-auto flex min-h-screen max-w-6xl items-center px-6">
+        <div className="grid w-full gap-16 lg:grid-cols-2">
+          <div className="hidden lg:flex lg:flex-col lg:justify-center">
+            <div className="mb-6 flex items-center gap-3">
+              <span className="h-px w-10 bg-red-600"></span>
+              <span className="text-xs uppercase tracking-[0.3em] text-red-500">Secure User Registration</span>
+            </div>
+            <h1 className="text-5xl font-bold leading-tight">
+              Create your<br /><span className="text-red-600">security workspace.</span>
+            </h1>
+            <p className="mt-6 max-w-lg leading-7 text-gray-500">
+              Register a User / Client account. Security-tool access is controlled by your administrator.
+            </p>
+          </div>
+
+          <div className="flex items-center">
+            <div className="w-full max-w-md">
+              <button type="button" onClick={onBack} className="mb-8 text-sm text-gray-500 transition hover:text-white">
+                ← Back to User Login
+              </button>
+
+              <div className="mb-8">
+                <div className="mb-5 flex h-10 w-10 items-center justify-center rounded-md bg-red-600 font-bold">S</div>
+                <p className="text-xs uppercase tracking-[0.3em] text-red-500">SOC PLATFORM</p>
+                <h2 className="mt-3 text-3xl font-bold">Create User Account</h2>
+                <p className="mt-2 text-sm text-gray-500">Register a User / Client account.</p>
+              </div>
+
+              <form onSubmit={handleSubmit} className="border border-white/10 bg-[#0d0d0d] p-7">
+                <label className="text-xs uppercase tracking-wider text-gray-500">Username</label>
+                <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Enter username" autoComplete="username"
+                  className="mt-2 mb-5 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600" />
+
+                <label className="text-xs uppercase tracking-wider text-gray-500">Email</label>
+                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="user@example.com" autoComplete="email"
+                  className="mt-2 mb-5 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600" />
+
+                <label className="text-xs uppercase tracking-wider text-gray-500">Password</label>
+                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Minimum 8 characters" autoComplete="new-password"
+                  className="mt-2 mb-5 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600" />
+
+                <label className="text-xs uppercase tracking-wider text-gray-500">Confirm Password</label>
+                <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Re-enter password" autoComplete="new-password"
+                  className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600" />
+
+                {error && <div className="mt-5 border border-red-600/30 bg-red-600/10 px-4 py-3 text-sm text-red-400">{error}</div>}
+                {success && <div className="mt-5 border border-green-600/30 bg-green-600/10 px-4 py-3 text-sm text-green-400">{success}</div>}
+
+                <button type="submit" disabled={loading}
+                  className="mt-6 w-full bg-red-600 py-3.5 text-sm font-semibold transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50">
+                  {loading ? "Creating Account..." : "Create Account"}
+                </button>
+              </form>
+
+              <p className="mt-5 text-center text-xs text-gray-600">
+                Already registered?{" "}
+                <button type="button" onClick={onBack} className="font-semibold text-red-500 hover:text-red-400">Sign in</button>
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ==================================================
 // USER DASHBOARD
 // ==================================================
 function UserDashboard({ onLogout }) {
@@ -4877,6 +7030,84 @@ function UserDashboard({ onLogout }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [activeMenu, setActiveMenu] = useState("dashboard");
+
+  // User Dashboard SOC navigation groups.
+  // Existing functional routes remain unchanged; this state only
+  // controls expansion/collapse of the new dashboard navigation.
+  const [userNavOpen, setUserNavOpen] = useState({
+    "01": true,
+    "02": false,
+    "03": false,
+    "04": false,
+    "05": false,
+    "06": false,
+    "07": false,
+    "08": false,
+    "09": false,
+    "10": false,
+    "11": false,
+    "12": false,
+    "13": false,
+    "14": false,
+    "15": false,
+    "16": false,
+    "17": false,
+    "18": false,
+    "19": false,
+    "20": false,
+    "21": false,
+    "22": false,
+  });
+
+  const toggleUserNav = (group) => {
+    setUserNavOpen((current) => ({
+      ...current,
+      [group]: !current[group],
+    }));
+  };
+
+  const loadJuiceShop = async () => {
+    setJuiceShopLoading(true);
+    try {
+      const [statusResponse, challengesResponse] = await Promise.all([
+        fetch(`${API_URL}/juice-shop/status`),
+        fetch(`${API_URL}/juice-shop/challenges`),
+      ]);
+
+      const statusData = await statusResponse.json();
+      const challengeData = await challengesResponse.json();
+
+      setJuiceShopStatus(statusData);
+      setJuiceShopChallenges(challengeData.data || []);
+    } catch (error) {
+      setJuiceShopStatus({
+        status: "offline",
+        error: error.message,
+      });
+      setJuiceShopChallenges([]);
+    } finally {
+      setJuiceShopLoading(false);
+    }
+  };
+
+  const [nmapResultPage, setNmapResultPage] = useState(null);
+  const [niktoResultPage, setNiktoResultPage] = useState(null);
+  const [nucleiResultPage, setNucleiResultPage] = useState(null);
+  const [masscanResultPage, setMasscanResultPage] = useState(null);
+  const [hping3ResultPage, setHping3ResultPage] = useState(null);
+  const [wiresharkResultPage, setWiresharkResultPage] = useState(null);
+  const [tsharkResultPage, setTsharkResultPage] = useState(null);
+  const [snortResultPage, setSnortResultPage] = useState(null);
+  const [hydraResultPage, setHydraResultPage] = useState(null);
+  const [johnResultPage, setJohnResultPage] = useState(null);
+  const [metasploitResultPage, setMetasploitResultPage] = useState(null);
+  const [digResultPage, setDigResultPage] = useState(null);
+  const [dnsReconResultPage, setDnsReconResultPage] = useState(null);
+  const [nslookupResultPage, setNslookupResultPage] = useState(null);
+  const [pingResultPage, setPingResultPage] = useState(null);
+  const [whoisResultPage, setWhoisResultPage] = useState(null);
+  const [multiToolResultPage, setMultiToolResultPage] = useState(null);
+  const [zapResultPage, setZapResultPage] = useState(null);
 
   useEffect(() => {
     const loadUserDashboard = async () => {
@@ -4976,78 +7207,449 @@ function UserDashboard({ onLogout }) {
       <div className="flex pt-16">
 
         {/* SIDEBAR */}
-        <aside className="fixed bottom-0 left-0 top-16 hidden w-64 border-r border-white/10 bg-[#0a0a0a] lg:block">
-          <div className="p-5">
-            <p className="mb-4 px-3 text-[10px] uppercase tracking-[0.25em] text-gray-600">
+        <aside className="fixed bottom-0 left-0 top-16 hidden w-72 border-r border-white/10 bg-[#0a0a0a] lg:block">
+          <div className="h-full overflow-y-auto p-4 pb-28">
+
+            <p className="mb-5 px-3 text-[10px] uppercase tracking-[0.25em] text-gray-600">
               Security Workspace
             </p>
 
-            <p className="mb-3 mt-6 px-3 text-[10px] uppercase tracking-[0.2em] text-gray-600">
-              Existing Modules
-            </p>
+            {[
+              {
+                id: "01",
+                icon: "🏠",
+                label: "SOC Overview",
+                items: [
+                  ["Security Dashboard", "dashboard"],
+                  ["Active Alerts"],
+                  ["Active Incidents"],
+                  ["Critical Threats"],
+                  ["Risk Overview"],
+                  ["Environment Health"],
+                ],
+              },
+              {
+                id: "02",
+                icon: "🖥️",
+                label: "Asset Management",
+                items: [
+                  ["Asset Inventory"],
+                  ["Asset Discovery"],
+                  ["Servers"],
+                  ["Endpoints"],
+                  ["Network Devices"],
+                  ["Applications"],
+                  ["Databases"],
+                  ["Domains"],
+                  ["IP Addresses"],
+                  ["Asset Groups"],
+                ],
+              },
+              {
+                id: "03",
+                icon: "🌐",
+                label: "Attack Surface",
+                items: [
+                  ["External Attack Surface"],
+                  ["Internal Attack Surface"],
+                  ["Domain Discovery"],
+                  ["Subdomain Discovery"],
+                  ["DNS Security"],
+                  ["IP Intelligence"],
+                  ["Open Ports"],
+                  ["Exposed Services"],
+                  ["SSL/TLS"],
+                  ["Security Headers"],
+                ],
+              },
+              {
+                id: "04",
+                icon: "🔍",
+                label: "Vulnerability Management",
+                items: [
+                  ["Vulnerability Dashboard"],
+                  ["Vulnerabilities", "findings"],
+                  ["CVE Database"],
+                  ["Vulnerability Scans"],
+                  ["Network Scans"],
+                  ["Web Scans"],
+                  ["API Scans"],
+                  ["Configuration Scans"],
+                  ["Patch Management"],
+                  ["Remediation"],
+                ],
+              },
+              {
+                id: "05",
+                icon: "🛡️",
+                label: "Endpoint Security",
+                items: [
+                  ["Endpoint Dashboard"],
+                  ["Endpoint Inventory"],
+                  ["Endpoint Agents"],
+                  ["Agent Health"],
+                  ["Process Monitoring"],
+                  ["File Monitoring"],
+                  ["File Integrity Monitoring"],
+                  ["Login Monitoring"],
+                  ["USB Monitoring"],
+                  ["Network Connections"],
+                  ["Endpoint Isolation"],
+                  ["Endpoint Response"],
+                ],
+              },
+              {
+                id: "06",
+                icon: "🖥️",
+                label: "Server Security",
+                items: [
+                  ["Server Dashboard"],
+                  ["Linux Security"],
+                  ["Windows Security"],
+                  ["SSH Security"],
+                  ["User Accounts"],
+                  ["Privileged Accounts"],
+                  ["Running Processes"],
+                  ["Services"],
+                  ["Firewall"],
+                  ["System Hardening"],
+                  ["Server Configuration", "server-config"],
+                ],
+              },
+              {
+                id: "07",
+                icon: "📊",
+                label: "SIEM",
+                items: [
+                  ["SIEM Dashboard"],
+                  ["Log Explorer", "logs"],
+                  ["Security Events"],
+                  ["Authentication Logs"],
+                  ["Network Logs"],
+                  ["Firewall Logs"],
+                  ["DNS Logs"],
+                  ["Application Logs"],
+                  ["Windows Events"],
+                  ["Linux Logs"],
+                  ["Log Sources"],
+                  ["Saved Searches"],
+                ],
+              },
+              {
+                id: "08",
+                icon: "🚨",
+                label: "Detection",
+                items: [
+                  ["Detection Dashboard"],
+                  ["Detection Rules"],
+                  ["Sigma Rules"],
+                  ["Correlation Rules"],
+                  ["Behavioral Detection"],
+                  ["Anomaly Detection"],
+                  ["IOC Detection"],
+                  ["Detection Coverage"],
+                ],
+              },
+              {
+                id: "09",
+                icon: "🚨",
+                label: "Alerts",
+                items: [
+                  ["Alert Dashboard"],
+                  ["All Alerts"],
+                  ["Critical Alerts"],
+                  ["Open Alerts"],
+                  ["Acknowledged"],
+                  ["Suppressed"],
+                  ["Alert Correlation"],
+                  ["Alert Tuning"],
+                ],
+              },
+              {
+                id: "10",
+                icon: "🔥",
+                label: "Incidents",
+                items: [
+                  ["Incident Dashboard", "incidents"],
+                  ["Active Incidents"],
+                  ["Critical Incidents"],
+                  ["Investigation"],
+                  ["Evidence"],
+                  ["Incident Timeline"],
+                  ["Case Management"],
+                  ["Assignments"],
+                  ["SLA Management"],
+                  ["Incident Playbooks"],
+                  ["Closed Incidents"],
+                ],
+              },
+              {
+                id: "11",
+                icon: "🧠",
+                label: "Threat Intelligence",
+                items: [
+                  ["Threat Intelligence Dashboard"],
+                  ["Indicators"],
+                  ["IP Intelligence"],
+                  ["Domain Intelligence"],
+                  ["URL Intelligence"],
+                  ["Hash Intelligence"],
+                  ["Threat Actors"],
+                  ["Campaigns"],
+                  ["Malware Intelligence"],
+                  ["CVE Intelligence"],
+                  ["Threat Feeds"],
+                ],
+              },
+              {
+                id: "12",
+                icon: "🎯",
+                label: "Threat Hunting",
+                items: [
+                  ["Hunting Dashboard"],
+                  ["Query Builder"],
+                  ["Event Search"],
+                  ["IOC Hunting"],
+                  ["User Hunting"],
+                  ["Process Hunting"],
+                  ["Network Hunting"],
+                  ["Timeline Analysis"],
+                  ["Saved Hunts"],
+                ],
+              },
+              {
+                id: "13",
+                icon: "🧩",
+                label: "MITRE ATT&CK",
+                items: [
+                  ["ATT&CK Dashboard", "mitre-attack"],
+                  ["Tactics"],
+                  ["Techniques"],
+                  ["Sub-Techniques"],
+                  ["Groups"],
+                  ["Software"],
+                  ["Detection Coverage"],
+                ],
+              },
+              {
+                id: "14",
+                icon: "🌐",
+                label: "Network Security",
+                items: [
+                  ["Network Dashboard"],
+                  ["Network Discovery"],
+                  ["Network Topology"],
+                  ["Traffic Analysis"],
+                  ["Connections"],
+                  ["Ports"],
+                  ["Protocols"],
+                  ["Firewall"],
+                  ["VPN"],
+                  ["DNS Security"],
+                  ["IDS/IPS"],
+                  ["Network Anomalies"],
+                ],
+              },
+              {
+                id: "15",
+                icon: "🔐",
+                label: "Identity Security",
+                items: [
+                  ["Identity Dashboard"],
+                  ["Users"],
+                  ["Groups"],
+                  ["Privileged Users"],
+                  ["Authentication"],
+                  ["MFA"],
+                  ["Login Anomalies"],
+                  ["Identity Risk"],
+                ],
+              },
+              {
+                id: "16",
+                icon: "🔑",
+                label: "Secrets Security",
+                items: [
+                  ["Secrets Dashboard"],
+                  ["Exposed Secrets"],
+                  ["API Keys"],
+                  ["Tokens"],
+                  ["Credentials"],
+                  ["Repository Scanning"],
+                ],
+              },
+              {
+                id: "17",
+                icon: "⚙️",
+                label: "Security Configuration",
+                items: [
+                  ["Security Baselines"],
+                  ["Hardening"],
+                  ["CIS Benchmarks"],
+                  ["Linux Configuration"],
+                  ["Windows Configuration"],
+                  ["Web Server Configuration"],
+                  ["Configuration Drift"],
+                ],
+              },
+              {
+                id: "18",
+                icon: "🤖",
+                label: "SOAR / Automation",
+                items: [
+                  ["Playbooks"],
+                  ["Workflows"],
+                  ["Triggers"],
+                  ["Actions"],
+                  ["Approvals"],
+                  ["Response Actions"],
+                ],
+              },
+              {
+                id: "19",
+                icon: "📋",
+                label: "Risk Management",
+                items: [
+                  ["Risk Dashboard"],
+                  ["Asset Risk"],
+                  ["Vulnerability Risk"],
+                  ["Identity Risk"],
+                  ["Risk Register"],
+                  ["Risk Trends"],
+                ],
+              },
+              {
+                id: "20",
+                icon: "🔎",
+                label: "Security Assessment",
+                items: [
+                  ["VAPT", "vapt"],
+                  ["Web Application Testing"],
+                  ["API Testing"],
+                  ["Network Assessment"],
+                  ["Configuration Assessment"],
+                  ["Security Audit"],
+                  ["Findings", "findings"],
+                  ["Remediation"],
+                  ["QA Testing", "qa"],
+                ],
+              },
+              {
+                id: "21",
+                icon: "🧪",
+                label: "Security Testing",
+                items: [
+                  ["Port Scanner"],
+                  ["Service Discovery"],
+                  ["Web Scanner"],
+                  ["API Scanner"],
+                  ["DNS Scanner"],
+                  ["TLS Scanner"],
+                  ["Header Scanner"],
+                  ["Code Security", "code-security"],
+                  ["Scan History"],
+                ],
+              },
+              {
+                id: "23",
+                icon: "🔔",
+                label: "Notifications",
+                items: [
+                  ["Notification Center", "notifications"],
+                ],
+              },
+              {
+                id: "22",
+                icon: "📊",
+                label: "Reports",
+                items: [
+                  ["Security Reports"],
+                  ["Vulnerability Reports"],
+                  ["Incident Reports"],
+                  ["Risk Reports"],
+                  ["Scheduled Reports"],
+                ],
+              },
+            ].map((group) => {
+              const isOpen = userNavOpen[group.id];
 
-            <SidebarItem
-              label="Dashboard"
-              active={activeMenu === "dashboard"}
-              onClick={() => setActiveMenu("dashboard")}
-            />
+              return (
+                <div key={group.id} className="mb-1">
+                  <button
+                    type="button"
+                    onClick={() => toggleUserNav(group.id)}
+                    className="flex w-full items-center gap-2 border-l-2 border-transparent px-3 py-2.5 text-left transition hover:bg-white/[0.03]"
+                  >
+                    <span className="w-5 text-sm">{group.icon}</span>
+                    <span className="flex-1 text-[11px] font-medium uppercase tracking-wide text-gray-400">
+                      {group.id}. {group.label}
+                    </span>
+                    <span className="text-[10px] text-gray-600">
+                      {isOpen ? "▼" : "▶"}
+                    </span>
+                  </button>
 
-            <SidebarItem
-              label="VAPT Testing"
-              active={activeMenu === "vapt"}
-              onClick={() => setActiveMenu("vapt")}
-            />
+                  {isOpen && (
+                    <div className="ml-4 border-l border-white/10 pl-2">
+                      {group.items.map(([label, route]) => (
+                        <button
+                          key={label}
+                          type="button"
+                          onClick={() => {
+                            if (route) {
+                              setActiveMenu(route);
+                            }
+                          }}
+                          className={`mb-0.5 flex w-full items-center px-3 py-2 text-left text-[11px] transition ${
+                            route && activeMenu === route
+                              ? "bg-red-600/10 text-white"
+                              : route
+                                ? "text-gray-500 hover:bg-white/[0.03] hover:text-white"
+                                : "cursor-default text-gray-600 hover:bg-white/[0.02]"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
 
-            <SidebarItem
-              label="QA Testing"
-              active={activeMenu === "qa"}
-              onClick={() => setActiveMenu("qa")}
-            />
+            {/* Existing modules preserved */}
+            <div className="mt-5 border-t border-white/10 pt-4">
+              <p className="mb-3 px-3 text-[10px] uppercase tracking-[0.2em] text-gray-600">
+                Existing Modules
+              </p>
 
-            <SidebarItem
-              label="Live Log Monitoring"
-              active={activeMenu === "logs"}
-              onClick={() => setActiveMenu("logs")}
-            />
+              <SidebarItem
+                label="Uptime Monitoring"
+                active={activeMenu === "uptime"}
+                onClick={() => setActiveMenu("uptime")}
+              />
 
-            <SidebarItem
-              label="Uptime Monitoring"
-              active={activeMenu === "uptime"}
-              onClick={() => setActiveMenu("uptime")}
-            />
+              <SidebarItem
+                label="Security Copilot"
+                active={activeMenu === "copilot"}
+                onClick={() => setActiveMenu("copilot")}
+              />
 
-            <SidebarItem
-              label="Server Configuration"
-              active={activeMenu === "server-config"}
-              onClick={() => setActiveMenu("server-config")}
-            />
+              <SidebarItem
+                label="Complaints / Support"
+                active={activeMenu === "support"}
+                onClick={() => setActiveMenu("support")}
+              />
 
-            <SidebarItem
-              label="Security Findings"
-              active={activeMenu === "findings"}
-              onClick={() => setActiveMenu("findings")}
-            />
-
-            <SidebarItem
-              label="Security Copilot"
-              active={activeMenu === "copilot"}
-              onClick={() => setActiveMenu("copilot")}
-            />
-
-            <SidebarItem
-              label="Complaints / Support"
-              active={activeMenu === "support"}
-              onClick={() => setActiveMenu("support")}
-            />
-
-            <SidebarItem
-              label="Profile"
-              active={activeMenu === "profile"}
-              onClick={() => setActiveMenu("profile")}
-            />
+              <SidebarItem
+                label="Profile"
+                active={activeMenu === "profile"}
+                onClick={() => setActiveMenu("profile")}
+              />
+            </div>
           </div>
 
-          <div className="absolute bottom-0 left-0 right-0 border-t border-white/10 p-5">
+          <div className="absolute bottom-0 left-0 right-0 border-t border-white/10 bg-[#0a0a0a] p-4">
             <p className="text-[10px] uppercase tracking-wider text-gray-600">
               Platform Status
             </p>
@@ -5061,8 +7663,9 @@ function UserDashboard({ onLogout }) {
           </div>
         </aside>
 
+
         {/* CONTENT */}
-        <main className="w-full p-6 lg:ml-64 lg:p-10">
+        <main className="min-w-0 w-full overflow-x-hidden p-4 sm:p-6 lg:ml-64 lg:w-[calc(100%-16rem)] lg:p-6 xl:p-8">
           {error && (
             <div className="mb-6 border border-red-600/30 bg-red-600/10 px-5 py-4 text-sm text-red-400">
               {error}
@@ -5070,6 +7673,122 @@ function UserDashboard({ onLogout }) {
           )}
 
           {/* DASHBOARD */}
+          {activeMenu === "juice-shop" && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h1 className="text-2xl font-semibold text-white">OWASP Juice Shop</h1>
+                  <p className="mt-1 text-sm text-gray-400">
+                    Real local vulnerable web application lab
+                  </p>
+                </div>
+
+                <button
+                  onClick={loadJuiceShop}
+                  disabled={juiceShopLoading}
+                  className="rounded-md border border-red-600/40 bg-red-600/10 px-4 py-2 text-sm text-red-400 hover:bg-red-600/20 disabled:opacity-50"
+                >
+                  {juiceShopLoading ? "Refreshing..." : "Refresh"}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+                  <div className="text-xs uppercase text-gray-500">Status</div>
+                  <div className="mt-2 text-lg font-semibold text-white">
+                    {juiceShopStatus?.status || "Unknown"}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+                  <div className="text-xs uppercase text-gray-500">HTTP Status</div>
+                  <div className="mt-2 text-lg font-semibold text-white">
+                    {juiceShopStatus?.http_status ?? "-"}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+                  <div className="text-xs uppercase text-gray-500">Challenges</div>
+                  <div className="mt-2 text-lg font-semibold text-white">
+                    {juiceShopStatus?.challenge_count ?? juiceShopChallenges.length}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+                  <div className="text-xs uppercase text-gray-500">Solved</div>
+                  <div className="mt-2 text-lg font-semibold text-white">
+                    {juiceShopStatus?.solved_count ?? 0}
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-white/10 bg-white/[0.03] p-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-semibold text-white">Lab Target</h2>
+                    <p className="mt-1 font-mono text-sm text-gray-400">
+                      http://127.0.0.1:3000
+                    </p>
+                  </div>
+
+                  <a
+                    href="http://127.0.0.1:3000"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+                  >
+                    Open Juice Shop
+                  </a>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-white/10 bg-white/[0.03] overflow-hidden">
+                <div className="border-b border-white/10 px-5 py-4">
+                  <h2 className="text-lg font-semibold text-white">Live Challenges</h2>
+                  <p className="text-sm text-gray-500">
+                    Data retrieved directly from the running Juice Shop API.
+                  </p>
+                </div>
+
+                <div className="max-h-[520px] overflow-auto">
+                  {juiceShopChallenges.length === 0 ? (
+                    <div className="p-5 text-sm text-gray-500">
+                      No challenge data available.
+                    </div>
+                  ) : (
+                    juiceShopChallenges.map((challenge) => (
+                      <div
+                        key={challenge.id}
+                        className="border-b border-white/5 px-5 py-4 last:border-b-0"
+                      >
+                        <div className="flex items-start justify-between gap-4">
+                          <div>
+                            <div className="font-medium text-white">
+                              {challenge.name}
+                            </div>
+                            <div className="mt-1 text-xs text-gray-500">
+                              {challenge.category} · Difficulty {challenge.difficulty}
+                            </div>
+                          </div>
+
+                          <span
+                            className={`rounded-full px-2 py-1 text-xs ${
+                              challenge.solved
+                                ? "bg-green-500/10 text-green-400"
+                                : "bg-gray-500/10 text-gray-400"
+                            }`}
+                          >
+                            {challenge.solved ? "Solved" : "Unsolved"}
+                          </span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
           {activeMenu === "dashboard" && (
             <>
               <div className="mb-8">
@@ -5256,7 +7975,240 @@ function UserDashboard({ onLogout }) {
 
           {/* VAPT TESTING */}
           {activeMenu === "vapt" && (
-            <VAPTTesting />
+            <VAPTTesting
+              onViewNmapResults={(result) => {
+                setNmapResultPage(result);
+                setActiveMenu("nmap-results");
+              }}
+              onViewNiktoResults={(result) => {
+                setNiktoResultPage(result);
+                setActiveMenu("nikto-results");
+              }}
+              onViewNucleiResults={(result) => {
+                setNucleiResultPage(result);
+                setActiveMenu("nuclei-results");
+              }}
+              onViewMasscanResults={(result) => {
+                setMasscanResultPage(result);
+                setActiveMenu("masscan-results");
+              }}
+              onViewHping3Results={(result) => {
+                setHping3ResultPage(result);
+                setActiveMenu("hping3-results");
+              }}
+              onViewWiresharkResults={(result) => {
+                setWiresharkResultPage(result);
+                setActiveMenu("wireshark-results");
+              }}
+              onViewTsharkResults={(result) => {
+                setTsharkResultPage(result);
+                setActiveMenu("tshark-results");
+              }}
+              onViewSnortResults={(result) => {
+                setSnortResultPage(result);
+                setActiveMenu("snort-results");
+              }}
+              onViewMetasploitResults={(result) => {
+                setMetasploitResultPage(result);
+                setActiveMenu("metasploit-results");
+              }}
+              onViewAccessValidationResults={() => {
+                setActiveMenu("access-validation-results");
+              }}
+              onViewRiskAssessmentResults={() => {
+                setActiveMenu("risk-assessment-results");
+              }}
+              onViewReportResults={() => {
+                setActiveMenu("report-results");
+              }}
+              onViewHydraResults={(result) => {
+                setHydraResultPage(result);
+                setActiveMenu("hydra-results");
+              }}
+              onViewJohnResults={(result) => {
+                setJohnResultPage(result);
+                setActiveMenu("john-results");
+              }}
+              onViewDigResults={(result) => {
+                setDigResultPage(result);
+                setActiveMenu("dig-results");
+              }}
+              onViewDnsReconResults={(result) => {
+                setDnsReconResultPage(result);
+                setActiveMenu("dns-recon-results");
+              }}
+              onViewNslookupResults={(result) => {
+                setNslookupResultPage(result);
+                setActiveMenu("nslookup-results");
+              }}
+              onViewPingResults={(result) => {
+                setPingResultPage(result);
+                setActiveMenu("ping-results");
+              }}
+              onViewWhoisResults={(result) => {
+                setWhoisResultPage(result);
+                setActiveMenu("whois-results");
+              }}
+              onViewMultiToolResults={(result) => {
+                setMultiToolResultPage(result);
+                setActiveMenu("multi-tool-results");
+              }}
+              onViewZapResults={(result) => {
+                setZapResultPage(result);
+                setActiveMenu("zap-results");
+              }}
+            />
+          )}
+
+          {activeMenu === "nmap-results" && nmapResultPage && (
+            <NmapResultsPage
+              scanResult={nmapResultPage}
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "nikto-results" && niktoResultPage && (
+            <NiktoResultsPage
+              scanResult={niktoResultPage}
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "nuclei-results" && nucleiResultPage && (
+            <NucleiResultsPage
+              scanResult={nucleiResultPage}
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "masscan-results" && masscanResultPage && (
+            <MasscanResultsPage
+              scanResult={masscanResultPage}
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "zap-results" && zapResultPage && (
+            <ZapResultsPage
+              scanResult={zapResultPage}
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "hping3-results" && hping3ResultPage && (
+            <Hping3ResultsPage
+              scanResult={hping3ResultPage}
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "wireshark-results" && wiresharkResultPage && (
+            <WiresharkResultsPage
+              captureResult={wiresharkResultPage}
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+          {activeMenu === "tshark-results" && tsharkResultPage && (
+            <TsharkResultsPage
+              result={tsharkResultPage}
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+          {activeMenu === "snort-results" && snortResultPage && (
+            <SnortResultsPage
+              result={snortResultPage}
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "hydra-results" && hydraResultPage && (
+            <HydraResultsPage
+              scanResult={hydraResultPage}
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "john-results" && johnResultPage && (
+            <JohnResultsPage
+              scanResult={johnResultPage}
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "metasploit-results" && metasploitResultPage && (
+            <MetasploitResultsPage
+              scanResult={metasploitResultPage}
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "multi-tool-results" && multiToolResultPage && (
+            <MultiToolResultsPage
+              scanResult={multiToolResultPage}
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "access-validation-results" && (
+            <AccessValidationResults
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "risk-assessment-results" && (
+            <RiskAssessmentResults
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "report-results" && (
+            <VAPTReportResults
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "dig-results" && digResultPage && (
+            <DigResultsPage
+              scanResult={digResultPage}
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "dns-recon-results" && dnsReconResultPage && (
+            <NativeToolResultsPage
+              scanResult={dnsReconResultPage}
+              toolName="DNS Recon"
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "nslookup-results" && nslookupResultPage && (
+            <NativeToolResultsPage
+              scanResult={nslookupResultPage}
+              toolName="nslookup"
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "ping-results" && pingResultPage && (
+            <NativeToolResultsPage
+              scanResult={pingResultPage}
+              toolName="Ping"
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {activeMenu === "whois-results" && whoisResultPage && (
+            <NativeToolResultsPage
+              scanResult={whoisResultPage}
+              toolName="WHOIS"
+              onBack={() => setActiveMenu("vapt")}
+            />
+          )}
+
+          {/* MITRE ATT&CK */}
+          {activeMenu === "mitre-attack" && (
+            <MitreAttack />
           )}
 
           {/* QA TESTING */}
@@ -5296,6 +8248,16 @@ function UserDashboard({ onLogout }) {
             />
           )}
 
+          {/* CODE SECURITY */}
+          {activeMenu === "code-security" && (
+            <CodeSecurity />
+          )}
+
+          {/* USER NOTIFICATIONS */}
+          {activeMenu === "notifications" && (
+            <UserNotificationCenter />
+          )}
+
           {/* MY ACTIVITY */}
           {activeMenu === "activity" && (
             <MyActivity />
@@ -5307,7 +8269,7 @@ function UserDashboard({ onLogout }) {
           )}
 
           {activeMenu === "incidents" && (
-            <UserModulePlaceholder menu="incidents" />
+            <IncidentManagement />
           )}
 
           {/* OTHER MODULES */}
@@ -5317,6 +8279,10 @@ function UserDashboard({ onLogout }) {
 
           {activeMenu !== "dashboard" &&
             activeMenu !== "vapt" &&
+            activeMenu !== "nmap-results" &&
+            activeMenu !== "nikto-results" &&
+            activeMenu !== "nuclei-results" &&
+            activeMenu !== "access-validation-results" &&
             activeMenu !== "qa" &&
             activeMenu !== "logs" &&
             activeMenu !== "uptime" &&
@@ -5328,7 +8294,9 @@ function UserDashboard({ onLogout }) {
             activeMenu !== "reports" &&
             activeMenu !== "activity" &&
             activeMenu !== "alerts" &&
-            activeMenu !== "incidents" && (
+            activeMenu !== "code-security" &&
+            activeMenu !== "incidents" &&
+            activeMenu !== "notifications" && (
               <UserModulePlaceholder menu={activeMenu} />
             )}
         </main>
@@ -7166,11 +10134,13 @@ function LiveLogMonitoring() {
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
   const [dataSource, setDataSource] = useState("—");
+  const [securityEvents, setSecurityEvents] = useState([]);
 
   const logTabs = [
     { id: "syslog", label: "Sys Logs" },
     { id: "auth", label: "Auth Logs" },
     { id: "access", label: "Access Logs" },
+    { id: "security-events", label: "Security Events" },
   ];
 
   const getAuthConfig = () => {
@@ -7299,6 +10269,95 @@ function LiveLogMonitoring() {
       return false;
     } finally {
       setMonitoringLoading(false);
+    }
+  };
+
+  const fetchSecurityEvents = async ({ silent = false } = {}) => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      setError("Your session has expired. Please log in again.");
+      return;
+    }
+
+    try {
+      if (!silent) {
+        setLoading(true);
+      }
+
+      const response = await axios.get(
+        `${API_URL}/security-events?limit=200`,
+        getAuthConfig()
+      );
+
+      const returnedEvents = Array.isArray(response.data)
+        ? response.data
+        : [];
+
+      setSecurityEvents(returnedEvents);
+      setDataSource("SOC Security Events API");
+      setLastUpdated(new Date());
+    } catch (err) {
+      console.error("Security event fetch error:", err);
+
+      if (err.response?.status === 401) {
+        setError("Your session has expired. Please log in again.");
+        localStorage.removeItem("token");
+      } else if (err.response?.data?.detail) {
+        setError(err.response.data.detail);
+      } else {
+        setError("Unable to retrieve SOC security events.");
+      }
+
+      if (!silent) {
+        setSecurityEvents([]);
+      }
+    } finally {
+      if (!silent) {
+        setLoading(false);
+      }
+    }
+  };
+
+  const updateSecurityAlert = async (event, action) => {
+    if (!event?.event_id) {
+      setError("This security event does not have an event ID.");
+      return;
+    }
+
+    try {
+      setError("");
+
+      const response = await axios.patch(
+        `${API_URL}/security-events/${encodeURIComponent(event.event_id)}/${action}`,
+        {},
+        getAuthConfig()
+      );
+
+      const updatedAlert = response.data?.alert;
+
+      if (updatedAlert) {
+        setSecurityEvents((current) =>
+          current.map((item) =>
+            item.id === updatedAlert.id
+              ? updatedAlert
+              : item
+          )
+        );
+      } else {
+        await fetchSecurityEvents({ silent: true });
+      }
+    } catch (err) {
+      console.error(`Security alert ${action} error:`, err);
+
+      if (err.response?.status === 401) {
+        localStorage.removeItem("token");
+        setError("Your session has expired. Please log in again.");
+      } else if (err.response?.data?.detail) {
+        setError(err.response.data.detail);
+      } else {
+        setError(`Unable to ${action} this security alert.`);
+      }
     }
   };
 
@@ -7435,6 +10494,24 @@ function LiveLogMonitoring() {
 
     return () => clearTimeout(timer);
   }, [search, severity]);
+
+  useEffect(() => {
+    if (activeLog !== "security-events") {
+      return undefined;
+    }
+
+    fetchSecurityEvents();
+
+    if (!autoRefresh) {
+      return undefined;
+    }
+
+    const interval = setInterval(() => {
+      fetchSecurityEvents({ silent: true });
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [activeLog, autoRefresh]);
 
   useEffect(() => {
     if (!autoRefresh || !activeTarget) {
@@ -7837,10 +10914,15 @@ function LiveLogMonitoring() {
           <div className="flex items-end">
             <button
               onClick={() => {
+                if (activeLog === "security-events") {
+                  fetchSecurityEvents();
+                  return;
+                }
+
                 fetchLogs({ includeFilters: true });
                 fetchLogs({ includeFilters: false, silent: true });
               }}
-              disabled={loading || !activeTarget}
+              disabled={loading || (activeLog !== "security-events" && !activeTarget)}
               className="border border-white/10 px-4 py-3 text-xs text-gray-400 transition hover:border-red-600 hover:text-white disabled:opacity-50"
             >
               {loading ? "Loading..." : "Refresh Now"}
@@ -7849,66 +10931,254 @@ function LiveLogMonitoring() {
         </div>
 
         {/* TABLE */}
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[950px] text-left text-sm">
-            <thead className="border-b border-white/10 bg-[#0a0a0a] text-[10px] uppercase tracking-wider text-gray-600">
-              <tr>
-                <th className="px-6 py-4">Time</th>
-                <th className="px-6 py-4">Source</th>
-                <th className="px-6 py-4">Level</th>
-                <th className="px-6 py-4">Event</th>
-                <th className="px-6 py-4">Message</th>
-              </tr>
-            </thead>
-
-            <tbody className="divide-y divide-white/5">
-              {logs.map((log) => (
-                <tr
-                  key={log.id}
-                  className="transition hover:bg-white/[0.02]"
-                >
-                  <td className="whitespace-nowrap px-6 py-5 font-mono text-xs text-gray-600">
-                    {log.timestamp || "—"}
-                  </td>
-
-                  <td className="px-6 py-5 text-gray-400">
-                    {log.source || "—"}
-                  </td>
-
-                  <td className="px-6 py-5">
-                    <LogLevel level={log.level} />
-                  </td>
-
-                  <td className="max-w-xs px-6 py-5 font-medium text-gray-300">
-                    {log.event || "—"}
-                  </td>
-
-                  <td className="max-w-2xl px-6 py-5 text-gray-600">
-                    {log.message || "—"}
-                  </td>
+        {activeLog === "security-events" ? (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1250px] text-left text-sm">
+              <thead className="border-b border-white/10 bg-[#0a0a0a] text-[10px] uppercase tracking-wider text-gray-600">
+                <tr>
+                  <th className="px-6 py-4">Time</th>
+                  <th className="px-6 py-4">Source</th>
+                  <th className="px-6 py-4">Severity</th>
+                  <th className="px-6 py-4">Event</th>
+                  <th className="px-6 py-4">Target</th>
+                  <th className="px-6 py-4">MITRE</th>
+                  <th className="px-6 py-4">Tactic</th>
+                  <th className="px-6 py-4">Confidence</th>
+                  <th className="px-6 py-4">Status</th>
+                  <th className="px-6 py-4">Evidence</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
 
-          {!loading && logs.length === 0 && (
-            <div className="px-6 py-12 text-center">
-              <p className="text-sm text-gray-500">
-                No real log events match the current filters.
-              </p>
+              <tbody className="divide-y divide-white/5">
+                {securityEvents
+                  .filter((event) => {
+                    const term = search.trim().toLowerCase();
+                    const matchesSearch = !term || [
+                      event.source,
+                      event.event_type,
+                      event.message,
+                      event.target,
+                      event.mitre?.technique_id,
+                      event.mitre?.technique_name,
+                      event.mitre?.tactic,
+                    ].some((value) => String(value || "").toLowerCase().includes(term));
 
-              <p className="mt-2 text-xs text-gray-700">
-                Try clearing the search or selecting All Levels.
-              </p>
-            </div>
-          )}
+                    const matchesSeverity =
+                      severity === "all" ||
+                      String(event.severity || "").toUpperCase() === severity;
 
-          {loading && (
-            <div className="px-6 py-12 text-center text-sm text-gray-600">
-              Loading real log events...
-            </div>
-          )}
-        </div>
+                    return matchesSearch && matchesSeverity;
+                  })
+                  .map((event) => (
+                    <tr
+                      key={event.id || event.event_id}
+                      className="transition hover:bg-white/[0.02]"
+                    >
+                      <td className="whitespace-nowrap px-6 py-5 font-mono text-xs text-gray-600">
+                        {event.timestamp || "—"}
+                      </td>
+
+                      <td className="px-6 py-5 text-gray-400">
+                        {event.source || "—"}
+                      </td>
+
+                      <td className="px-6 py-5">
+                        <LogLevel level={event.severity} />
+                      </td>
+
+                      <td className="max-w-xs px-6 py-5 font-medium text-gray-300">
+                        {event.event_type || "—"}
+                        <p className="mt-1 text-xs font-normal text-gray-600">
+                          {event.message || "—"}
+                        </p>
+                      </td>
+
+                      <td className="max-w-xs px-6 py-5 text-gray-400">
+                        {event.target || "—"}
+                      </td>
+
+                      <td className="px-6 py-5">
+                        <span className="font-mono text-red-400">
+                          {event.mitre?.technique_id || "—"}
+                        </span>
+                        <p className="mt-1 max-w-[180px] text-xs text-gray-600">
+                          {event.mitre?.technique_name || "No MITRE mapping"}
+                        </p>
+                      </td>
+
+                      <td className="px-6 py-5 text-gray-400">
+                        {event.mitre?.tactic || "—"}
+                      </td>
+
+                      <td className="px-6 py-5">
+                        <span className="text-xs uppercase text-yellow-500">
+                          {event.mitre?.confidence || "—"}
+                        </span>
+                      </td>
+
+                      <td className="px-6 py-5">
+                        <div className="flex flex-col items-start gap-2">
+                          <span
+                            className={`inline-flex rounded-md border px-2 py-1 text-[9px] font-semibold uppercase ${
+                              String(event.alert_status || "ACTIVE").toUpperCase() ===
+                              "RESOLVED"
+                                ? "border-green-500/20 bg-green-500/10 text-green-400"
+                                : String(event.alert_status || "ACTIVE").toUpperCase() ===
+                                  "ACKNOWLEDGED"
+                                ? "border-yellow-500/20 bg-yellow-500/10 text-yellow-300"
+                                : "border-red-500/20 bg-red-500/10 text-red-400"
+                            }`}
+                          >
+                            {event.alert_status || "ACTIVE"}
+                          </span>
+
+                          {event.mitre?.technique_id &&
+                            ["ERROR", "HIGH", "CRITICAL"].includes(
+                              String(event.severity || "").toUpperCase()
+                            ) &&
+                            event.alert_status === "ACTIVE" && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateSecurityAlert(
+                                    event,
+                                    "acknowledge"
+                                  )
+                                }
+                                className="rounded-md border border-yellow-500/20 px-2 py-1 text-[9px] font-semibold uppercase text-yellow-300 transition hover:border-yellow-400/40 hover:bg-yellow-500/10"
+                              >
+                                Acknowledge
+                              </button>
+                            )}
+
+                          {event.mitre?.technique_id &&
+                            ["ERROR", "HIGH", "CRITICAL"].includes(
+                              String(event.severity || "").toUpperCase()
+                            ) &&
+                            event.alert_status === "ACKNOWLEDGED" && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateSecurityAlert(
+                                    event,
+                                    "resolve"
+                                  )
+                                }
+                                className="rounded-md border border-green-500/20 px-2 py-1 text-[9px] font-semibold uppercase text-green-400 transition hover:border-green-400/40 hover:bg-green-500/10"
+                              >
+                                Resolve
+                              </button>
+                            )}
+                        </div>
+                      </td>
+
+                      <td className="max-w-sm px-6 py-5 text-xs leading-5 text-gray-600">
+                        {event.mitre?.evidence || "—"}
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+
+            {!loading && securityEvents.length === 0 && (
+              <div className="px-6 py-12 text-center">
+                <p className="text-sm text-gray-500">
+                  No security events are currently available.
+                </p>
+              </div>
+            )}
+
+            {!loading && securityEvents.length > 0 && securityEvents.filter((event) => {
+              const term = search.trim().toLowerCase();
+              const matchesSearch = !term || [
+                event.source,
+                event.event_type,
+                event.message,
+                event.target,
+                event.mitre?.technique_id,
+                event.mitre?.technique_name,
+                event.mitre?.tactic,
+              ].some((value) => String(value || "").toLowerCase().includes(term));
+              const matchesSeverity =
+                severity === "all" ||
+                String(event.severity || "").toUpperCase() === severity;
+              return matchesSearch && matchesSeverity;
+            }).length === 0 && (
+              <div className="px-6 py-12 text-center">
+                <p className="text-sm text-gray-500">
+                  No security events match the current filters.
+                </p>
+              </div>
+            )}
+
+            {loading && (
+              <div className="px-6 py-12 text-center text-sm text-gray-600">
+                Loading security events...
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[950px] text-left text-sm">
+              <thead className="border-b border-white/10 bg-[#0a0a0a] text-[10px] uppercase tracking-wider text-gray-600">
+                <tr>
+                  <th className="px-6 py-4">Time</th>
+                  <th className="px-6 py-4">Source</th>
+                  <th className="px-6 py-4">Level</th>
+                  <th className="px-6 py-4">Event</th>
+                  <th className="px-6 py-4">Message</th>
+                </tr>
+              </thead>
+
+              <tbody className="divide-y divide-white/5">
+                {logs.map((log) => (
+                  <tr
+                    key={log.id}
+                    className="transition hover:bg-white/[0.02]"
+                  >
+                    <td className="whitespace-nowrap px-6 py-5 font-mono text-xs text-gray-600">
+                      {log.timestamp || "—"}
+                    </td>
+
+                    <td className="px-6 py-5 text-gray-400">
+                      {log.source || "—"}
+                    </td>
+
+                    <td className="px-6 py-5">
+                      <LogLevel level={log.level} />
+                    </td>
+
+                    <td className="max-w-xs px-6 py-5 font-medium text-gray-300">
+                      {log.event || "—"}
+                    </td>
+
+                    <td className="max-w-2xl px-6 py-5 text-gray-600">
+                      {log.message || "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            {!loading && logs.length === 0 && (
+              <div className="px-6 py-12 text-center">
+                <p className="text-sm text-gray-500">
+                  No real log events match the current filters.
+                </p>
+
+                <p className="mt-2 text-xs text-gray-700">
+                  Try clearing the search or selecting All Levels.
+                </p>
+              </div>
+            )}
+
+            {loading && (
+              <div className="px-6 py-12 text-center text-sm text-gray-600">
+                Loading real log events...
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* MONITORING STATUS */}
@@ -8127,23 +11397,4644 @@ function LogControl({
 // ==================================================
 // VAPT TESTING
 // ==================================================
-function VAPTTesting() {
+
+function MitreAttack() {
+  const MITRE_TACTICS = [
+    { id: "TA0043", name: "Reconnaissance", description: "Gather information that can be used to plan future operations.", count: 12 },
+    { id: "TA0042", name: "Resource Development", description: "Establish resources that support operations.", count: 9 },
+    { id: "TA0001", name: "Initial Access", description: "Gain an initial foothold into a target environment.", count: 11 },
+    { id: "TA0002", name: "Execution", description: "Run malicious code or commands.", count: 20 },
+    { id: "TA0003", name: "Persistence", description: "Maintain access across interruptions or changes.", count: 22 },
+    { id: "TA0004", name: "Privilege Escalation", description: "Gain higher-level permissions.", count: 13 },
+    { id: "TA0005", name: "Stealth", description: "Avoid detection or obscure adversary activity.", count: 30 },
+    { id: "TA0112", name: "Defense Impairment", description: "Reduce or interfere with defensive capabilities.", count: 18 },
+    { id: "TA0006", name: "Credential Access", description: "Obtain account credentials or authentication material.", count: 17 },
+    { id: "TA0007", name: "Discovery", description: "Learn about systems, networks, accounts, and environments.", count: 34 },
+    { id: "TA0008", name: "Lateral Movement", description: "Move through an environment after gaining access.", count: 9 },
+    { id: "TA0009", name: "Collection", description: "Gather information of interest to the adversary.", count: 17 },
+    { id: "TA0011", name: "Command and Control", description: "Communicate with compromised systems.", count: 18 },
+    { id: "TA0010", name: "Exfiltration", description: "Steal collected data from a target environment.", count: 9 },
+    { id: "TA0040", name: "Impact", description: "Manipulate, interrupt, or destroy systems and data.", count: 15 },
+  ];
+
+  const [selectedTactic, setSelectedTactic] = useState(MITRE_TACTICS[0]);
+  const [activeSection, setActiveSection] = useState("overview");
+  const [search, setSearch] = useState("");
+
+  const [mitreTechniques, setMitreTechniques] = useState([]);
+  const [mitreLoading, setMitreLoading] = useState(false);
+  const [mitreError, setMitreError] = useState("");
+  const [mitreTechniqueSearch, setMitreTechniqueSearch] = useState("");
+  const [selectedMitreTechnique, setSelectedMitreTechnique] = useState(null);
+  const [mitreTechniqueDetailLoading, setMitreTechniqueDetailLoading] = useState(false);
+  const [mitreTechniqueDetailError, setMitreTechniqueDetailError] = useState("");
+  const [vaptFindings, setVaptFindings] = useState([]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadMitreTechniques = async () => {
+      setMitreLoading(true);
+      setMitreError("");
+
+      try {
+        const response = await axios.get(`${API_URL}/mitre/techniques`);
+
+        if (!cancelled) {
+          setMitreTechniques(
+            Array.isArray(response.data?.techniques)
+              ? response.data.techniques
+              : []
+          );
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setMitreError(
+            error?.response?.data?.detail ||
+              error?.message ||
+              "Unable to load MITRE ATT&CK techniques."
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setMitreLoading(false);
+        }
+      }
+    };
+
+    loadMitreTechniques();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const loadVaptFindings = async () => {
+      try {
+        const token = localStorage.getItem("token");
+
+        if (!token) {
+          setVaptFindings([]);
+          return;
+        }
+
+        const response = await axios.get(
+          `${API_URL}/security-findings`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
+        );
+
+        setVaptFindings(response.data || []);
+      } catch (error) {
+        console.error("Failed to load VAPT findings:", error);
+        setVaptFindings([]);
+      }
+    };
+
+    loadVaptFindings();
+  }, []);
+
+  const openMitreTechnique = async (technique) => {
+    if (!technique?.id) return;
+
+    setSelectedMitreTechnique(technique);
+    setMitreTechniqueDetailLoading(true);
+    setMitreTechniqueDetailError("");
+
+    try {
+      const response = await axios.get(
+        `${API_URL}/mitre/techniques/${encodeURIComponent(technique.id)}`
+      );
+
+      setSelectedMitreTechnique(response.data);
+    } catch (error) {
+      setMitreTechniqueDetailError(
+        error?.response?.data?.detail ||
+          error?.message ||
+          "Unable to load MITRE ATT&CK technique details."
+      );
+      setSelectedMitreTechnique(technique);
+    } finally {
+      setMitreTechniqueDetailLoading(false);
+    }
+  };
+
+  const filteredTactics = MITRE_TACTICS.filter((tactic) =>
+    `${tactic.name} ${tactic.description}`
+      .toLowerCase()
+      .includes(search.toLowerCase())
+  );
+
+  const sections = [
+    { id: "overview", label: "Overview" },
+    { id: "tactics", label: "Tactics" },
+    { id: "techniques", label: "Techniques" },
+    { id: "mapping", label: "VAPT → ATT&CK Mapping" },
+    { id: "evidence", label: "Evidence" },
+    { id: "remediation", label: "Remediation" },
+  ];
+
+  return (
+    <div className="space-y-5">
+      <div className="border border-white/10 bg-[#0d0d0d] p-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.3em] text-red-500">
+              MITRE ATT&CK
+            </p>
+            <h1 className="mt-2 text-2xl font-bold uppercase tracking-wider text-white">
+              Enterprise Attack Framework
+            </h1>
+            <p className="mt-2 max-w-3xl text-xs leading-5 text-gray-500">
+              Analyze adversary behavior through tactics, techniques,
+              sub-techniques, VAPT mappings, evidence, and remediation.
+            </p>
+          </div>
+
+          <a
+            href="https://attack.mitre.org/matrices/enterprise/"
+            target="_blank"
+            rel="noreferrer"
+            className="border border-white/10 px-4 py-3 text-[10px] font-semibold uppercase tracking-wider text-gray-400 transition hover:border-red-600 hover:text-white"
+          >
+            Open MITRE Enterprise Matrix ↗
+          </a>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2 border border-white/10 bg-[#0d0d0d] p-3">
+        {sections.map((section) => (
+          <button
+            key={section.id}
+            type="button"
+            onClick={() => setActiveSection(section.id)}
+            className={`border px-4 py-2 text-[10px] font-semibold uppercase tracking-wider transition ${
+              activeSection === section.id
+                ? "border-red-600 bg-red-600/10 text-red-400"
+                : "border-white/10 text-gray-500 hover:border-red-600/50 hover:text-white"
+            }`}
+          >
+            {section.label}
+          </button>
+        ))}
+      </div>
+
+      {activeSection === "overview" && (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                Domain
+              </p>
+              <p className="mt-2 text-lg font-bold text-white">Enterprise</p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                Tactics
+              </p>
+              <p className="mt-2 text-lg font-bold text-white">
+                {MITRE_TACTICS.length}
+              </p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                Selected Tactic
+              </p>
+              <p className="mt-2 text-lg font-bold text-red-400">
+                {selectedTactic.name}
+              </p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                Framework
+              </p>
+              <p className="mt-2 text-lg font-bold text-white">ATT&CK v19</p>
+            </div>
+          </div>
+
+          <div className="border border-white/10 bg-[#0d0d0d] p-6">
+            <div className="mb-5">
+              <p className="text-[10px] uppercase tracking-wider text-red-400">
+                ATT&CK Workflow
+              </p>
+              <p className="mt-2 text-xs leading-5 text-gray-500">
+                VAPT findings can later be mapped to ATT&CK techniques and
+                supported with evidence and remediation guidance.
+              </p>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-3">
+              {[
+                ["01", "Identify Behavior", "Select the observed adversary behavior."],
+                ["02", "Map Technique", "Associate evidence with the applicable ATT&CK technique."],
+                ["03", "Remediate", "Record defensive actions and supporting evidence."],
+              ].map(([number, title, description]) => (
+                <div
+                  key={number}
+                  className="border border-white/10 bg-black/20 p-4"
+                >
+                  <span className="text-xs font-bold text-red-500">
+                    {number}
+                  </span>
+                  <p className="mt-3 text-xs font-semibold uppercase tracking-wider text-white">
+                    {title}
+                  </p>
+                  <p className="mt-2 text-[10px] leading-4 text-gray-600">
+                    {description}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
+      {activeSection === "tactics" && (
+        <div className="grid gap-5 lg:grid-cols-[1.2fr_0.8fr]">
+          <div className="border border-white/10 bg-[#0d0d0d] p-5">
+            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-red-400">
+                  Enterprise Tactics
+                </p>
+                <p className="mt-1 text-[10px] text-gray-600">
+                  Select a tactic to inspect its ATT&CK coverage.
+                </p>
+              </div>
+
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search tactics..."
+                className="border border-white/10 bg-black px-3 py-2 text-xs text-white outline-none placeholder:text-gray-700 focus:border-red-600"
+              />
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-2">
+              {filteredTactics.map((tactic) => (
+                <button
+                  key={tactic.id}
+                  type="button"
+                  onClick={() => setSelectedTactic(tactic)}
+                  className={`border p-4 text-left transition ${
+                    selectedTactic.id === tactic.id
+                      ? "border-red-600 bg-red-600/10"
+                      : "border-white/10 hover:border-red-600/50"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[9px] font-bold text-red-500">
+                      {tactic.id}
+                    </span>
+                    <span className="text-[9px] text-gray-600">
+                      {tactic.count} techniques
+                    </span>
+                  </div>
+                  <p className="mt-3 text-xs font-semibold uppercase tracking-wider text-white">
+                    {tactic.name}
+                  </p>
+                  <p className="mt-2 text-[10px] leading-4 text-gray-600">
+                    {tactic.description}
+                  </p>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="border border-red-600/30 bg-[#0d0d0d] p-5">
+            <p className="text-[10px] uppercase tracking-wider text-red-400">
+              Selected Tactic
+            </p>
+            <p className="mt-3 text-xl font-bold text-white">
+              {selectedTactic.name}
+            </p>
+            <p className="mt-2 text-[10px] text-gray-600">
+              {selectedTactic.id}
+            </p>
+            <p className="mt-5 text-xs leading-5 text-gray-400">
+              {selectedTactic.description}
+            </p>
+
+            <div className="mt-6 border-t border-white/10 pt-5">
+              <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                Technique Coverage
+              </p>
+              <p className="mt-2 text-3xl font-bold text-red-500">
+                {selectedTactic.count}
+              </p>
+              <p className="mt-1 text-[10px] text-gray-600">
+                techniques in the current Enterprise matrix
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeSection === "techniques" && (
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <p className="text-[10px] uppercase tracking-wider text-red-400">
+                Techniques
+              </p>
+              <h2 className="mt-2 text-xl font-bold uppercase tracking-wider text-white">
+                MITRE ATT&CK Techniques
+              </h2>
+              <p className="mt-2 text-xs leading-5 text-gray-500">
+                Official Enterprise ATT&CK techniques and sub-techniques from the
+                connected MITRE dataset.
+              </p>
+            </div>
+
+            <input
+              type="text"
+              value={mitreTechniqueSearch}
+              onChange={(event) => setMitreTechniqueSearch(event.target.value)}
+              placeholder="Search techniques..."
+              className="w-full border border-white/10 bg-black px-3 py-2 text-xs text-white outline-none transition placeholder:text-gray-700 focus:border-red-600 lg:w-72"
+            />
+          </div>
+
+          {mitreLoading && (
+            <div className="mt-5 border border-white/10 p-5 text-xs text-gray-500">
+              Loading MITRE ATT&CK techniques...
+            </div>
+          )}
+
+          {!mitreLoading && mitreError && (
+            <div className="mt-5 border border-red-600/30 bg-red-600/5 p-5">
+              <p className="text-[10px] uppercase tracking-wider text-red-400">
+                MITRE ATT&CK Error
+              </p>
+              <p className="mt-2 text-xs leading-5 text-gray-500">
+                {mitreError}
+              </p>
+            </div>
+          )}
+
+          {!mitreLoading && !mitreError && (
+            <>
+              <div className="mt-5 overflow-x-auto border border-white/10">
+                <table className="w-full min-w-[900px] text-left text-xs">
+                  <thead className="border-b border-white/10 bg-black/30 text-[9px] uppercase tracking-wider text-gray-600">
+                    <tr>
+                      <th className="px-4 py-3">ID</th>
+                      <th className="px-4 py-3">Technique</th>
+                      <th className="px-4 py-3">Type</th>
+                      <th className="px-4 py-3">Tactic</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {mitreTechniques
+                      .filter((technique) => {
+                        const selectedTacticName = selectedTactic.name.toLowerCase();
+                        const matchesTactic = Array.isArray(technique.tactics)
+                          ? technique.tactics.some(
+                              (tactic) =>
+                                tactic?.toLowerCase() === selectedTacticName
+                            )
+                          : false;
+
+                        const searchValue = mitreTechniqueSearch
+                          .trim()
+                          .toLowerCase();
+
+                        const matchesSearch =
+                          !searchValue ||
+                          `${technique.id} ${technique.name} ${technique.description}`
+                            .toLowerCase()
+                            .includes(searchValue);
+
+                        return searchValue ? matchesSearch : matchesTactic;
+                      })
+                      .map((technique) => (
+                        <tr
+                          key={technique.id}
+                          onClick={() => openMitreTechnique(technique)}
+                          className="cursor-pointer border-b border-white/5 transition hover:bg-red-600/5"
+                        >
+                          <td className="px-4 py-3 font-semibold text-red-400">
+                            {technique.id}
+                          </td>
+                          <td className="px-4 py-3">
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                openMitreTechnique(technique);
+                              }}
+                              className="text-left font-semibold text-white transition hover:text-red-400"
+                            >
+                              {technique.name}
+                            </button>
+                            <p className="mt-1 max-w-2xl text-[10px] leading-4 text-gray-600">
+                              {technique.description || "No description available."}
+                            </p>
+                          </td>
+                          <td className="px-4 py-3 text-gray-500">
+                            {technique.is_subtechnique
+                              ? "Sub-technique"
+                              : "Technique"}
+                          </td>
+                          <td className="px-4 py-3 text-gray-500">
+                            {Array.isArray(technique.tactics) &&
+                            technique.tactics.length > 0
+                              ? technique.tactics.join(", ")
+                              : "—"}
+                          </td>
+                        </tr>
+                      ))}
+
+                    {mitreTechniques.filter((technique) => {
+                      const selectedTacticName = selectedTactic.name.toLowerCase();
+                      const matchesTactic = Array.isArray(technique.tactics)
+                        ? technique.tactics.some(
+                            (tactic) =>
+                              tactic?.toLowerCase() === selectedTacticName
+                          )
+                        : false;
+                      const searchValue = mitreTechniqueSearch.trim().toLowerCase();
+                      const matchesSearch =
+                        !searchValue ||
+                        `${technique.id} ${technique.name} ${technique.description}`
+                          .toLowerCase()
+                          .includes(searchValue);
+                      return searchValue ? matchesSearch : matchesTactic;
+                    }).length === 0 && (
+                      <tr>
+                        <td
+                          colSpan="4"
+                          className="px-4 py-8 text-center text-xs text-gray-600"
+                        >
+                          No techniques found for the selected tactic and search.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {selectedMitreTechnique && (
+                <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wider text-red-400">
+                        Technique Details
+                      </p>
+                      <h3 className="mt-2 text-xl font-bold text-white">
+                        {selectedMitreTechnique.name}
+                      </h3>
+                      <p className="mt-1 text-xs font-semibold text-red-400">
+                        {selectedMitreTechnique.id}
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedMitreTechnique(null);
+                        setMitreTechniqueDetailError("");
+                      }}
+                      className="border border-white/10 px-3 py-2 text-[9px] font-semibold uppercase tracking-wider text-gray-500 transition hover:border-red-600 hover:text-white"
+                    >
+                      Close
+                    </button>
+                  </div>
+
+                  {mitreTechniqueDetailLoading && (
+                    <p className="mt-5 text-xs text-gray-500">
+                      Loading technique details...
+                    </p>
+                  )}
+
+                  {!mitreTechniqueDetailLoading && (
+                    <>
+                      {mitreTechniqueDetailError && (
+                        <div className="mt-5 border border-red-600/30 bg-red-600/5 p-4">
+                          <p className="text-[10px] uppercase tracking-wider text-red-400">
+                            Detail Request Error
+                          </p>
+                          <p className="mt-2 text-xs text-gray-500">
+                            {mitreTechniqueDetailError}
+                          </p>
+                        </div>
+                      )}
+
+                      <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                        <div className="border border-white/10 p-4">
+                          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                            Type
+                          </p>
+                          <p className="mt-2 text-xs font-semibold text-white">
+                            {selectedMitreTechnique.is_subtechnique
+                              ? "Sub-technique"
+                              : "Technique"}
+                          </p>
+                        </div>
+
+                        <div className="border border-white/10 p-4">
+                          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                            Tactic
+                          </p>
+                          <p className="mt-2 text-xs font-semibold text-white">
+                            {Array.isArray(selectedMitreTechnique.tactics) &&
+                            selectedMitreTechnique.tactics.length > 0
+                              ? selectedMitreTechnique.tactics.join(", ")
+                              : "—"}
+                          </p>
+                        </div>
+
+                        <div className="border border-white/10 p-4">
+                          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                            ATT&CK Version
+                          </p>
+                          <p className="mt-2 text-xs font-semibold text-white">
+                            {selectedMitreTechnique.version || "—"}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="mt-5 border-t border-white/10 pt-5">
+                        <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                          Description
+                        </p>
+
+                        <p className="mt-3 text-xs leading-6 text-gray-400">
+                          {selectedMitreTechnique.description ||
+                            "No description available."}
+                        </p>
+                      </div>
+
+                      <div className="mt-6 border-t border-white/10 pt-5">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                              Procedure Examples
+                            </p>
+
+                            <p className="mt-1 text-[10px] text-gray-700">
+                              Documented MITRE ATT&CK procedure examples
+                            </p>
+                          </div>
+
+                          <span className="border border-white/10 bg-black/30 px-2 py-1 text-[9px] font-semibold text-gray-500">
+                            {Array.isArray(selectedMitreTechnique.procedures)
+                              ? selectedMitreTechnique.procedures.length
+                              : 0}
+                          </span>
+                        </div>
+
+                        <div className="mt-4 space-y-2">
+                          {Array.isArray(selectedMitreTechnique.procedures) &&
+                          selectedMitreTechnique.procedures.length > 0 ? (
+                            selectedMitreTechnique.procedures.map((procedure, index) => (
+                              <div
+                                key={`${procedure.source_ref || "procedure"}-${index}`}
+                                className="border border-white/10 bg-black/20 p-4"
+                              >
+                                <div className="flex items-start gap-3">
+                                  <span className="text-[9px] font-bold text-red-500">
+                                    {String(index + 1).padStart(3, "0")}
+                                  </span>
+
+                                  <p className="text-[10px] leading-5 text-gray-400">
+                                    {procedure.description ||
+                                      "No procedure description available."}
+                                  </p>
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="border border-white/10 p-4 text-[10px] text-gray-600">
+                              No documented procedure examples available.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="mt-6 border-t border-white/10 pt-5">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                              Detection
+                            </p>
+
+                            <p className="mt-1 text-[10px] text-gray-700">
+                              MITRE detection relationships
+                            </p>
+                          </div>
+
+                          <span className="border border-white/10 bg-black/30 px-2 py-1 text-[9px] font-semibold text-gray-500">
+                            {Array.isArray(selectedMitreTechnique.detections)
+                              ? selectedMitreTechnique.detections.length
+                              : 0}
+                          </span>
+                        </div>
+
+                        <div className="mt-4 space-y-2">
+                          {Array.isArray(selectedMitreTechnique.detections) &&
+                          selectedMitreTechnique.detections.length > 0 ? (
+                            selectedMitreTechnique.detections.map((detection, index) => (
+                              <div
+                                key={`${detection.source_ref || "detection"}-${index}`}
+                                className="border border-white/10 bg-black/20 p-4"
+                              >
+                                <p className="text-[9px] font-semibold uppercase tracking-wider text-red-400">
+                                  Detection Strategy {index + 1}
+                                </p>
+
+                                <p className="mt-2 text-[10px] leading-5 text-gray-400">
+                                  {detection.description ||
+                                    "Detection strategy relationship available. Detailed description is not provided in the relationship."}
+                                </p>
+
+                                <p className="mt-3 break-all text-[9px] text-gray-700">
+                                  {detection.source_ref || "—"}
+                                </p>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="border border-white/10 p-4 text-[10px] text-gray-600">
+                              No detection relationships available.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="mt-6 border-t border-white/10 pt-5">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                              Mitigations
+                            </p>
+
+                            <p className="mt-1 text-[10px] text-gray-700">
+                              MITRE ATT&CK mitigation guidance
+                            </p>
+                          </div>
+
+                          <span className="border border-white/10 bg-black/30 px-2 py-1 text-[9px] font-semibold text-gray-500">
+                            {Array.isArray(selectedMitreTechnique.mitigations)
+                              ? selectedMitreTechnique.mitigations.length
+                              : 0}
+                          </span>
+                        </div>
+
+                        <div className="mt-4 space-y-2">
+                          {Array.isArray(selectedMitreTechnique.mitigations) &&
+                          selectedMitreTechnique.mitigations.length > 0 ? (
+                            selectedMitreTechnique.mitigations.map((mitigation, index) => (
+                              <div
+                                key={`${mitigation.source_ref || "mitigation"}-${index}`}
+                                className="border border-white/10 bg-black/20 p-4"
+                              >
+                                <p className="text-[9px] font-semibold uppercase tracking-wider text-red-400">
+                                  Mitigation {index + 1}
+                                </p>
+
+                                <p className="mt-2 text-[10px] leading-5 text-gray-400">
+                                  {mitigation.description ||
+                                    "No mitigation description available."}
+                                </p>
+
+                                <p className="mt-3 break-all text-[9px] text-gray-700">
+                                  {mitigation.source_ref || "—"}
+                                </p>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="border border-white/10 p-4 text-[10px] text-gray-600">
+                              No mitigation relationships available.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {activeSection === "mapping" && (
+        <div className="border border-white/10 bg-[#0d0d0d] p-6">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <p className="text-[10px] uppercase tracking-wider text-red-400">
+                VAPT → ATT&CK Mapping
+              </p>
+              <h2 className="mt-2 text-xl font-bold uppercase tracking-wider text-white">
+                Security Findings
+              </h2>
+              <p className="mt-2 max-w-3xl text-xs leading-5 text-gray-500">
+                Findings loaded from the authenticated VAPT security-findings
+                API. Current findings are shown without inventing an ATT&CK
+                technique when no MITRE mapping is stored.
+              </p>
+            </div>
+
+            <div className="border border-white/10 bg-black/20 px-4 py-3">
+              <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                Findings Loaded
+              </p>
+              <p className="mt-1 text-xl font-bold text-white">
+                {vaptFindings.length}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-5 overflow-x-auto border border-white/10">
+            <table className="w-full min-w-[900px] text-left">
+              <thead>
+                <tr className="border-b border-white/10 text-[9px] uppercase tracking-wider text-gray-600">
+                  <th className="px-4 py-3">Finding</th>
+                  <th className="px-4 py-3">Tool</th>
+                  <th className="px-4 py-3">Severity</th>
+                  <th className="px-4 py-3">OWASP</th>
+                  <th className="px-4 py-3">Asset</th>
+                  <th className="px-4 py-3">ATT&CK Mapping</th>
+                </tr>
+              </thead>
+              <tbody>
+                {vaptFindings.map((finding, index) => (
+                  <tr
+                    key={finding.id || finding.finding_id || index}
+                    className="border-b border-white/5 last:border-0"
+                  >
+                    <td className="max-w-[280px] px-4 py-4">
+                      <p className="text-[10px] font-semibold text-white">
+                        {finding.finding_id || finding.id || `FIND-${index + 1}`}
+                      </p>
+                      <p className="mt-1 max-w-[260px] truncate text-[10px] text-gray-500">
+                        {finding.title || finding.vulnerability || "Untitled finding"}
+                      </p>
+                    </td>
+
+                    <td className="px-4 py-4 text-[10px] text-gray-400">
+                      {finding.tool_name || "—"}
+                    </td>
+
+                    <td className="px-4 py-4">
+                      <span className="border border-yellow-500/20 bg-yellow-500/10 px-2 py-1 text-[9px] font-semibold text-yellow-300">
+                        {finding.severity || "—"}
+                      </span>
+                    </td>
+
+                    <td className="max-w-[190px] px-4 py-4 text-[10px] text-gray-500">
+                      {finding.owasp_category || "—"}
+                    </td>
+
+                    <td className="max-w-[220px] truncate px-4 py-4 text-[10px] text-gray-500">
+                      {finding.affected_asset || finding.affected_url || "—"}
+                    </td>
+
+                    <td className="px-4 py-4">
+                      <span className="border border-white/10 bg-black/30 px-2 py-1 text-[9px] font-semibold uppercase tracking-wider text-gray-500">
+                        Unmapped
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+
+                {vaptFindings.length === 0 && (
+                  <tr>
+                    <td
+                      colSpan="6"
+                      className="px-4 py-10 text-center text-[10px] text-gray-600"
+                    >
+                      No VAPT security findings are available for the current
+                      authenticated user.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="mt-5 border border-white/10 bg-black/20 p-4">
+            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+              Mapping Status
+            </p>
+            <p className="mt-2 text-xs leading-5 text-gray-500">
+              The current SecurityFinding records do not contain a MITRE ATT&CK
+              technique ID. Therefore, this stage displays the real VAPT
+              findings as <span className="text-gray-300">Unmapped</span>{" "}
+              rather than assigning an unsupported technique automatically.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {activeSection === "evidence" && (
+        <div className="space-y-5">
+          <div className="border border-white/10 bg-[#0d0d0d] p-8">
+            <p className="text-[10px] uppercase tracking-wider text-red-400">
+              Evidence
+            </p>
+
+            <h2 className="mt-3 text-xl font-bold uppercase tracking-wider text-white">
+              MITRE ATT&CK Evidence
+            </h2>
+
+            {!selectedMitreTechnique ? (
+              <p className="mt-4 text-xs leading-5 text-gray-500">
+                Select a MITRE ATT&CK technique from the Techniques section to
+                view its documented evidence context.
+              </p>
+            ) : (
+              <>
+                <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                  <div className="border border-white/10 bg-black/20 p-4">
+                    <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                      Technique
+                    </p>
+                    <p className="mt-2 text-xs font-semibold text-red-400">
+                      {selectedMitreTechnique.id}
+                    </p>
+                    <p className="mt-1 text-xs text-white">
+                      {selectedMitreTechnique.name}
+                    </p>
+                  </div>
+
+                  <div className="border border-white/10 bg-black/20 p-4">
+                    <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                      Tactic
+                    </p>
+                    <p className="mt-2 text-xs font-semibold text-white">
+                      {Array.isArray(selectedMitreTechnique.tactics) &&
+                      selectedMitreTechnique.tactics.length > 0
+                        ? selectedMitreTechnique.tactics.join(", ")
+                        : "—"}
+                    </p>
+                  </div>
+
+                  <div className="border border-white/10 bg-black/20 p-4">
+                    <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                      Evidence Sources
+                    </p>
+                    <p className="mt-2 text-xs font-semibold text-white">
+                      {(Array.isArray(selectedMitreTechnique.procedures)
+                        ? selectedMitreTechnique.procedures.length
+                        : 0) +
+                        (Array.isArray(selectedMitreTechnique.detections)
+                          ? selectedMitreTechnique.detections.length
+                          : 0)}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-6 border-t border-white/10 pt-5">
+                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                    Documented Procedure Examples
+                  </p>
+
+                  <div className="mt-4 space-y-3">
+                    {Array.isArray(selectedMitreTechnique.procedures) &&
+                    selectedMitreTechnique.procedures.length > 0 ? (
+                      selectedMitreTechnique.procedures.map(
+                        (procedure, index) => (
+                          <div
+                            key={`${procedure.source_ref || "procedure"}-${index}`}
+                            className="border border-white/10 bg-black/20 p-4"
+                          >
+                            <div className="flex items-start gap-3">
+                              <span className="text-[9px] font-bold text-red-500">
+                                {String(index + 1).padStart(3, "0")}
+                              </span>
+
+                              <div className="min-w-0">
+                                <p className="text-xs leading-5 text-gray-300">
+                                  {procedure.description ||
+                                    "No procedure description available."}
+                                </p>
+
+                                {procedure.source_ref && (
+                                  <p className="mt-3 break-all text-[9px] text-gray-700">
+                                    Source: {procedure.source_ref}
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      )
+                    ) : (
+                      <div className="border border-white/10 p-4 text-[10px] text-gray-600">
+                        No documented procedure examples are available for
+                        this technique in the connected MITRE dataset.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="mt-6 border-t border-white/10 pt-5">
+                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                    Detection Relationships
+                  </p>
+
+                  <div className="mt-4 space-y-3">
+                    {Array.isArray(selectedMitreTechnique.detections) &&
+                    selectedMitreTechnique.detections.length > 0 ? (
+                      selectedMitreTechnique.detections.map(
+                        (detection, index) => (
+                          <div
+                            key={`${detection.source_ref || "detection"}-${index}`}
+                            className="border border-white/10 bg-black/20 p-4"
+                          >
+                            <p className="text-[9px] font-semibold uppercase tracking-wider text-red-400">
+                              Detection Strategy {index + 1}
+                            </p>
+
+                            <p className="mt-2 text-xs leading-5 text-gray-300">
+                              {detection.description ||
+                                "Detection relationship available."}
+                            </p>
+
+                            {detection.source_ref && (
+                              <p className="mt-3 break-all text-[9px] text-gray-700">
+                                Source: {detection.source_ref}
+                              </p>
+                            )}
+                          </div>
+                        )
+                      )
+                    ) : (
+                      <div className="border border-white/10 p-4 text-[10px] text-gray-600">
+                        No detection relationships are available for this
+                        technique in the connected MITRE dataset.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeSection === "remediation" && (
+        <div className="space-y-5">
+          <div className="border border-white/10 bg-[#0d0d0d] p-8">
+            <p className="text-[10px] uppercase tracking-wider text-red-400">
+              Remediation
+            </p>
+
+            <h2 className="mt-3 text-xl font-bold uppercase tracking-wider text-white">
+              MITRE ATT&CK Remediation
+            </h2>
+
+            {!selectedMitreTechnique ? (
+              <p className="mt-4 text-xs leading-5 text-gray-500">
+                Select a MITRE ATT&CK technique from the Techniques section to
+                view its remediation guidance.
+              </p>
+            ) : (
+              <>
+                <div className="mt-5 border border-white/10 bg-black/20 p-4">
+                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                    Selected Technique
+                  </p>
+                  <p className="mt-2 text-xs font-semibold text-red-400">
+                    {selectedMitreTechnique.id}
+                  </p>
+                  <p className="mt-1 text-sm text-white">
+                    {selectedMitreTechnique.name}
+                  </p>
+                </div>
+
+                <div className="mt-6 space-y-3">
+                  {Array.isArray(selectedMitreTechnique.mitigations) &&
+                  selectedMitreTechnique.mitigations.length > 0 ? (
+                    selectedMitreTechnique.mitigations.map(
+                      (mitigation, index) => (
+                        <div
+                          key={`${mitigation.source_ref || "mitigation"}-${index}`}
+                          className="border border-white/10 bg-black/20 p-5"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-[9px] font-semibold uppercase tracking-wider text-red-400">
+                              Mitigation {index + 1}
+                            </p>
+
+                            {mitigation.source_ref && (
+                              <span className="break-all text-[9px] text-gray-700">
+                                {mitigation.source_ref}
+                              </span>
+                            )}
+                          </div>
+
+                          <p className="mt-3 text-xs leading-6 text-gray-300">
+                            {mitigation.description ||
+                              "No mitigation description available."}
+                          </p>
+                        </div>
+                      )
+                    )
+                  ) : (
+                    <div className="border border-white/10 p-4 text-[10px] text-gray-600">
+                      No mitigation relationships are available for this
+                      technique in the connected MITRE dataset.
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VAPTTesting({
+  onViewNmapResults,
+  onViewNiktoResults,
+  onViewNucleiResults,
+  onViewMasscanResults,
+  onViewHping3Results,
+  onViewWiresharkResults,
+  onViewDigResults,
+  onViewDnsReconResults,
+  onViewNslookupResults,
+  onViewPingResults,
+  onViewWhoisResults,
+  onViewMultiToolResults,
+  onViewZapResults,
+  onViewHydraResults,
+  onViewJohnResults,
+  onViewTsharkResults,
+  onViewSnortResults,
+  onViewMetasploitResults,
+  onViewAccessValidationResults,
+  onViewRiskAssessmentResults,
+  onViewReportResults,
+}) {
   const [targetUrl, setTargetUrl] = useState(
     localStorage.getItem("active_vapt_target") || ""
   );
   const [scanType, setScanType] = useState("quick");
+  const [nmapProfile, setNmapProfile] = useState("quick");
   const [status, setStatus] = useState("Ready");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [scanResult, setScanResult] = useState(null);
+  const [selectedTools, setSelectedTools] = useState([]);
+  const [toolStatuses, setToolStatuses] = useState({});
+  const [genericToolJobs, setGenericToolJobs] = useState({});
+  const [toolsPanelOpen, setToolsPanelOpen] = useState(false);
+  const [activeToolCategory, setActiveToolCategory] = useState("Reconnaissance");
+  const [nmapJobId, setNmapJobId] = useState(null);
+  const [nmapProgress, setNmapProgress] = useState(0);
+  const [nmapStage, setNmapStage] = useState("");
+  const [niktoJobId, setNiktoJobId] = useState(null);
+  const [niktoProgress, setNiktoProgress] = useState(0);
+  const [niktoStage, setNiktoStage] = useState("");
+  const [nucleiJobId, setNucleiJobId] = useState(null);
+  const [nucleiProgress, setNucleiProgress] = useState(0);
+  const [nucleiStage, setNucleiStage] = useState("");
+  const [masscanJobId, setMasscanJobId] = useState(null);
+  const [masscanProgress, setMasscanProgress] = useState(0);
+  const [masscanStage, setMasscanStage] = useState("");
+
+  // Real-time hping3 state
+  const [hping3JobId, setHping3JobId] = useState(null);
+  const [hping3Progress, setHping3Progress] = useState(0);
+  const [hping3Stage, setHping3Stage] = useState("");
+  const [hping3Result, setHping3Result] = useState(null);
+  const [wiresharkJobId, setWiresharkJobId] = useState(null);
+  const [wiresharkProgress, setWiresharkProgress] = useState(0);
+  const [wiresharkStage, setWiresharkStage] = useState("");
+  const [wiresharkResult, setWiresharkResult] = useState(null);
+
+  const [tsharkJobId, setTsharkJobId] = useState(null);
+  const [tsharkProgress, setTsharkProgress] = useState(0);
+  const [tsharkLivePackets, setTsharkLivePackets] = useState([]);
+  const [tsharkStage, setTsharkStage] = useState("");
+  const [tsharkResult, setTsharkResult] = useState(null);
+
+  const [snortJobId, setSnortJobId] = useState(null);
+  const [snortProgress, setSnortProgress] = useState(0);
+  const [snortLiveAlerts, setSnortLiveAlerts] = useState([]);
+  const [snortStage, setSnortStage] = useState("");
+  const [snortResult, setSnortResult] = useState(null);
+
+  // Real-time credential testing state
+  const [hydraJobId, setHydraJobId] = useState(null);
+  const [hydraProgress, setHydraProgress] = useState(0);
+  const [hydraStage, setHydraStage] = useState("");
+  const [hydraResult, setHydraResult] = useState(null);
+
+  const [johnJobId, setJohnJobId] = useState(null);
+  const [johnProgress, setJohnProgress] = useState(0);
+  const [johnStage, setJohnStage] = useState("");
+  const [johnResult, setJohnResult] = useState(null);
+
+  // Real-time Metasploit validation state
+  const [metasploitJobId, setMetasploitJobId] = useState(null);
+  const [metasploitProgress, setMetasploitProgress] = useState(0);
+  const [metasploitStage, setMetasploitStage] = useState("");
+  const [metasploitLiveOutput, setMetasploitLiveOutput] = useState([]);
+  const [metasploitResult, setMetasploitResult] = useState(null);
+
+
+  // OWASP ZAP scan state.
+  // Dedicated ZAP workflow; existing tool workflows remain unchanged.
+  const [zapScanId, setZapScanId] = useState(null);
+  const [zapProgress, setZapProgress] = useState(0);
+  const [zapStage, setZapStage] = useState("");
+  const [zapResults, setZapResults] = useState(null);
+
+  const [niktoProfile, setNiktoProfile] = useState("quick");
+
+  // Unified VAPT run coordinator.
+  // Existing Nmap/Nikto/Nuclei job state remains untouched.
+  const [vaptRunId, setVaptRunId] = useState(null);
+  const [vaptRunTools, setVaptRunTools] = useState([]);
+  const [vaptRunResults, setVaptRunResults] = useState({});
+  const [vaptRunRedirected, setVaptRunRedirected] = useState(false);
+  const [webJobId, setWebJobId] = useState(null);
+  const [webProgress, setWebProgress] = useState(0);
+  const [webStage, setWebStage] = useState("");
+  const [userToolPermissions, setUserToolPermissions] = useState({});
+  const [permissionsLoading, setPermissionsLoading] = useState(true);
+  const [permissionsError, setPermissionsError] = useState("");
+  const [vaptRegistry, setVaptRegistry] = useState(null);
+  const [vaptRegistryLoading, setVaptRegistryLoading] = useState(true);
+  const [vaptRegistryError, setVaptRegistryError] = useState("");
+
+  // Poll generic registry tool jobs.
+  // This remains independent from the existing Nmap/Nikto/Nuclei pollers.
+  useEffect(() => {
+    const runningJobs = Object.entries(genericToolJobs).filter(
+      ([, job]) =>
+        job?.jobId &&
+        !["completed", "completed_with_errors", "failed"].includes(
+          job?.status
+        )
+    );
+
+    if (runningJobs.length === 0) return undefined;
+
+    let stopped = false;
+
+    const pollGenericJobs = async () => {
+      const token = localStorage.getItem("token");
+      if (!token || stopped) return;
+
+      await Promise.all(
+        runningJobs.map(async ([toolId, job]) => {
+          try {
+            const response = await axios.get(
+              `${API_URL}/vapt/registry/tools/${encodeURIComponent(
+                toolId
+              )}/progress/${job.jobId}`,
+              {
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                },
+              }
+            );
+
+            if (stopped) return;
+
+            const nextJob = response.data || {};
+
+            setGenericToolJobs((current) => ({
+              ...current,
+              [toolId]: {
+                ...current[toolId],
+                ...nextJob,
+              },
+            }));
+
+            if (
+              ["completed", "completed_with_errors", "failed"].includes(
+                nextJob.status
+              )
+            ) {
+              setToolStatuses((current) => ({
+                ...current,
+                [toolId]:
+                  nextJob.status === "failed"
+                    ? "Failed"
+                    : nextJob.status === "completed_with_errors"
+                      ? "Completed with warnings"
+                      : "Completed",
+              }));
+
+              if (nextJob.result) {
+                setVaptRunResults((current) => ({
+                  ...current,
+                  [toolId]: nextJob.result,
+                }));
+
+                // A single generic registry tool automatically opens
+                // its dedicated native results page after completion.
+                if (
+                  vaptRunTools.length <= 1 &&
+                  ["completed", "completed_with_errors"].includes(nextJob.status)
+                ) {
+                  if (toolId === "dig" && typeof onViewDigResults === "function") {
+                    onViewDigResults(nextJob.result);
+                  } else if (
+                    toolId === "dns-recon" &&
+                    typeof onViewDnsReconResults === "function"
+                  ) {
+                    onViewDnsReconResults(nextJob.result);
+                  } else if (
+                    toolId === "nslookup" &&
+                    typeof onViewNslookupResults === "function"
+                  ) {
+                    onViewNslookupResults(nextJob.result);
+                  } else if (
+                    toolId === "ping" &&
+                    typeof onViewPingResults === "function"
+                  ) {
+                    onViewPingResults(nextJob.result);
+                  } else if (
+                    toolId === "whois" &&
+                    typeof onViewWhoisResults === "function"
+                  ) {
+                    onViewWhoisResults(nextJob.result);
+                  }
+                }
+              }
+
+              // A single generic registry tool does not enter the
+              // multi-tool coordinator, so finalize the global scan status here.
+              if (vaptRunTools.length <= 1) {
+                setLoading(false);
+                setStatus(
+                  nextJob.status === "failed"
+                    ? "Failed"
+                    : nextJob.status === "completed_with_errors"
+                      ? "Completed with warnings"
+                      : "Completed"
+                );
+                setMessage(
+                  nextJob.status === "failed"
+                    ? `${toolId.toUpperCase()} scan failed.`
+                    : nextJob.status === "completed_with_errors"
+                      ? `${toolId.toUpperCase()} scan completed with warnings.`
+                      : `${toolId.toUpperCase()} scan completed successfully.`
+                );
+              }
+            }
+          } catch (err) {
+            if (stopped) return;
+
+            console.error(
+              `Generic ${toolId} progress error:`,
+              err
+            );
+
+            setToolStatuses((current) => ({
+              ...current,
+              [toolId]: "Failed",
+            }));
+
+            setGenericToolJobs((current) => ({
+              ...current,
+              [toolId]: {
+                ...current[toolId],
+                status: "failed",
+                error:
+                  err.response?.data?.detail ||
+                  err.message ||
+                  `Unable to retrieve ${toolId} progress.`,
+              },
+            }));
+
+            setVaptRunResults((current) => ({
+              ...current,
+              [toolId]: {
+                status: "failed",
+                error:
+                  err.response?.data?.detail ||
+                  err.message ||
+                  `Unable to retrieve ${toolId} progress.`,
+              },
+            }));
+          }
+        })
+      );
+    };
+
+    pollGenericJobs();
+    const intervalId = window.setInterval(pollGenericJobs, 1000);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(intervalId);
+    };
+  }, [genericToolJobs]);
+
+  const VAPT_TOOL_GROUPS = [
+    {
+      category: "Reconnaissance",
+      tools: [
+        { id: "masscan", name: "Masscan", description: "High-speed port discovery" },
+        { id: "whois", name: "WHOIS", description: "Domain registration and ownership lookup" },
+        { id: "dns-recon", name: "DNS Recon", description: "DNS records and host discovery" },
+        { id: "dig", name: "dig", description: "DNS query and record inspection" },
+        { id: "nslookup", name: "nslookup", description: "DNS server and record lookup" },
+        { id: "ping", name: "Ping", description: "Basic host reachability check" },
+      ],
+    },
+    {
+      category: "Scanning & Enumeration",
+      tools: [
+        { id: "nmap", name: "Nmap", description: "Network discovery, service enumeration and NSE" },
+      ],
+    },
+    {
+      category: "Web Application Security",
+      tools: [
+        { id: "nikto", name: "Nikto", description: "Web server configuration and known-issue checks" },
+        { id: "burp", name: "Burp Suite", description: "Web application security testing workflow" },
+        { id: "owasp-zap", name: "OWASP ZAP", description: "Web application security assessment" },
+      ],
+    },
+    {
+      category: "Network Analysis",
+      tools: [
+        { id: "hping3", name: "hping3", description: "Packet and network testing utility" },
+        { id: "tshark", name: "Tshark", description: "Command-line packet analysis" },
+        { id: "wireshark", name: "Wireshark", description: "Interactive network protocol analysis" },
+        { id: "snort", name: "Snort", description: "Network intrusion detection and traffic analysis" },
+      ],
+    },
+    {
+      category: "Penetration Testing",
+      tools: [
+        { id: "metasploit", name: "Metasploit", permission_name: "Metasploit Framework", description: "Authorized vulnerability validation framework" },
+      ],
+    },
+    {
+      category: "Credential Security",
+      tools: [
+        { id: "hydra", name: "Hydra", description: "Authorized credential security testing" },
+        { id: "john", name: "John the Ripper", description: "Password hash auditing" },
+      ],
+    },
+    {
+      category: "Monitoring",
+      tools: [
+        { id: "log-monitoring", name: "Log Monitoring", description: "Security event and log analysis" },
+      ],
+    },
+  ];
+
+  const allVaptTools = VAPT_TOOL_GROUPS.flatMap((group) => group.tools);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadVaptRegistry = async () => {
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        if (!cancelled) {
+          setVaptRegistryLoading(false);
+          setVaptRegistryError("Your session has expired. Please login again.");
+        }
+        return;
+      }
+
+      try {
+        setVaptRegistryLoading(true);
+        setVaptRegistryError("");
+
+        const response = await axios.get(
+          `${API_URL}/vapt/registry`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        if (!cancelled) {
+          setVaptRegistry(response.data || null);
+        }
+      } catch (err) {
+        console.error("Unable to load VAPT registry:", err);
+
+        if (!cancelled) {
+          setVaptRegistry(null);
+          setVaptRegistryError(
+            err.response?.data?.detail ||
+            "Unable to load the VAPT framework registry."
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setVaptRegistryLoading(false);
+        }
+      }
+    };
+
+    loadVaptRegistry();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const NMAP_PROFILES = [
+    {
+      id: "quick",
+      label: "Quick",
+      description: "Top 100 ports with service detection and default NSE scripts",
+    },
+    {
+      id: "service",
+      label: "Service",
+      description: "Top 100 ports with service and version detection",
+    },
+    {
+      id: "detailed",
+      label: "Detailed",
+      description: "Top 1000 ports with OS detection and vulnerability NSE scripts",
+    },
+    {
+      id: "api",
+      label: "API",
+      description: "HTTP/API-focused NSE checks for authorized targets",
+    },
+  ];
+
+  const NIKTO_PROFILES = [
+    {
+      id: "quick",
+      label: "Quick",
+      description: "Standard Nikto web-server assessment with a short time limit",
+    },
+    {
+      id: "detailed",
+      label: "Detailed",
+      description: "Extended Nikto web-server assessment with a longer time limit",
+    },
+  ];
+
+  const toggleTool = (toolId) => {
+    setSelectedTools((current) =>
+      current.includes(toolId)
+        ? current.filter((id) => id !== toolId)
+        : [...current, toolId]
+    );
+  };
+
+  const activeToolGroup =
+    VAPT_TOOL_GROUPS.find((group) => group.category === activeToolCategory) ||
+    VAPT_TOOL_GROUPS[0];
+
+  const isToolAllowed = (tool) => {
+    if (!tool) return false;
+
+    const permissionNames = [
+      tool.permission_name,
+      tool.name,
+    ]
+      .map((name) => String(name || "").trim().toLowerCase())
+      .filter(Boolean);
+
+    return permissionNames.some(
+      (name) => userToolPermissions[name] === true
+    );
+  };
+
+  const allowedVaptTools = allVaptTools.filter(isToolAllowed);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadUserToolPermissions = async () => {
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        if (!cancelled) {
+          setPermissionsLoading(false);
+          setPermissionsError("Your session has expired. Please login again.");
+        }
+        return;
+      }
+
+      try {
+        setPermissionsLoading(true);
+        setPermissionsError("");
+
+        const response = await axios.get(
+          `${API_URL}/vapt/tools/permissions`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        const rows = Array.isArray(response.data)
+          ? response.data
+          : Array.isArray(response.data?.permissions)
+            ? response.data.permissions
+            : [];
+
+        const nextPermissions = {};
+
+        rows.forEach((item) => {
+          const name = String(
+            item.tool_name || item.name || ""
+          ).trim().toLowerCase();
+
+          if (name) {
+            nextPermissions[name] = Boolean(
+              item.allowed && item.tool_enabled !== false && item.enabled !== false
+            );
+          }
+        });
+
+        if (!cancelled) {
+          setUserToolPermissions(nextPermissions);
+        }
+      } catch (err) {
+        console.error("Unable to load user tool permissions:", err);
+        if (!cancelled) {
+          setUserToolPermissions({});
+          if (err.response?.status === 401) {
+            localStorage.removeItem("token");
+            setPermissionsError("Your session has expired. Please login again.");
+          } else if (err.response?.status === 403) {
+            setPermissionsError("Tool permissions could not be loaded for this account.");
+          } else {
+            setPermissionsError(
+              err.response?.data?.detail ||
+              "Unable to load your tool permissions."
+            );
+          }
+        }
+      } finally {
+        if (!cancelled) setPermissionsLoading(false);
+      }
+    };
+
+    loadUserToolPermissions();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const normalizeNmapResult = (result, cleanTarget, elapsedMs = null) => ({
+    target: cleanTarget,
+    scan_type: "nmap",
+    scan_profile: result?.scan_type || nmapProfile,
+    scan: {
+      http_status: null,
+      response_time_ms: elapsedMs,
+    },
+    assessment: {
+      findings_count: Array.isArray(result?.results?.hosts)
+        ? result.results.hosts.reduce(
+            (total, host) =>
+              total +
+              (Array.isArray(host?.ports)
+                ? host.ports.filter((port) => port?.state === "open").length
+                : 0),
+            0
+          )
+        : 0,
+    },
+    security_headers: [],
+    findings: [],
+    nmap: result || null,
+  });
+
+  const finishNmapJob = (job) => {
+    const result = job?.result;
+    const completed = job?.status === "completed";
+    const terminalFailure =
+      job?.status === "failed" || job?.status === "timeout";
+
+    const elapsedMs =
+      result?.elapsed_seconds != null
+        ? Math.round(Number(result.elapsed_seconds) * 1000)
+        : null;
+
+    // Only single-tool Nmap runs should populate the dedicated scan result.
+    // Multi-tool runs must wait for the coordinator to build the unified result.
+    if (result && vaptRunTools.length <= 1) {
+      setScanResult(
+        normalizeNmapResult(result, targetUrl.trim(), elapsedMs)
+      );
+    }
+
+    if (job?.status === "timeout") {
+      setToolStatuses((current) => ({ ...current, nmap: "Timed Out" }));
+      setStatus("Failed");
+      setMessage(
+        job?.error || result?.errors?.[0] || "Nmap scan timed out."
+      );
+    } else if (terminalFailure) {
+      setToolStatuses((current) => ({ ...current, nmap: "Failed" }));
+      setStatus("Failed");
+      setMessage(
+        job?.error || result?.errors?.[0] || "Nmap scan failed."
+      );
+    } else if (completed) {
+      const hosts = Array.isArray(result?.results?.hosts)
+        ? result.results.hosts
+        : [];
+
+      const openPorts = hosts.reduce(
+        (total, host) =>
+          total +
+          (Array.isArray(host?.ports)
+            ? host.ports.filter((port) => port?.state === "open").length
+            : 0),
+        0
+      );
+
+      setToolStatuses((current) => ({ ...current, nmap: "Completed" }));
+      setStatus("Completed");
+      setMessage(
+        `Nmap ${result?.scan_type || nmapProfile} scan completed for ${targetUrl.trim()}: ${
+          result?.results?.host_count ?? hosts.length
+        } host(s), ${openPorts} open port(s).`
+      );
+
+      localStorage.setItem("active_vapt_target", targetUrl.trim());
+      localStorage.setItem(
+        "active_vapt_target_meta",
+        JSON.stringify({
+          target: targetUrl.trim(),
+          scanType: `nmap-${result?.scan_type || nmapProfile}`,
+          scannedAt: new Date().toISOString(),
+          status: "Completed",
+        })
+      );
+
+      const normalizedResult = normalizeNmapResult(
+        result,
+        targetUrl.trim(),
+        elapsedMs
+      );
+
+      // Single-tool mode keeps the existing Nmap result-page behavior.
+      // Multi-tool mode is handled by the unified coordinator.
+      if (
+        vaptRunTools.length <= 1 &&
+        typeof onViewNmapResults === "function"
+      ) {
+        onViewNmapResults(normalizedResult);
+      }
+
+      if (vaptRunTools.length > 1) {
+        setVaptRunResults((current) => ({
+          ...current,
+          nmap: normalizedResult,
+        }));
+      }
+    }
+
+    setLoading(false);
+    setNmapJobId(null);
+  };
+
+  useEffect(() => {
+    if (!nmapJobId) return undefined;
+
+    let stopped = false;
+
+    const poll = async () => {
+      const token = localStorage.getItem("token");
+      if (!token || stopped) return;
+
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/tools/progress/${nmapJobId}`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        const job = response.data || {};
+        setNmapProgress(Number(job.progress) || 0);
+        setNmapStage(job.stage || "Running Nmap scan");
+
+        if (
+          ["completed", "failed", "timeout"].includes(job.status)
+        ) {
+          finishNmapJob(job);
+        }
+      } catch (err) {
+        if (stopped) return;
+
+        console.error("Nmap progress error:", err);
+
+        if (err.response?.status === 404) {
+          setLoading(false);
+          setNmapJobId(null);
+          setStatus("Failed");
+          setMessage(
+            "The Nmap job is no longer available. Start a new scan."
+          );
+        } else if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setLoading(false);
+          setNmapJobId(null);
+          setStatus("Failed");
+          setMessage("Your session has expired. Please login again.");
+        }
+      }
+    };
+
+    poll();
+    const intervalId = window.setInterval(poll, 1500);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(intervalId);
+    };
+  }, [nmapJobId]);
+
+  // ==================================================
+  // HPING3 REAL-TIME PROGRESS / RESULTS
+  // ==================================================
+  useEffect(() => {
+    if (!hping3JobId) return undefined;
+
+    let stopped = false;
+
+    const poll = async () => {
+      const token = localStorage.getItem("token");
+      if (!token || stopped) return;
+
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/network/hping3/scan/${hping3JobId}/progress`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        const job = response.data || {};
+
+        const transmitted = Number(job.transmitted || 0);
+        const received = Number(job.received || 0);
+        const progress =
+          Number(job.progress) ||
+          (job.status === "completed"
+            ? 100
+            : transmitted > 0
+            ? Math.min(
+                99,
+                Math.round((transmitted / Math.max(transmitted, 5)) * 100)
+              )
+            : 5);
+
+        setHping3Progress(progress);
+        setHping3Stage(
+          job.status === "running"
+            ? `Sending packets: ${transmitted}/${job.count || 5}`
+            : job.stage || "Running hping3 test"
+        );
+
+        if (
+          [
+            "completed",
+            "completed_with_errors",
+            "failed",
+            "cancelled",
+            "timeout",
+          ].includes(job.status)
+        ) {
+          const result = job.result || {
+            tool: "hping3",
+            target: job.target,
+            port: job.port,
+            status: job.status,
+            transmitted,
+            received,
+            packet_loss: job.packet_loss,
+            rtt: job.rtt,
+            packets: job.packets || [],
+            error: job.error || null,
+          };
+
+          setHping3Result(result);
+
+          const finalStatus =
+            job.status === "completed"
+              ? "Completed"
+              : job.status === "completed_with_errors"
+              ? "Completed with warnings"
+              : job.status === "cancelled"
+              ? "Cancelled"
+              : job.status === "timeout"
+              ? "Timed Out"
+              : "Failed";
+
+          setToolStatuses((current) => ({
+            ...current,
+            hping3: finalStatus,
+          }));
+
+          setHping3Progress(100);
+          setHping3Stage(finalStatus);
+
+          if (vaptRunTools.length >= 2) {
+            setVaptRunResults((current) => ({
+              ...current,
+              hping3: result,
+            }));
+          }
+
+          if (vaptRunTools.length <= 1) {
+            setScanResult(result);
+            setLoading(false);
+            setStatus(
+              job.status === "completed"
+                ? "Completed"
+                : job.status === "completed_with_errors"
+                ? "Completed with warnings"
+                : "Failed"
+            );
+            setMessage(
+              job.status === "completed"
+                ? "hping3 test completed successfully."
+                : job.error || `hping3 test ${finalStatus.toLowerCase()}.`
+            );
+
+            if (
+              job.status === "completed" &&
+              typeof onViewHping3Results === "function"
+            ) {
+              onViewHping3Results(result);
+            }
+          }
+
+          setHping3JobId(null);
+        }
+      } catch (err) {
+        if (stopped) return;
+
+        console.error("hping3 progress error:", err);
+
+        if (err.response?.status === 404) {
+          setHping3JobId(null);
+          setHping3Progress(0);
+          setToolStatuses((current) => ({
+            ...current,
+            hping3: "Failed",
+          }));
+          setStatus("Failed");
+          setMessage(
+            "The hping3 job is no longer available. Start a new test."
+          );
+        } else if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setHping3JobId(null);
+          setLoading(false);
+          setToolStatuses((current) => ({
+            ...current,
+            hping3: "Failed",
+          }));
+          setStatus("Failed");
+          setMessage("Your session has expired. Please login again.");
+        }
+      }
+    };
+
+    poll();
+    const intervalId = window.setInterval(poll, 750);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(intervalId);
+    };
+  }, [hping3JobId, vaptRunTools.length]);
+
+  // ==================================================
+  // TSHARK REAL-TIME PROGRESS / RESULTS
+  // ==================================================
+  useEffect(() => {
+    if (!tsharkJobId) return undefined;
+
+    let stopped = false;
+
+    const poll = async () => {
+      const token = localStorage.getItem("token");
+      if (!token || stopped) return;
+
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/network/tshark/${tsharkJobId}/progress`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+
+        if (stopped) return;
+
+        const job = response.data || {};
+        setTsharkProgress(Number(job.progress) || 0);
+        setTsharkStage(job.stage || "Capturing packets");
+        setTsharkLivePackets(Array.isArray(job.live_packets) ? job.live_packets : []);
+
+        if (["completed", "failed", "cancelled"].includes(job.status)) {
+          const result = {
+            ...job,
+            tool: "tshark",
+            job_id: tsharkJobId,
+          };
+
+          setTsharkResult(result);
+
+          const finalStatus =
+            job.status === "completed"
+              ? "Completed"
+              : job.status === "cancelled"
+              ? "Cancelled"
+              : "Failed";
+
+          setToolStatuses((current) => ({
+            ...current,
+            tshark: finalStatus,
+          }));
+
+          setLoading(false);
+          setStatus(
+            job.status === "completed"
+              ? "Completed"
+              : job.status === "cancelled"
+              ? "Cancelled"
+              : "Failed"
+          );
+
+          if (
+            job.status === "completed" &&
+            vaptRunTools.length <= 1 &&
+            typeof onViewTsharkResults === "function"
+          ) {
+            onViewTsharkResults(result);
+          }
+
+          setTsharkJobId(null);
+        }
+      } catch (err) {
+        if (!stopped) {
+          console.error("TShark progress error:", err);
+          setTsharkStage("TShark capture failed");
+          setTsharkJobId(null);
+        }
+      }
+    };
+
+    poll();
+    const timer = setInterval(poll, 750);
+
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [tsharkJobId, onViewTsharkResults]);
+
+  useEffect(() => {
+    if (!snortJobId) return undefined;
+
+    let stopped = false;
+
+    const poll = async () => {
+      const token = localStorage.getItem("token");
+      if (!token || stopped) return;
+
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/network/snort/${snortJobId}/progress`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+
+        if (stopped) return;
+
+        const job = response.data || {};
+        setSnortProgress(Number(job.progress) || 0);
+        setSnortStage(job.stage || "Monitoring traffic");
+        setSnortLiveAlerts(
+          Array.isArray(job.live_alerts) ? job.live_alerts : []
+        );
+
+        if (["completed", "failed", "cancelled"].includes(job.status)) {
+          const result = {
+            ...job,
+            tool: "snort",
+            job_id: snortJobId,
+          };
+
+          setSnortResult(result);
+
+          const finalStatus =
+            job.status === "completed"
+              ? "Completed"
+              : job.status === "cancelled"
+              ? "Cancelled"
+              : "Failed";
+
+          setToolStatuses((current) => ({
+            ...current,
+            snort: finalStatus,
+          }));
+
+          setLoading(false);
+          setStatus(
+            job.status === "completed"
+              ? "Completed"
+              : job.status === "cancelled"
+              ? "Cancelled"
+              : "Failed"
+          );
+
+          if (
+            job.status === "completed" &&
+            vaptRunTools.length <= 1 &&
+            typeof onViewSnortResults === "function"
+          ) {
+            onViewSnortResults(result);
+          }
+
+          setSnortJobId(null);
+        }
+      } catch (err) {
+        if (!stopped) {
+          console.error("Snort progress error:", err);
+          setSnortStage("Snort monitoring failed");
+          setSnortJobId(null);
+        }
+      }
+    };
+
+    poll();
+    const timer = setInterval(poll, 750);
+
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [snortJobId, onViewSnortResults]);
+
+  useEffect(() => {
+    if (!wiresharkJobId) return undefined;
+
+    let stopped = false;
+
+    const poll = async () => {
+      const token = localStorage.getItem("token");
+      if (!token || stopped) return;
+
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/network/wireshark/capture/${wiresharkJobId}/progress`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        const job = response.data || {};
+
+        setWiresharkProgress(Number(job.progress) || 0);
+        setWiresharkStage(
+          job.stage ||
+            (job.status === "running"
+              ? "Capturing packets..."
+              : "Preparing Wireshark capture")
+        );
+
+        if (
+          ["completed", "failed", "cancelled"].includes(job.status)
+        ) {
+          const result = {
+            ...job,
+            tool: "wireshark",
+            capture_id: wiresharkJobId,
+            packet_count: Number(job.packet_count || 0),
+          };
+
+          setWiresharkResult(result);
+
+          const finalStatus =
+            job.status === "completed"
+              ? "Completed"
+              : job.status === "cancelled"
+              ? "Cancelled"
+              : "Failed";
+
+          setToolStatuses((current) => ({
+            ...current,
+            wireshark: finalStatus,
+          }));
+
+          setWiresharkProgress(job.status === "completed" ? 100 : Number(job.progress || 0));
+          setWiresharkStage(finalStatus);
+
+          if (
+            job.status === "completed" &&
+            vaptRunTools.length <= 1 &&
+            typeof onViewWiresharkResults === "function"
+          ) {
+            onViewWiresharkResults(result);
+            setLoading(false);
+          }
+
+          setWiresharkJobId(null);
+        }
+      } catch (err) {
+        if (stopped) return;
+
+        console.error("Wireshark progress error:", err);
+
+        setToolStatuses((current) => ({
+          ...current,
+          wireshark: "Failed",
+        }));
+
+        setWiresharkStage("Wireshark capture failed");
+
+        if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setLoading(false);
+        }
+
+        setWiresharkJobId(null);
+      }
+    };
+
+    poll();
+    const intervalId = window.setInterval(poll, 500);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(intervalId);
+    };
+  }, [wiresharkJobId, vaptRunTools.length, onViewWiresharkResults]);
+
+  // ==================================================
+  // HYDRA REAL-TIME PROGRESS / RESULTS
+  // ==================================================
+  useEffect(() => {
+    if (!hydraJobId) return undefined;
+
+    let stopped = false;
+
+    const poll = async () => {
+      const token = localStorage.getItem("token");
+      if (!token || stopped) return;
+
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/credential/hydra/${hydraJobId}/progress`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        const job = response.data || {};
+
+        setHydraProgress(Number(job.progress) || 0);
+        setHydraStage(job.stage || "Running Hydra credential test");
+
+        if (["completed", "failed", "cancelled"].includes(job.status)) {
+          const result = {
+            ...job,
+            tool: "hydra",
+            job_id: hydraJobId,
+          };
+
+          setHydraResult(result);
+
+          const finalStatus =
+            job.status === "completed"
+              ? "Completed"
+              : job.status === "cancelled"
+              ? "Cancelled"
+              : "Failed";
+
+          setToolStatuses((current) => ({
+            ...current,
+            hydra: finalStatus,
+          }));
+
+          setHydraProgress(
+            job.status === "completed" ? 100 : Number(job.progress || 0)
+          );
+          setHydraStage(finalStatus);
+
+          if (
+            job.status === "completed" &&
+            vaptRunTools.length <= 1 &&
+            typeof onViewHydraResults === "function"
+          ) {
+            onViewHydraResults(result);
+            setLoading(false);
+          }
+
+          setHydraJobId(null);
+        }
+      } catch (err) {
+        if (stopped) return;
+
+        console.error("Hydra progress error:", err);
+
+        setToolStatuses((current) => ({
+          ...current,
+          hydra: "Failed",
+        }));
+
+        setHydraStage("Hydra credential test failed");
+
+        if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setLoading(false);
+        }
+
+        setHydraJobId(null);
+      }
+    };
+
+    poll();
+    const intervalId = window.setInterval(poll, 750);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(intervalId);
+    };
+  }, [hydraJobId]);
+
+  // ==================================================
+  // JOHN THE RIPPER REAL-TIME PROGRESS / RESULTS
+  // ==================================================
+  useEffect(() => {
+    if (!johnJobId) return undefined;
+
+    let stopped = false;
+
+    const poll = async () => {
+      const token = localStorage.getItem("token");
+      if (!token || stopped) return;
+
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/credential/john/${johnJobId}/progress`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        const job = response.data || {};
+
+        setJohnProgress(Number(job.progress) || 0);
+        setJohnStage(job.stage || "Running John the Ripper");
+
+        if (["completed", "failed", "cancelled"].includes(job.status)) {
+          const result = {
+            ...job,
+            tool: "john",
+            job_id: johnJobId,
+          };
+
+          setJohnResult(result);
+
+          const finalStatus =
+            job.status === "completed"
+              ? "Completed"
+              : job.status === "cancelled"
+              ? "Cancelled"
+              : "Failed";
+
+          setToolStatuses((current) => ({
+            ...current,
+            john: finalStatus,
+          }));
+
+          setJohnProgress(
+            job.status === "completed" ? 100 : Number(job.progress || 0)
+          );
+          setJohnStage(finalStatus);
+
+          if (
+            job.status === "completed" &&
+            typeof onViewJohnResults === "function"
+          ) {
+            onViewJohnResults(result);
+            setLoading(false);
+          }
+
+          setJohnJobId(null);
+        }
+      } catch (err) {
+        if (stopped) return;
+
+        console.error("John progress error:", err);
+
+        setToolStatuses((current) => ({
+          ...current,
+          john: "Failed",
+        }));
+
+        setJohnStage("John the Ripper test failed");
+
+        if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setLoading(false);
+        }
+
+        setJohnJobId(null);
+      }
+    };
+
+    poll();
+    const intervalId = window.setInterval(poll, 750);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(intervalId);
+    };
+  }, [johnJobId]);
+
+  // ==================================================
+  // METASPLOIT REAL-TIME PROGRESS / RESULTS
+  // ==================================================
+  useEffect(() => {
+    if (!metasploitJobId) return undefined;
+
+    let stopped = false;
+
+    const poll = async () => {
+      const token = localStorage.getItem("token");
+      if (!token || stopped) return;
+
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/metasploit/${metasploitJobId}/progress`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        const job = response.data || {};
+
+        setMetasploitProgress(Number(job.progress) || 0);
+        setMetasploitStage(
+          job.stage || "Running Metasploit validation"
+        );
+        setMetasploitLiveOutput(
+          Array.isArray(job.live_output) ? job.live_output : []
+        );
+
+        if (["completed", "failed", "cancelled"].includes(job.status)) {
+          const result = {
+            ...job,
+            tool: "metasploit",
+            job_id: metasploitJobId,
+          };
+
+          setMetasploitResult(result);
+
+          if (
+            job.status === "completed" &&
+            vaptRunTools.length <= 1 &&
+            typeof onViewMetasploitResults === "function"
+          ) {
+            try {
+              const finalResponse = await axios.get(
+                `${API_URL}/vapt/metasploit/${metasploitJobId}/results`,
+                {
+                  headers: { Authorization: `Bearer ${token}` },
+                }
+              );
+
+              const finalResult = {
+                ...finalResponse.data,
+                tool: "metasploit",
+                job_id: metasploitJobId,
+              };
+
+              setMetasploitResult(finalResult);
+              onViewMetasploitResults(finalResult);
+              setLoading(false);
+            } catch (resultErr) {
+              console.error("Metasploit results error:", resultErr);
+            }
+          }
+
+          const finalStatus =
+            job.status === "completed"
+              ? "Completed"
+              : job.status === "cancelled"
+              ? "Cancelled"
+              : "Failed";
+
+          setToolStatuses((current) => ({
+            ...current,
+            metasploit: finalStatus,
+          }));
+
+          setMetasploitProgress(
+            job.status === "completed"
+              ? 100
+              : Number(job.progress || 0)
+          );
+          setMetasploitStage(finalStatus);
+
+          setMetasploitJobId(null);
+        }
+      } catch (err) {
+        if (stopped) return;
+
+        console.error("Metasploit progress error:", err);
+
+        setToolStatuses((current) => ({
+          ...current,
+          metasploit: "Failed",
+        }));
+
+        setMetasploitStage(
+          err.response?.data?.detail || "Metasploit validation failed"
+        );
+
+        if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setLoading(false);
+        }
+
+        setMetasploitJobId(null);
+      }
+    };
+
+    poll();
+    const intervalId = window.setInterval(poll, 750);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(intervalId);
+    };
+  }, [metasploitJobId]);
+
+  useEffect(() => {
+    if (!masscanJobId) return undefined;
+
+    let stopped = false;
+
+    const poll = async () => {
+      const token = localStorage.getItem("token");
+      if (!token || stopped) return;
+
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/masscan/progress/${masscanJobId}`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        const job = response.data || {};
+        setMasscanProgress(Number(job.progress) || 0);
+        setMasscanStage(job.stage || "Running Masscan scan");
+
+        if (
+          [
+            "completed",
+            "completed_with_errors",
+            "failed",
+            "timeout",
+          ].includes(job.status)
+        ) {
+          const result = job.result || {
+            tool: "masscan",
+            target: job.target,
+            status: job.status,
+            error: job.error || null,
+          };
+
+          setToolStatuses((current) => ({
+            ...current,
+            masscan:
+              job.status === "completed"
+                ? "Completed"
+                : job.status === "completed_with_errors"
+                ? "Completed with warnings"
+                : job.status === "timeout"
+                ? "Timed Out"
+                : "Failed",
+          }));
+
+          if (vaptRunTools.length >= 2) {
+            setVaptRunResults((current) => ({
+              ...current,
+              masscan: result,
+            }));
+          }
+
+          setMasscanProgress(100);
+          setMasscanStage(
+            job.status === "completed"
+              ? "Completed"
+              : job.status === "completed_with_errors"
+              ? "Completed with warnings"
+              : job.status === "timeout"
+              ? "Timed out"
+              : "Finished with errors"
+          );
+
+          if (vaptRunTools.length <= 1) {
+            setScanResult(result);
+            setLoading(false);
+            setStatus(
+              job.status === "completed"
+                ? "Completed"
+                : job.status === "completed_with_errors"
+                ? "Completed with warnings"
+                : "Failed"
+            );
+            setMessage(
+              job.status === "completed"
+                ? "Masscan scan completed successfully."
+                : job.error || "Masscan scan finished with errors."
+            );
+
+            if (
+              typeof onViewMasscanResults === "function" &&
+              result
+            ) {
+              onViewMasscanResults({
+                target: job.target,
+                masscan: result,
+              });
+            }
+          }
+
+          setMasscanJobId(null);
+        }
+      } catch (err) {
+        if (stopped) return;
+
+        console.error("Masscan progress error:", err);
+
+        if (err.response?.status === 404) {
+          setLoading(false);
+          setMasscanJobId(null);
+          setToolStatuses((current) => ({
+            ...current,
+            masscan: "Failed",
+          }));
+          setStatus("Failed");
+          setMessage(
+            "The Masscan job is no longer available. Start a new scan."
+          );
+        } else if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setLoading(false);
+          setMasscanJobId(null);
+          setToolStatuses((current) => ({
+            ...current,
+            masscan: "Failed",
+          }));
+          setStatus("Failed");
+          setMessage("Your session has expired. Please login again.");
+        }
+      }
+    };
+
+    poll();
+    const intervalId = window.setInterval(poll, 1500);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(intervalId);
+    };
+  }, [masscanJobId, vaptRunTools.length]);
+
+  const normalizeNiktoResult = (result, cleanTarget) => ({
+    target: cleanTarget,
+    scan_type: `nikto-${result?.scan_type || niktoProfile}`,
+    scan: {
+      http_status: null,
+      response_time_ms: null,
+    },
+    assessment: {
+      findings_count: Array.isArray(result?.findings)
+        ? result.findings.length
+        : Number(result?.findings_count || 0),
+    },
+    security_headers: [],
+    findings: Array.isArray(result?.findings) ? result.findings : [],
+    nikto: result || null,
+  });
+
+  const finishNiktoJob = (job) => {
+    const result = job?.result;
+    const completed =
+      job?.status === "completed" ||
+      job?.status === "completed_with_errors";
+    const terminalFailure =
+      job?.status === "failed" || job?.status === "timeout";
+
+    const normalizedResult = result
+      ? normalizeNiktoResult(result, targetUrl.trim())
+      : null;
+
+    if (normalizedResult && vaptRunTools.length <= 1) {
+      setScanResult(normalizedResult);
+    }
+
+    if (job?.status === "timeout") {
+      setToolStatuses((current) => ({ ...current, nikto: "Timed Out" }));
+      setStatus("Failed");
+      setMessage(
+        job?.error ||
+          result?.errors?.[0] ||
+          "Nikto scan timed out."
+      );
+    } else if (terminalFailure) {
+      setToolStatuses((current) => ({ ...current, nikto: "Failed" }));
+      setStatus("Failed");
+      setMessage(
+        job?.error ||
+          result?.errors?.[0] ||
+          "Nikto scan failed."
+      );
+    } else if (completed) {
+      const findingCount = Array.isArray(result?.findings)
+        ? result.findings.length
+        : Number(result?.findings_count || 0);
+
+      setToolStatuses((current) => ({ ...current, nikto: "Completed" }));
+      setStatus("Completed");
+      setMessage(
+        `Nikto ${result?.scan_type || niktoProfile} scan completed for ${targetUrl.trim()}: ${findingCount} finding(s).`
+      );
+
+      localStorage.setItem("active_vapt_target", targetUrl.trim());
+      localStorage.setItem(
+        "active_vapt_target_meta",
+        JSON.stringify({
+          target: targetUrl.trim(),
+          scanType: `nikto-${result?.scan_type || niktoProfile}`,
+          scannedAt: new Date().toISOString(),
+          status: "Completed",
+        })
+      );
+
+      // Single-tool mode keeps the existing Nikto result-page behavior.
+      // Multi-tool mode is handled by the unified coordinator.
+      if (
+        vaptRunTools.length <= 1 &&
+        normalizedResult &&
+        typeof onViewNiktoResults === "function"
+      ) {
+        onViewNiktoResults(normalizedResult);
+      }
+
+      if (vaptRunTools.length > 1 && normalizedResult) {
+        setVaptRunResults((current) => ({
+          ...current,
+          nikto: normalizedResult,
+        }));
+      }
+    }
+
+    setLoading(false);
+    setNiktoJobId(null);
+  };
+
+  useEffect(() => {
+    if (!niktoJobId) return undefined;
+
+    let stopped = false;
+
+    const pollNiktoJob = async () => {
+      const token = localStorage.getItem("token");
+      if (!token || stopped) return;
+
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/nikto/progress/${niktoJobId}`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        const job = response.data || {};
+        setNiktoProgress(Number(job.progress) || 0);
+        setNiktoStage(job.stage || "Running Nikto scan");
+
+        if (
+          ["completed", "completed_with_errors", "failed", "timeout"].includes(
+            job.status
+          )
+        ) {
+          finishNiktoJob(job);
+        }
+      } catch (err) {
+        if (stopped) return;
+
+        console.error("Nikto progress error:", err);
+
+        if (err.response?.status === 404) {
+          setLoading(false);
+          setNiktoJobId(null);
+          setStatus("Failed");
+          setMessage(
+            "The Nikto job is no longer available. Start a new scan."
+          );
+        } else if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setLoading(false);
+          setNiktoJobId(null);
+          setStatus("Failed");
+          setMessage("Your session has expired. Please login again.");
+        }
+      }
+    };
+
+    pollNiktoJob();
+    const intervalId = window.setInterval(pollNiktoJob, 1500);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(intervalId);
+    };
+  }, [niktoJobId]);
+
+
+  const finishNucleiJob = (job) => {
+    const result = job?.result || null;
+    const completed = job?.status === "completed";
+    const completedWithWarnings = job?.status === "completed_with_errors";
+    const terminalFailure = job?.status === "failed";
+
+    const normalizedResult = result
+      ? {
+          target: job?.target || targetUrl.trim(),
+          scan_type: "nuclei",
+          scan_profile: "nuclei",
+          scan: {
+            http_status: null,
+            response_time_ms: null,
+          },
+          assessment: {
+            findings_count: Array.isArray(result?.findings)
+              ? result.findings.length
+              : Number(result?.finding_count || 0),
+          },
+          security_headers: [],
+          findings: Array.isArray(result?.findings)
+            ? result.findings
+            : [],
+          nuclei: result,
+        }
+      : {
+          target: job?.target || targetUrl.trim(),
+          scan_type: "nuclei",
+          scan_profile: "nuclei",
+          scan: {
+            http_status: null,
+            response_time_ms: null,
+          },
+          assessment: {
+            findings_count: 0,
+          },
+          security_headers: [],
+          findings: [],
+          nuclei: null,
+        };
+
+    if (completed || completedWithWarnings) {
+      const findingCount = Array.isArray(result?.findings)
+        ? result.findings.length
+        : Number(result?.finding_count || 0);
+
+      setNucleiProgress(100);
+      setNucleiStage(
+        completed
+          ? "Completed"
+          : "Completed with warnings"
+      );
+
+      setToolStatuses((current) => ({
+        ...current,
+        nuclei: completed
+          ? "Completed"
+          : "Completed with warnings",
+      }));
+
+      setScanResult(normalizedResult);
+      setStatus(
+        completed
+          ? "Completed"
+          : "Completed with warnings"
+      );
+      setMessage(
+        `Nuclei scan completed for ${targetUrl.trim()}: ${findingCount} finding(s).`
+      );
+
+      localStorage.setItem(
+        "active_vapt_target",
+        targetUrl.trim()
+      );
+      localStorage.setItem(
+        "active_vapt_target_meta",
+        JSON.stringify({
+          target: targetUrl.trim(),
+          scanType: "nuclei",
+          scannedAt: new Date().toISOString(),
+          status: completed
+            ? "Completed"
+            : "Completed with warnings",
+        })
+      );
+
+      setLoading(false);
+      setNucleiJobId(null);
+
+      // Single-tool mode keeps the existing Nuclei result-page behavior.
+      // Multi-tool mode is handled by the unified coordinator.
+      if (
+        vaptRunTools.length <= 1 &&
+        typeof onViewNucleiResults === "function"
+      ) {
+        onViewNucleiResults(normalizedResult);
+      }
+
+      if (vaptRunTools.length > 1) {
+        setVaptRunResults((current) => ({
+          ...current,
+          nuclei: normalizedResult,
+        }));
+      }
+
+      return;
+    }
+
+    if (terminalFailure) {
+      setNucleiProgress(100);
+      setNucleiStage("Failed");
+      setToolStatuses((current) => ({
+        ...current,
+        nuclei: "Failed",
+      }));
+      setMessage(
+        job?.error ||
+          result?.errors?.[0] ||
+          "Nuclei scan failed."
+      );
+      setStatus("Failed");
+      setLoading(false);
+      setNucleiJobId(null);
+    }
+  };
+
+  useEffect(() => {
+    if (!nucleiJobId) return undefined;
+
+    let stopped = false;
+    let intervalId = null;
+
+    const pollNucleiJob = async () => {
+      const token = localStorage.getItem("token");
+
+      if (!token || stopped) return;
+
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/registry/tools/nuclei/progress/${nucleiJobId}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
+        );
+
+        if (stopped) return;
+
+        const job = response.data || {};
+
+        setNucleiProgress(
+          Math.max(0, Math.min(100, Number(job?.progress) || 0))
+        );
+        setNucleiStage(
+          job?.stage || "Running Nuclei scan"
+        );
+
+        if (job?.status === "queued") {
+          setToolStatuses((current) => ({
+            ...current,
+            nuclei: "Queued",
+          }));
+          return;
+        }
+
+        if (job?.status === "running") {
+          setToolStatuses((current) => ({
+            ...current,
+            nuclei: "Running",
+          }));
+          return;
+        }
+
+        if (
+          job?.status === "completed" ||
+          job?.status === "completed_with_errors" ||
+          job?.status === "failed"
+        ) {
+          if (intervalId !== null) {
+            window.clearInterval(intervalId);
+          }
+          finishNucleiJob(job);
+        }
+      } catch (err) {
+        if (stopped) return;
+
+        console.error(
+          "Nuclei progress error:",
+          err
+        );
+
+        if (err.response?.status === 404) {
+          setNucleiStage("Job not found or expired");
+          setToolStatuses((current) => ({
+            ...current,
+            nuclei: "Failed",
+          }));
+          setMessage(
+            "The Nuclei job is no longer available. Start a new scan."
+          );
+          setStatus("Failed");
+          setLoading(false);
+          setNucleiJobId(null);
+        } else if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setNucleiStage("Session expired");
+          setToolStatuses((current) => ({
+            ...current,
+            nuclei: "Failed",
+          }));
+          setMessage(
+            "Your session has expired. Please login again."
+          );
+          setStatus("Failed");
+          setLoading(false);
+          setNucleiJobId(null);
+        } else {
+          setNucleiStage("Progress check failed");
+          setToolStatuses((current) => ({
+            ...current,
+            nuclei: "Failed",
+          }));
+          setMessage(
+            err.response?.data?.detail ||
+              "Unable to retrieve Nuclei scan progress."
+          );
+          setStatus("Failed");
+          setLoading(false);
+          setNucleiJobId(null);
+        }
+
+        if (intervalId !== null) {
+          window.clearInterval(intervalId);
+        }
+      }
+    };
+
+    intervalId = window.setInterval(
+      pollNucleiJob,
+      1500
+    );
+
+    pollNucleiJob();
+
+    return () => {
+      stopped = true;
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
+    };
+  }, [nucleiJobId]);
+
+  // ==================================================
+  // OWASP ZAP PROGRESS / RESULTS
+  // ==================================================
+  useEffect(() => {
+    if (!zapScanId) return undefined;
+
+    let stopped = false;
+    let intervalId = null;
+    let resultRedirectTimeout = null;
+
+    const loadZapResults = async () => {
+      const token = localStorage.getItem("token");
+      if (!token || stopped) return;
+
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/zap/scan/${encodeURIComponent(zapScanId)}/results`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        if (stopped) return;
+
+        const result = response.data || {};
+        const completedResult = {
+          ...result,
+          target: result?.target || targetUrl.trim(),
+          tool: "owasp-zap",
+        };
+
+        setZapResults(completedResult);
+        setZapProgress(100);
+        setZapStage("Completed");
+        setToolStatuses((current) => ({
+          ...current,
+          "owasp-zap": "Completed",
+        }));
+        setVaptRunResults((current) => ({
+          ...current,
+          "owasp-zap": completedResult,
+        }));
+        setStatus("Completed");
+        setMessage(
+          `OWASP ZAP scan completed for ${completedResult.target}: ${
+            completedResult.total_findings ??
+            completedResult.total_alerts ??
+            (Array.isArray(completedResult.findings)
+              ? completedResult.findings.length
+              : 0)
+          } finding(s).`
+        );
+
+        localStorage.setItem("active_vapt_target", completedResult.target);
+        localStorage.setItem(
+          "active_vapt_target_meta",
+          JSON.stringify({
+            target: completedResult.target,
+            scanType: "owasp-zap",
+            scannedAt: new Date().toISOString(),
+            status: "Completed",
+          })
+        );
+
+        if (intervalId !== null) window.clearInterval(intervalId);
+
+        // ZAP has its own dedicated result page. Do not send a ZAP-only
+        // scan through the generic Multi-Tool Results page.
+        const zapResult = {
+          ...completedResult,
+          scan_type: "owasp-zap",
+          scan_profile: "Dev CICD",
+          tool: "owasp-zap",
+        };
+
+        resultRedirectTimeout = window.setTimeout(() => {
+          if (stopped) return;
+
+          setLoading(false);
+          setScanResult(zapResult);
+
+          if (typeof onViewZapResults === "function") {
+            onViewZapResults(zapResult);
+          }
+
+          setZapScanId(null);
+        }, 900);
+      } catch (err) {
+        if (stopped) return;
+
+        // The results endpoint may briefly report that the scan is not
+        // ready yet. Keep polling instead of treating that as a failure.
+        if (err.response?.status === 409) return;
+
+        console.error("OWASP ZAP results error:", err);
+        setToolStatuses((current) => ({
+          ...current,
+          "owasp-zap": "Failed",
+        }));
+        setZapStage("Results retrieval failed");
+        setStatus("Failed");
+        setMessage(
+          err.response?.data?.detail ||
+          err.message ||
+          "Unable to retrieve OWASP ZAP results."
+        );
+        if (intervalId !== null) window.clearInterval(intervalId);
+        setLoading(false);
+        setZapScanId(null);
+      }
+    };
+
+    const pollZap = async () => {
+      const token = localStorage.getItem("token");
+      if (!token || stopped) return;
+
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/zap/scan/${encodeURIComponent(zapScanId)}/progress`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        if (stopped) return;
+
+        const job = response.data || {};
+        const progress = Math.max(0, Math.min(100, Number(job?.status) || 0));
+        const state = String(job?.state || job?.status_text || "").toLowerCase();
+
+        setZapProgress(progress);
+        setZapStage(job?.stage || (progress >= 100 ? "Finishing" : "Running active scan"));
+
+        if (state === "failed" || state === "error") {
+          setToolStatuses((current) => ({
+            ...current,
+            "owasp-zap": "Failed",
+          }));
+          setZapStage("Failed");
+          setStatus("Failed");
+          setMessage(job?.error || "OWASP ZAP scan failed.");
+          setLoading(false);
+          setZapScanId(null);
+          if (intervalId !== null) window.clearInterval(intervalId);
+          return;
+        }
+
+        if (progress >= 100 || state === "completed" || state === "complete") {
+          setZapStage("Fetching results");
+          await loadZapResults();
+        } else {
+          setToolStatuses((current) => ({
+            ...current,
+            "owasp-zap": progress > 0 ? "Running" : "Queued",
+          }));
+        }
+      } catch (err) {
+        if (stopped) return;
+
+        console.error("OWASP ZAP progress error:", err);
+
+        if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setToolStatuses((current) => ({
+            ...current,
+            "owasp-zap": "Failed",
+          }));
+          setZapStage("Session expired");
+          setStatus("Failed");
+          setMessage("Your session has expired. Please login again.");
+          setLoading(false);
+          setZapScanId(null);
+          if (intervalId !== null) window.clearInterval(intervalId);
+        } else if (err.response?.status === 404) {
+          setToolStatuses((current) => ({
+            ...current,
+            "owasp-zap": "Failed",
+          }));
+          setZapStage("Scan job not found");
+          setStatus("Failed");
+          setMessage("The OWASP ZAP scan is no longer available. Start a new scan.");
+          setLoading(false);
+          setZapScanId(null);
+          if (intervalId !== null) window.clearInterval(intervalId);
+        }
+      }
+    };
+
+    intervalId = window.setInterval(pollZap, 1500);
+    pollZap();
+
+    return () => {
+      stopped = true;
+      if (intervalId !== null) window.clearInterval(intervalId);
+      if (resultRedirectTimeout !== null) {
+        window.clearTimeout(resultRedirectTimeout);
+      }
+    };
+  }, [zapScanId]);
+
+  const cancelZapScan = async () => {
+    if (!zapScanId) return;
+    const token = localStorage.getItem("token");
+    if (!token) return;
+
+    try {
+      await axios.post(
+        `${API_URL}/vapt/zap/scan/${encodeURIComponent(zapScanId)}/cancel`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setToolStatuses((current) => ({ ...current, "owasp-zap": "Cancelled" }));
+      setZapStage("Cancelled");
+      setStatus("Cancelled");
+      setMessage("OWASP ZAP scan cancelled.");
+      setZapScanId(null);
+      setLoading(false);
+    } catch (err) {
+      setMessage(err.response?.data?.detail || err.message || "Unable to cancel the OWASP ZAP scan.");
+    }
+  };
+
+  // Unified coordinator for multi-tool registry VAPT runs.
+  // Single-tool Nmap/Nikto/Nuclei behavior remains unchanged.
+  useEffect(() => {
+    // ZAP has its own dedicated progress/result lifecycle.
+    // Keep ZAP-only runs out of the generic multi-tool finalizer.
+    if (
+      !vaptRunId ||
+      vaptRunRedirected ||
+      vaptRunTools.length < 2
+    ) {
+      return undefined;
+    }
+
+    const terminalStatuses = new Set([
+      "completed",
+      "completed_with_errors",
+      "failed",
+      "timeout",
+    ]);
+
+    const timer = window.setInterval(() => {
+      const statuses = vaptRunTools.map(
+        (toolId) => toolStatuses[toolId]
+      );
+
+      const startedOrTerminal = vaptRunTools.filter((toolId) => {
+        const status = toolStatuses[toolId];
+        return (
+          status &&
+          status !== "Selected" &&
+          status !== "Input Required"
+        );
+      });
+
+      if (startedOrTerminal.length === 0) {
+        return;
+      }
+
+      const allFinished = vaptRunTools.every((toolId) => {
+        const status = toolStatuses[toolId];
+        const result = vaptRunResults[toolId];
+        const genericStatus = genericToolJobs[toolId]?.status;
+
+        if (status === "Input Required") {
+          return true;
+        }
+
+        const uiTerminal = [
+          "Completed",
+          "Completed with warnings",
+          "Failed",
+          "Timed Out",
+        ].includes(status);
+
+        const backendTerminal = terminalStatuses.has(genericStatus);
+
+        // Specialized tools are only truly complete when their dedicated
+        // poller has stored the real result. Do not allow a stale UI status
+        // to finalize the unified result page.
+        const specializedTool = [
+          "nmap",
+          "nikto",
+          "nuclei",
+          "masscan",
+          "owasp-zap",
+          "hping3",
+          "wireshark",
+          "tshark",
+          "snort",
+          "hydra",
+          "john",
+        ].includes(toolId);
+
+        if (specializedTool) {
+          if (["Failed", "Timed Out"].includes(status)) {
+            return true;
+          }
+
+          return (
+            Boolean(result) &&
+            (uiTerminal || backendTerminal)
+          );
+        }
+
+        return uiTerminal || backendTerminal;
+      });
+
+      if (!allFinished) {
+        return;
+      }
+
+      window.clearInterval(timer);
+
+      setVaptRunRedirected(true);
+      setLoading(false);
+
+      const completedCount = statuses.filter((status) =>
+        ["Completed", "Completed with warnings"].includes(status)
+      ).length;
+
+      const failedCount = statuses.filter((status) =>
+        ["Failed", "Timed Out"].includes(status)
+      ).length;
+
+      setStatus(failedCount > 0 ? "Completed with warnings" : "Completed");
+      setMessage(
+        `Multi-tool VAPT completed: ${completedCount} completed, ${failedCount} failed or timed out.`
+      );
+
+      // Preserve the collected generic results for the unified results view.
+      const unifiedResult = {
+        target: targetUrl.trim(),
+        scan_type: "multi-tool",
+        scan_profile: "multi-tool",
+        tools: vaptRunTools,
+        results: vaptRunResults,
+        tool_statuses: { ...toolStatuses },
+        generated_at: new Date().toISOString(),
+      };
+
+      console.log(
+        "[MULTI-TOOL FINAL RESULTS]",
+        JSON.stringify(
+          {
+            tools: vaptRunTools,
+            nmap: vaptRunResults?.nmap,
+            nmapHosts: vaptRunResults?.nmap?.nmap?.results?.hosts,
+            nmapHostCount: vaptRunResults?.nmap?.nmap?.results?.host_count,
+          },
+          null,
+          2
+        )
+      );
+
+      setScanResult(unifiedResult);
+
+      if (typeof onViewMultiToolResults === "function") {
+        onViewMultiToolResults(unifiedResult);
+      }
+    }, 500);
+
+    return () => window.clearInterval(timer);
+  }, [
+    vaptRunId,
+    vaptRunTools,
+    vaptRunResults,
+    genericToolJobs,
+    toolStatuses,
+    vaptRunRedirected,
+    targetUrl,
+  ]);
+
+  const handlePrepareTools = async () => {
+    if (selectedTools.length === 0) {
+      setMessage("Select at least one VAPT tool.");
+      return;
+    }
+
+    const cleanTarget = targetUrl.trim();
+    if (!cleanTarget) {
+      setMessage("Enter an authorized target before running tools.");
+      return;
+    }
+
+    // Accept both full URLs and bare domain/IP targets.
+    // Reconnaissance tools such as DIG, DNS Recon, nslookup, Ping and
+    // WHOIS operate on host/domain targets and should not require a URL scheme.
+    let parsedUrl;
+    let nmapTarget;
+
+    try {
+      const normalizedTarget = /^[a-z][a-z0-9+.-]*:\/\//i.test(cleanTarget)
+        ? cleanTarget
+        : `https://${cleanTarget}`;
+
+      parsedUrl = new URL(normalizedTarget);
+
+      if (!parsedUrl.hostname) {
+        throw new Error("Missing target hostname");
+      }
+
+      nmapTarget = parsedUrl.hostname;
+    } catch {
+      setMessage(
+        "Enter a valid domain, IP address, or URL, for example www.secuzity.com"
+      );
+      return;
+    }
+
+    const nextStatuses = {};
+    selectedTools.forEach((toolId) => {
+      nextStatuses[toolId] = "Selected";
+    });
+
+    setToolStatuses(nextStatuses);
+    setMessage("");
+    setScanResult(null);
+
+    // Start a fresh unified VAPT run.
+    // Existing individual tool jobs continue to use their existing workflows.
+    const newVaptRunId = `vapt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setVaptRunId(newVaptRunId);
+    setVaptRunTools(selectedTools);
+    setVaptRunResults({});
+    setVaptRunRedirected(false);
+    setGenericToolJobs({});
+
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      setStatus("Failed");
+      setMessage("Your session has expired. Please login again.");
+      return;
+    }
+
+    const hasNmap = selectedTools.includes("nmap");
+    const hasNikto = selectedTools.includes("nikto");
+    const hasNuclei = selectedTools.includes("nuclei");
+    const hasMasscan = selectedTools.includes("masscan");
+    const hasZap = selectedTools.includes("owasp-zap");
+
+    const specializedTools = [
+      "nmap",
+      "nikto",
+      "nuclei",
+      "masscan",
+      "owasp-zap",
+      "hping3",
+      "wireshark",
+      "tshark",
+      "snort",
+      "hydra",
+      "john",
+      "metasploit",
+    ];
+
+    const genericTools = selectedTools.filter(
+      (toolId) => !specializedTools.includes(toolId)
+    );
+
+    setLoading(true);
+    setStatus("Scanning");
+
+    let startedCount = 0;
+    let failedCount = 0;
+
+    // ==================================================
+    // NMAP
+    // ==================================================
+    if (hasNmap) {
+      try {
+        setNmapProgress(0);
+        setNmapStage("Starting Nmap scan");
+
+        setToolStatuses((current) => ({
+          ...current,
+          nmap: "Queued",
+        }));
+
+        const response = await axios.post(
+          `${API_URL}/vapt/tools/run-async`,
+          {
+            target: nmapTarget,
+            scan_type: nmapProfile,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const jobId = response.data?.job_id;
+
+        if (!jobId) {
+          throw new Error("The backend did not return an Nmap job ID.");
+        }
+
+        setNmapJobId(jobId);
+
+        setToolStatuses((current) => ({
+          ...current,
+          nmap: "Running",
+        }));
+
+        startedCount += 1;
+      } catch (err) {
+        console.error("Nmap execution error:", err);
+
+        failedCount += 1;
+
+        setToolStatuses((current) => ({
+          ...current,
+          nmap: "Failed",
+        }));
+
+        if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setMessage("Your session has expired. Please login again.");
+        } else if (err.response?.data?.detail) {
+          const detail = err.response.data.detail;
+          setMessage(
+            typeof detail === "string"
+              ? detail
+              : JSON.stringify(detail)
+          );
+        } else {
+          setMessage(
+            err.message || "Unable to start the Nmap scan."
+          );
+        }
+      }
+    }
+
+    // ==================================================
+    // NUCLEI
+    // ==================================================
+    if (hasNuclei) {
+      try {
+        setNucleiProgress(0);
+        setNucleiStage("Starting Nuclei scan");
+
+        setToolStatuses((current) => ({
+          ...current,
+          nuclei: "Queued",
+        }));
+
+        const response = await axios.post(
+          `${API_URL}/vapt/registry/tools/nuclei/run-async`,
+          {
+            target: cleanTarget,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const jobId = response.data?.job_id;
+
+        if (!jobId) {
+          throw new Error("The backend did not return a Nuclei job ID.");
+        }
+
+        setNucleiJobId(jobId);
+
+        setToolStatuses((current) => ({
+          ...current,
+          nuclei: "Running",
+        }));
+
+        startedCount += 1;
+      } catch (err) {
+        console.error("Nuclei execution error:", err);
+
+        failedCount += 1;
+
+        setToolStatuses((current) => ({
+          ...current,
+          nuclei: "Failed",
+        }));
+
+        if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setMessage("Your session has expired. Please login again.");
+        } else if (err.response?.status === 403) {
+          setMessage(
+            err.response?.data?.detail ||
+            "You do not have permission to use Nuclei."
+          );
+        } else if (err.response?.data?.detail) {
+          const detail = err.response.data.detail;
+          setMessage(
+            typeof detail === "string"
+              ? detail
+              : JSON.stringify(detail)
+          );
+        } else {
+          setMessage(
+            err.message || "Unable to start the Nuclei scan."
+          );
+        }
+      }
+    }
+
+    // ==================================================
+    // NIKTO
+    // ==================================================
+    if (hasNikto) {
+      try {
+        setNiktoProgress(0);
+        setNiktoStage("Starting Nikto scan");
+
+        setToolStatuses((current) => ({
+          ...current,
+          nikto: "Queued",
+        }));
+
+        const response = await axios.post(
+          `${API_URL}/vapt/nikto/run-async`,
+          {
+            target_url: cleanTarget,
+            scan_type: niktoProfile,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const jobId = response.data?.job_id;
+
+        if (!jobId) {
+          throw new Error("The backend did not return a Nikto job ID.");
+        }
+
+        setNiktoJobId(jobId);
+
+        setToolStatuses((current) => ({
+          ...current,
+          nikto: "Running",
+        }));
+
+        startedCount += 1;
+      } catch (err) {
+        console.error("Nikto execution error:", err);
+
+        failedCount += 1;
+
+        setToolStatuses((current) => ({
+          ...current,
+          nikto: "Failed",
+        }));
+
+        if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setMessage("Your session has expired. Please login again.");
+        } else if (err.response?.data?.detail) {
+          const detail = err.response.data.detail;
+          setMessage(
+            typeof detail === "string"
+              ? detail
+              : JSON.stringify(detail)
+          );
+        } else {
+          setMessage(
+            err.message || "Unable to start the Nikto scan."
+          );
+        }
+      }
+    }
+
+    // ==================================================
+    // MASSCAN
+    // ==================================================
+    if (hasMasscan) {
+      try {
+        setMasscanProgress(0);
+        setMasscanStage("Starting Masscan scan");
+
+        setToolStatuses((current) => ({
+          ...current,
+          masscan: "Queued",
+        }));
+
+        const response = await axios.post(
+          `${API_URL}/vapt/masscan/run-async`,
+          {
+            target: nmapTarget,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const jobId = response.data?.job_id;
+
+        if (!jobId) {
+          throw new Error(
+            "The backend did not return a Masscan job ID."
+          );
+        }
+
+        setMasscanJobId(jobId);
+
+        setToolStatuses((current) => ({
+          ...current,
+          masscan: "Running",
+        }));
+
+        startedCount += 1;
+      } catch (err) {
+        console.error("Masscan execution error:", err);
+
+        failedCount += 1;
+
+        setToolStatuses((current) => ({
+          ...current,
+          masscan: "Failed",
+        }));
+
+        if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setMessage("Your session has expired. Please login again.");
+        } else if (err.response?.status === 403) {
+          setMessage(
+            err.response?.data?.detail ||
+            "You do not have permission to use Masscan."
+          );
+        } else if (err.response?.data?.detail) {
+          const detail = err.response.data.detail;
+          setMessage(
+            typeof detail === "string"
+              ? detail
+              : JSON.stringify(detail)
+          );
+        } else {
+          setMessage(
+            err.message || "Unable to start the Masscan scan."
+          );
+        }
+      }
+    }
+
+    // ==================================================
+    // HYDRA REAL-TIME CREDENTIAL TEST
+    // ==================================================
+    if (selectedTools.includes("hydra")) {
+      try {
+        setHydraProgress(0);
+        setHydraStage("Starting Hydra credential test");
+        setHydraResult(null);
+
+        setToolStatuses((current) => ({
+          ...current,
+          hydra: "Queued",
+        }));
+
+        const hydraResponse = await axios.post(
+          `${API_URL}/vapt/credential/hydra/run`,
+          {
+            target: parsedUrl.hostname,
+            service: "ssh",
+            username: "hydratest",
+            password_list: "/tmp/hydra-passwords.txt",
+            port: 22,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const jobId = hydraResponse.data?.job_id;
+
+        if (!jobId) {
+          throw new Error("The backend did not return a Hydra job ID.");
+        }
+
+        setHydraJobId(String(jobId));
+
+        setToolStatuses((current) => ({
+          ...current,
+          hydra: "Running",
+        }));
+
+        setHydraStage("Hydra credential test running");
+        startedCount += 1;
+      } catch (err) {
+        console.error("Hydra execution error:", err);
+
+        failedCount += 1;
+
+        setToolStatuses((current) => ({
+          ...current,
+          hydra: "Failed",
+        }));
+
+        setHydraStage("Failed to start");
+
+        if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setMessage("Your session has expired. Please login again.");
+        } else if (err.response?.data?.detail) {
+          const detail = err.response.data.detail;
+          setMessage(
+            typeof detail === "string"
+              ? detail
+              : JSON.stringify(detail)
+          );
+        } else {
+          setMessage(
+            err.message || "Unable to start the Hydra credential test."
+          );
+        }
+      }
+    }
+
+    // ==================================================
+    // JOHN THE RIPPER REAL-TIME HASH AUDIT
+    // ==================================================
+    if (selectedTools.includes("john")) {
+      try {
+        setJohnProgress(0);
+        setJohnStage("Starting John the Ripper");
+        setJohnResult(null);
+
+        setToolStatuses((current) => ({
+          ...current,
+          john: "Queued",
+        }));
+
+        const johnResponse = await axios.post(
+          `${API_URL}/vapt/credential/john/run`,
+          {
+            hash_file: "/tmp/soc-john-hashes.txt",
+            wordlist: "/tmp/hydra-passwords.txt",
+            format: "Raw-MD5",
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const jobId = johnResponse.data?.job_id;
+
+        if (!jobId) {
+          throw new Error("The backend did not return a John job ID.");
+        }
+
+        setJohnJobId(String(jobId));
+
+        setToolStatuses((current) => ({
+          ...current,
+          john: "Running",
+        }));
+
+        setJohnStage("John the Ripper audit running");
+        startedCount += 1;
+      } catch (err) {
+        console.error("John execution error:", err);
+
+        failedCount += 1;
+
+        setToolStatuses((current) => ({
+          ...current,
+          john: "Failed",
+        }));
+
+        setJohnStage("Failed to start");
+
+        if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setMessage("Your session has expired. Please login again.");
+        } else if (err.response?.data?.detail) {
+          const detail = err.response.data.detail;
+          setMessage(
+            typeof detail === "string"
+              ? detail
+              : JSON.stringify(detail)
+          );
+        } else {
+          setMessage(
+            err.message || "Unable to start the John the Ripper audit."
+          );
+        }
+      }
+    }
+
+    // ==================================================
+    // METASPLOIT REAL-TIME VALIDATION
+    // ==================================================
+    if (selectedTools.includes("metasploit")) {
+      try {
+        setMetasploitProgress(0);
+        setMetasploitStage("Starting Metasploit validation");
+        setMetasploitLiveOutput([]);
+        setMetasploitResult(null);
+
+        setToolStatuses((current) => ({
+          ...current,
+          metasploit: "Queued",
+        }));
+
+        const metasploitResponse = await axios.post(
+          `${API_URL}/vapt/metasploit/run`,
+          {
+            target: cleanTarget,
+            module: "auxiliary/scanner/http/title",
+            port: parsedUrl.port
+              ? Number(parsedUrl.port)
+              : parsedUrl.protocol === "https:"
+                ? 443
+                : 80,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const jobId = metasploitResponse.data?.job_id;
+
+        if (!jobId) {
+          throw new Error(
+            "The backend did not return a Metasploit job ID."
+          );
+        }
+
+        setMetasploitJobId(String(jobId));
+
+        setToolStatuses((current) => ({
+          ...current,
+          metasploit: "Running",
+        }));
+
+        setMetasploitStage(
+          "Metasploit validation running"
+        );
+
+        startedCount += 1;
+      } catch (err) {
+        console.error(
+          "Metasploit execution error:",
+          err
+        );
+
+        failedCount += 1;
+
+        setToolStatuses((current) => ({
+          ...current,
+          metasploit: "Failed",
+        }));
+
+        setMetasploitStage("Failed to start");
+
+        if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setMessage(
+            "Your session has expired. Please login again."
+          );
+        } else if (err.response?.status === 403) {
+          setMessage(
+            err.response?.data?.detail ||
+            "You do not have permission to use Metasploit."
+          );
+        } else if (err.response?.data?.detail) {
+          const detail = err.response.data.detail;
+
+          setMessage(
+            typeof detail === "string"
+              ? detail
+              : JSON.stringify(detail)
+          );
+        } else {
+          setMessage(
+            err.message ||
+            "Unable to start the Metasploit validation."
+          );
+        }
+      }
+    }
+
+    // ==================================================
+    // HPING3 REAL-TIME NETWORK TEST
+    // ==================================================
+    if (selectedTools.includes("hping3")) {
+      try {
+        setHping3Progress(0);
+        setHping3Stage("Starting hping3 test");
+        setHping3Result(null);
+
+        setToolStatuses((current) => ({
+          ...current,
+          hping3: "Queued",
+        }));
+
+        const hping3Port =
+          parsedUrl.port ||
+          (parsedUrl.protocol === "https:" ? "443" : "80");
+
+        const hping3Response = await axios.post(
+          `${API_URL}/vapt/network/hping3/scan`,
+          {
+            target: parsedUrl.hostname,
+            port: Number(hping3Port),
+            count: 5,
+            interval_ms: 500,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const scanId = hping3Response.data?.scan_id;
+
+        if (!scanId) {
+          throw new Error("The backend did not return an hping3 scan ID.");
+        }
+
+        setHping3JobId(String(scanId));
+        setToolStatuses((current) => ({
+          ...current,
+          hping3: "Running",
+        }));
+        setHping3Stage("hping3 test running");
+        startedCount += 1;
+      } catch (err) {
+        console.error("hping3 execution error:", err);
+
+        failedCount += 1;
+
+        setToolStatuses((current) => ({
+          ...current,
+          hping3: "Failed",
+        }));
+
+        setHping3Stage("Failed to start");
+
+        if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setMessage("Your session has expired. Please login again.");
+        } else if (err.response?.data?.detail) {
+          const detail = err.response.data.detail;
+          setMessage(
+            typeof detail === "string"
+              ? detail
+              : JSON.stringify(detail)
+          );
+        } else {
+          setMessage(
+            err.message || "Unable to start the hping3 test."
+          );
+        }
+      }
+    }
+
+    // ==================================================
+    // TSHARK REAL-TIME PACKET ANALYSIS
+    // ==================================================
+    if (selectedTools.includes("tshark")) {
+      try {
+        setTsharkProgress(0);
+        setTsharkStage("Starting TShark capture");
+        setTsharkResult(null);
+
+        setToolStatuses((current) => ({
+          ...current,
+          tshark: "Queued",
+        }));
+
+        const tsharkResponse = await axios.post(
+          `${API_URL}/vapt/network/tshark/run`,
+          {
+            interface: "eth0",
+            duration: 10,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const jobId = tsharkResponse.data?.job_id;
+
+        if (!jobId) {
+          throw new Error("The backend did not return a TShark job ID.");
+        }
+
+        setTsharkJobId(String(jobId));
+
+        setToolStatuses((current) => ({
+          ...current,
+          tshark: "Running",
+        }));
+
+        setTsharkStage("TShark capture running");
+      } catch (err) {
+        console.error("TShark execution error:", err);
+
+        setToolStatuses((current) => ({
+          ...current,
+          tshark: "Failed",
+        }));
+
+        setTsharkStage("Failed to start");
+        setTsharkProgress(100);
+        setMessage(err.response?.data?.detail || err.message || "Unable to start TShark.");
+      }
+    }
+
+    // ==================================================
+    // SNORT REAL-TIME INTRUSION DETECTION
+    // ==================================================
+    if (selectedTools.includes("snort")) {
+      try {
+        setSnortProgress(0);
+        setSnortStage("Starting Snort monitoring");
+        setSnortResult(null);
+
+        setToolStatuses((current) => ({
+          ...current,
+          snort: "Queued",
+        }));
+
+        const snortResponse = await axios.post(
+          `${API_URL}/vapt/network/snort/run`,
+          {
+            interface: "eth0",
+            duration: 10,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const jobId = snortResponse.data?.job_id;
+
+        if (!jobId) {
+          throw new Error("The backend did not return a Snort job ID.");
+        }
+
+        setSnortJobId(String(jobId));
+
+        setToolStatuses((current) => ({
+          ...current,
+          snort: "Running",
+        }));
+
+        setSnortStage("Snort monitoring running");
+      } catch (err) {
+        console.error("Snort execution error:", err);
+
+        setToolStatuses((current) => ({
+          ...current,
+          snort: "Failed",
+        }));
+
+        setSnortStage("Failed to start");
+        setSnortProgress(100);
+        setMessage(err.response?.data?.detail || err.message || "Unable to start Snort.");
+      }
+    }
+
+    // ==================================================
+    // WIRESHARK REAL-TIME NETWORK CAPTURE
+    // ==================================================
+    if (selectedTools.includes("wireshark")) {
+      try {
+        setWiresharkProgress(0);
+        setWiresharkStage("Starting Wireshark capture");
+        setWiresharkResult(null);
+
+        setToolStatuses((current) => ({
+          ...current,
+          wireshark: "Queued",
+        }));
+
+        const wiresharkResponse = await axios.post(
+          `${API_URL}/vapt/network/wireshark/capture`,
+          {
+            interface: "eth0",
+            duration: 10,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const captureId = wiresharkResponse.data?.id;
+
+        if (!captureId) {
+          throw new Error("The backend did not return a Wireshark capture ID.");
+        }
+
+        setWiresharkJobId(String(captureId));
+
+        setToolStatuses((current) => ({
+          ...current,
+          wireshark: "Running",
+        }));
+
+        setWiresharkStage("Wireshark capture running");
+        startedCount += 1;
+      } catch (err) {
+        console.error("Wireshark execution error:", err);
+
+        failedCount += 1;
+
+        setToolStatuses((current) => ({
+          ...current,
+          wireshark: "Failed",
+        }));
+
+        setWiresharkStage("Failed to start");
+
+        if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setMessage("Your session has expired. Please login again.");
+        } else if (err.response?.data?.detail) {
+          setMessage(
+            typeof err.response.data.detail === "string"
+              ? err.response.data.detail
+              : JSON.stringify(err.response.data.detail)
+          );
+        } else {
+          setMessage(err.message || "Unable to start Wireshark capture.");
+        }
+      }
+    }
+
+    // ==================================================
+    // OWASP ZAP
+    // ==================================================
+    if (hasZap) {
+      try {
+        const zapTarget = /^https?:\/\//i.test(cleanTarget)
+          ? cleanTarget
+          : `http://${cleanTarget}`;
+
+        setZapProgress(0);
+        setZapStage("Starting OWASP ZAP scan");
+        setZapResults(null);
+        setToolStatuses((current) => ({
+          ...current,
+          "owasp-zap": "Queued",
+        }));
+
+        let zapConfig = {
+          scanPolicyName: "Dev CICD",
+          recurse: true,
+          inScopeOnly: false,
+          followRedirects: true,
+        };
+        try {
+          zapConfig = { ...zapConfig, ...(JSON.parse(localStorage.getItem("zap_scan_config") || "{}")) };
+        } catch {
+          // Keep safe defaults when local configuration is unavailable.
+        }
+
+        const response = await axios.post(
+          `${API_URL}/vapt/zap/scan`,
+          { target: zapTarget, ...zapConfig },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const scanId = response.data?.scan_id;
+
+        if (!scanId) {
+          throw new Error("The backend did not return an OWASP ZAP scan ID.");
+        }
+
+        setZapScanId(String(scanId));
+        setToolStatuses((current) => ({
+          ...current,
+          "owasp-zap": "Running",
+        }));
+        setZapStage("Active scan running");
+        startedCount += 1;
+      } catch (err) {
+        console.error("OWASP ZAP execution error:", err);
+
+        failedCount += 1;
+        setToolStatuses((current) => ({
+          ...current,
+          "owasp-zap": "Failed",
+        }));
+        setZapStage("Failed to start");
+
+        if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setMessage("Your session has expired. Please login again.");
+        } else if (err.response?.data?.detail) {
+          const detail = err.response.data.detail;
+          setMessage(
+            typeof detail === "string"
+              ? detail
+              : JSON.stringify(detail)
+          );
+        } else {
+          setMessage(
+            err.message || "Unable to start the OWASP ZAP scan."
+          );
+        }
+      }
+    }
+
+    // ==================================================
+    // GENERIC REGISTRY TOOLS
+    // ==================================================
+    if (genericTools.length > 0) {
+      const genericResults = await Promise.all(
+        genericTools.map(async (toolId) => {
+          try {
+            setToolStatuses((current) => ({
+              ...current,
+              [toolId]: "Queued",
+            }));
+
+            const registryTool = vaptRegistry?.tools?.find(
+              (tool) => tool.id === toolId
+            );
+
+            if (!registryTool) {
+              throw new Error(
+                `Tool '${toolId}' was not found in the VAPT registry.`
+              );
+            }
+
+            const targetTypes = registryTool.target_types || [];
+
+            const genericTarget = targetTypes.includes("url")
+              ? cleanTarget
+              : nmapTarget;
+
+            setToolStatuses((current) => ({
+              ...current,
+              [toolId]: "Running",
+            }));
+
+            const response = await axios.post(
+              `${API_URL}/vapt/registry/tools/${encodeURIComponent(toolId)}/run-async`,
+              {
+                target: genericTarget,
+              },
+              {
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  "Content-Type": "application/json",
+                },
+              }
+            );
+
+            const jobId = response.data?.job_id;
+
+            if (!jobId) {
+              const detail = response.data?.detail;
+
+              if (
+                detail &&
+                typeof detail === "object" &&
+                detail.input_required
+              ) {
+                setToolStatuses((current) => ({
+                  ...current,
+                  [toolId]: "Input Required",
+                }));
+
+                return {
+                  toolId,
+                  started: false,
+                  inputRequired: true,
+                };
+              }
+
+              throw new Error(
+                `The backend did not return a job ID for ${registryTool.name}.`
+              );
+            }
+
+            setGenericToolJobs((current) => ({
+              ...current,
+              [toolId]: {
+                jobId,
+                status: "queued",
+                progress: 0,
+                stage: "Queued",
+              },
+            }));
+
+            setToolStatuses((current) => ({
+              ...current,
+              [toolId]: "Running",
+            }));
+
+            return {
+              toolId,
+              started: true,
+              jobId,
+            };
+          } catch (err) {
+            console.error(
+              `Generic ${toolId} execution error:`,
+              err
+            );
+
+            const detail = err.response?.data?.detail;
+
+            if (
+              detail &&
+              typeof detail === "object" &&
+              detail.input_required
+            ) {
+              setToolStatuses((current) => ({
+                ...current,
+                [toolId]: "Input Required",
+              }));
+
+              return {
+                toolId,
+                started: false,
+                inputRequired: true,
+              };
+            }
+
+            setToolStatuses((current) => ({
+              ...current,
+              [toolId]: "Failed",
+            }));
+
+            return {
+              toolId,
+              started: false,
+              failed: true,
+              error:
+                typeof detail === "string"
+                  ? detail
+                  : err.message || `Unable to start ${toolId}.`,
+            };
+          }
+        })
+      );
+
+      genericResults.forEach((result) => {
+        if (result.started) {
+          startedCount += 1;
+        } else if (result.failed) {
+          failedCount += 1;
+        }
+      });
+    }
+
+    if (startedCount > 0) {
+      const runningTools = selectedTools
+        .filter((toolId) => {
+          if (toolId === "nmap") return hasNmap;
+          if (toolId === "nikto") return hasNikto;
+          if (toolId === "nuclei") return hasNuclei;
+          if (toolId === "masscan") return hasMasscan;
+          if (toolId === "owasp-zap") return hasZap;
+          if (toolId === "hping3") return selectedTools.includes("hping3");
+
+          return genericTools.includes(toolId);
+        })
+        .map((toolId) => toolId.toUpperCase());
+
+      setMessage(
+        `${runningTools.join(" + ")} scan${
+          runningTools.length > 1 ? "s" : ""
+        } started. Live progress is being tracked.`
+      );
+    } else if (failedCount > 0) {
+      setLoading(false);
+      setStatus("Failed");
+    }
+  };
+
+  const finishWebVaptJob = (job) => {
+    const terminalFailure = ["failed", "timeout"].includes(job?.status);
+
+    if (job?.result) {
+      setScanResult(job.result);
+    }
+
+    if (terminalFailure) {
+      setStatus("Failed");
+      setMessage(
+        job?.error ||
+          (job?.status === "timeout"
+            ? `Web ${job?.scan_type || scanType} scan timed out.`
+            : `Web ${job?.scan_type || scanType} scan failed.`)
+      );
+    } else if (job?.status === "completed") {
+      setStatus("Completed");
+      const completedType = job?.scan_type || scanType;
+      localStorage.setItem("active_vapt_target", targetUrl.trim());
+      localStorage.setItem(
+        "active_vapt_target_meta",
+        JSON.stringify({
+          target: targetUrl.trim(),
+          scanType: completedType,
+          scannedAt: new Date().toISOString(),
+          status: "Completed",
+        })
+      );
+      setMessage(
+        `${completedType === "quick" ? "Quick" : "Detailed"} Web VAPT scan completed successfully.`
+      );
+    }
+
+    setLoading(false);
+    setWebJobId(null);
+  };
+
+  useEffect(() => {
+    if (!webJobId) return undefined;
+
+    let stopped = false;
+
+    const pollWebJob = async () => {
+      const token = localStorage.getItem("token");
+      if (!token || stopped) return;
+
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/scan-progress/${webJobId}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+
+        const job = response.data || {};
+        setWebProgress(Number(job.progress) || 0);
+        setWebStage(job.stage || "Running Web VAPT scan");
+
+        if (["completed", "failed", "timeout"].includes(job.status)) {
+          finishWebVaptJob(job);
+        }
+      } catch (err) {
+        if (stopped) return;
+        console.error("Web VAPT progress error:", err);
+        if (err.response?.status === 404) {
+          setLoading(false);
+          setWebJobId(null);
+          setStatus("Failed");
+          setMessage("The Web VAPT job is no longer available. Start a new scan.");
+        } else if (err.response?.status === 401) {
+          localStorage.removeItem("token");
+          setLoading(false);
+          setWebJobId(null);
+          setStatus("Failed");
+          setMessage("Your session has expired. Please login again.");
+        } else if (err.response?.data?.detail) {
+          setLoading(false);
+          setWebJobId(null);
+          setStatus("Failed");
+          setMessage(
+            typeof err.response.data.detail === "string"
+              ? err.response.data.detail
+              : JSON.stringify(err.response.data.detail)
+          );
+        }
+      }
+    };
+
+    pollWebJob();
+    const intervalId = window.setInterval(pollWebJob, 1500);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(intervalId);
+    };
+  }, [webJobId]);
 
   const handleStartScan = async (type = scanType) => {
     setMessage("");
     setScanResult(null);
     setScanType(type);
+    setWebProgress(0);
+    setWebStage("Preparing Web VAPT scan");
 
     const cleanUrl = targetUrl.trim();
-
     if (!cleanUrl) {
       setMessage("Enter an authorized target URL before starting a scan.");
       return;
@@ -8171,7 +16062,7 @@ function VAPTTesting() {
       setStatus("Scanning");
 
       const response = await axios.post(
-        `${API_URL}/vapt/scan`,
+        `${API_URL}/vapt/scan-async`,
         {
           target_url: cleanUrl,
           scan_type: type,
@@ -8184,38 +16075,32 @@ function VAPTTesting() {
         }
       );
 
-      setScanResult(response.data);
-      setStatus("Completed");
+      const jobId = response.data?.job_id;
+      if (!jobId) {
+        throw new Error("The backend did not return a Web VAPT job ID.");
+      }
 
-      const activeTargetMeta = {
-        target: cleanUrl,
-        scanType: type,
-        scannedAt: new Date().toISOString(),
-        status: "Completed",
-      };
-
-      localStorage.setItem("active_vapt_target", cleanUrl);
-      localStorage.setItem(
-        "active_vapt_target_meta",
-        JSON.stringify(activeTargetMeta)
-      );
-
+      setWebJobId(jobId);
       setMessage(
-        `${type === "quick" ? "Quick" : "Detailed"} VAPT scan completed successfully. This URL is now the active security target.`
+        `${type === "quick" ? "Quick" : "Detailed"} Web VAPT scan started. Live progress is being tracked.`
       );
     } catch (err) {
       console.error("VAPT scan error:", err);
+      setLoading(false);
       setStatus("Failed");
 
-      if (err.response?.data?.detail) {
-        setMessage(err.response.data.detail);
+      if (err.response?.status === 401) {
+        localStorage.removeItem("token");
+        setMessage("Your session has expired. Please log in again.");
+      } else if (err.response?.data?.detail) {
+        const detail = err.response.data.detail;
+        setMessage(typeof detail === "string" ? detail : JSON.stringify(detail));
       } else {
         setMessage(
-          "Unable to complete the VAPT scan. Check that the backend is running."
+          err.message ||
+            "Unable to start the Web VAPT scan. Check that the backend is running."
         );
       }
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -8228,334 +16113,5413 @@ function VAPTTesting() {
     const doc = new jsPDF();
     const target = scanResult.target || targetUrl || "—";
     const type = scanResult.scan_type || scanType;
-    const httpStatus = scanResult.scan?.http_status ?? "—";
-    const responseTime = scanResult.scan?.response_time_ms != null
-      ? `${scanResult.scan.response_time_ms} ms`
-      : "—";
-    const totalFindings = scanResult.assessment?.findings_count ?? 0;
-    const headers = scanResult.security_headers || [];
-    const findings = scanResult.findings || [];
+    const isNmap = type === "nmap" || !!scanResult.nmap;
+    const nmap = scanResult.nmap || {};
+    const nmapResults = nmap.results || {};
+    const nmapHosts = Array.isArray(nmapResults.hosts) ? nmapResults.hosts : [];
+    const openPorts = nmapHosts.flatMap((host) =>
+      Array.isArray(host?.ports)
+        ? host.ports
+            .filter((port) => port?.state === "open")
+            .map((port) => ({ ...port, host: host?.addresses?.[0]?.address || "—" }))
+        : []
+    );
+    const nseScripts = nmapHosts.flatMap((host) => {
+      const hostScripts = Array.isArray(host?.scripts) ? host.scripts.map((script) => ({ ...script, host: host?.addresses?.[0]?.address || "—", port: null })) : [];
+      const portScripts = Array.isArray(host?.ports)
+        ? host.ports.flatMap((port) =>
+            Array.isArray(port?.scripts)
+              ? port.scripts.map((script) => ({ ...script, host: host?.addresses?.[0]?.address || "—", port: port?.port }))
+              : []
+          )
+        : [];
+      return [...hostScripts, ...portScripts];
+    });
 
-    doc.setFontSize(20);
-    doc.text("SOC Platform", 20, 20);
-    doc.setFontSize(14);
-    doc.text("VAPT Security Assessment Report", 20, 31);
-    doc.setFontSize(10);
-    doc.text(`Generated: ${new Date().toLocaleString()}`, 20, 40);
-    doc.line(20, 44, 190, 44);
-
-    let y = 56;
-    const addField = (label, value) => {
-      doc.setFont("helvetica", "bold");
-      doc.text(`${label}:`, 20, y);
-      doc.setFont("helvetica", "normal");
-      const lines = doc.splitTextToSize(String(value), 125);
-      doc.text(lines, 65, y);
-      y += Math.max(8, lines.length * 5 + 3);
-    };
-
-    addField("Target URL", target);
-    addField("Scan Type", type === "quick" ? "Quick Scan" : "Detailed Scan");
-    addField("Status", "Completed");
-    addField("HTTP Status", httpStatus);
-    addField("Response Time", responseTime);
-    addField("Total Findings", totalFindings);
-
-    y += 4;
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(12);
-    doc.text("Security Headers", 20, y);
-    y += 8;
-    doc.setFontSize(9);
-
-    headers.forEach((item) => {
-      if (y > 275) {
+    let y = 20;
+    const addText = (text, x = 20, size = 9, gap = 6) => {
+      doc.setFontSize(size);
+      const lines = doc.splitTextToSize(String(text ?? "—"), 170);
+      if (y + lines.length * 5 > 275) {
         doc.addPage();
         y = 20;
       }
-      doc.setFont("helvetica", "normal");
-      doc.text(
-        `${item.header}: ${item.present ? "Present" : "Missing"}`,
-        25,
-        y
-      );
-      y += 6;
-    });
-
-    y += 5;
-    if (y > 255) {
-      doc.addPage();
-      y = 20;
-    }
+      doc.text(lines, x, y);
+      y += lines.length * 5 + gap;
+    };
 
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(12);
-    doc.text("Findings", 20, y);
-    y += 8;
-    doc.setFontSize(9);
+    doc.setFontSize(18);
+    doc.text("SOC Platform - VAPT Report", 20, y);
+    y += 10;
+    doc.setFont("helvetica", "normal");
+    addText(`Target: ${target}`);
+    addText(`Assessment type: ${isNmap ? `Nmap ${nmap.scan_type || nmapProfile}` : type}`);
+    addText(`Generated: ${new Date().toLocaleString()}`);
 
-    if (findings.length === 0) {
+    if (isNmap) {
+      addText(`Command profile: ${nmap.command_profile || "—"}`);
+      addText(`Hosts discovered: ${nmapResults.host_count ?? nmapHosts.length}`);
+      addText(`Open ports: ${openPorts.length}`);
+
+      doc.setFont("helvetica", "bold");
+      addText("Host and Service Results", 20, 12, 7);
       doc.setFont("helvetica", "normal");
-      doc.text("No findings returned by the current assessment.", 25, y);
-    } else {
-      findings.forEach((finding, index) => {
-        if (y > 255) {
-          doc.addPage();
-          y = 20;
-        }
+
+      if (openPorts.length === 0) {
+        addText("No open ports detected by the selected Nmap profile.", 25);
+      } else {
+        openPorts.forEach((port) => {
+          const service = port.service?.name || "unknown";
+          const product = port.service?.product || "";
+          const version = port.service?.version || "";
+          addText(
+            `${port.host}  ${port.port}/${port.protocol || "tcp"}  ${service} ${product} ${version}`.trim(),
+            25
+          );
+        });
+      }
+
+      const osMatches = nmapHosts.flatMap((host) => Array.isArray(host?.os_matches) ? host.os_matches : []);
+      if (osMatches.length > 0) {
         doc.setFont("helvetica", "bold");
-        const titleLines = doc.splitTextToSize(
-          `${index + 1}. ${finding.severity || "UNKNOWN"} - ${finding.title || "Finding"}`,
-          155
-        );
-        doc.text(titleLines, 25, y);
-        y += titleLines.length * 5 + 2;
+        addText("OS Detection", 20, 12, 7);
         doc.setFont("helvetica", "normal");
+        osMatches.forEach((match) => addText(`${match.name || "Unknown OS"} (${match.accuracy || "?"}% accuracy)`, 25));
+      }
 
-        const detail = [
-          finding.tool_name ? `Tool: ${finding.tool_name}` : null,
-          finding.cvss_score != null ? `CVSS: ${finding.cvss_score}` : null,
-          finding.cve_id ? `CVE: ${finding.cve_id}` : null,
-          finding.cwe_id ? `CWE: ${finding.cwe_id}` : null,
-          finding.risk_level ? `Risk: ${finding.risk_level}` : null,
-          finding.description ? `Description: ${finding.description}` : null,
-          finding.remediation ? `Remediation: ${finding.remediation}` : null,
-        ].filter(Boolean).join("\n");
+      doc.setFont("helvetica", "bold");
+      addText("NSE Results", 20, 12, 7);
+      doc.setFont("helvetica", "normal");
+      if (nseScripts.length === 0) {
+        addText("No NSE script results were returned.", 25);
+      } else {
+        nseScripts.forEach((script) => {
+          addText(`Script: ${script.id || "unknown"}${script.port ? ` | Port: ${script.port}` : ""}`, 25, 9, 3);
+          addText(script.output || "No script output.", 30, 8, 5);
+        });
+      }
 
-        const lines = doc.splitTextToSize(detail || "No additional details.", 155);
-        doc.text(lines, 30, y);
-        y += lines.length * 5 + 5;
+      if (Array.isArray(nmap.errors) && nmap.errors.length > 0) {
+        doc.setFont("helvetica", "bold");
+        addText("Nmap Warnings / Errors", 20, 12, 7);
+        doc.setFont("helvetica", "normal");
+        nmap.errors.forEach((error) => addText(error, 25, 8, 4));
+      }
+    } else {
+      addText(`HTTP Status: ${scanResult.scan?.http_status ?? "—"}`);
+      addText(`Response Time: ${scanResult.scan?.response_time_ms != null ? `${scanResult.scan.response_time_ms} ms` : "—"}`);
+      addText(`Total Findings: ${scanResult.assessment?.findings_count ?? 0}`);
+
+      doc.setFont("helvetica", "bold");
+      addText("Security Headers", 20, 12, 7);
+      doc.setFont("helvetica", "normal");
+      (Array.isArray(scanResult.security_headers) ? scanResult.security_headers : []).forEach((item) => {
+        addText(`${item.header}: ${item.present ? "Present" : "Missing"}`, 25);
       });
     }
 
-    if (y > 275) {
-      doc.addPage();
-      y = 20;
+    doc.setFont("helvetica", "bold");
+    addText("Findings", 20, 12, 7);
+    doc.setFont("helvetica", "normal");
+    const findings = Array.isArray(scanResult.findings) ? scanResult.findings : [];
+    if (findings.length === 0) {
+      addText("No application findings returned by this report view.", 25);
+    } else {
+      findings.forEach((finding, index) => {
+        addText(`${index + 1}. ${finding.severity || "UNKNOWN"} - ${finding.title || "Finding"}`, 25, 9, 3);
+        addText(
+          [
+            finding.tool_name ? `Tool: ${finding.tool_name}` : null,
+            finding.cvss_score != null ? `CVSS: ${finding.cvss_score}` : null,
+            finding.cve_id ? `CVE: ${finding.cve_id}` : null,
+            finding.cwe_id ? `CWE: ${finding.cwe_id}` : null,
+            finding.description ? `Description: ${finding.description}` : null,
+            finding.remediation ? `Remediation: ${finding.remediation}` : null,
+          ].filter(Boolean).join("\n"),
+          30,
+          8,
+          5
+        );
+      });
     }
+
     doc.setFontSize(8);
     doc.text("SOC Platform • Authorized security assessment report", 20, 285);
-
     const safeHost = target
       .replace(/^https?:\/\//i, "")
       .replace(/[^a-z0-9.-]+/gi, "-")
       .replace(/-+/g, "-")
       .slice(0, 50) || "target";
-
-    doc.save(`SOC-${type === "quick" ? "Quick" : "Detailed"}-VAPT-Report-${safeHost}.pdf`);
+    doc.save(`SOC-${isNmap ? `Nmap-${nmap.scan_type || nmapProfile}` : type}-VAPT-Report-${safeHost}.pdf`);
   };
 
-  const headers = scanResult?.security_headers || [];
-  const findings = scanResult?.findings || [];
+  const headers = Array.isArray(scanResult?.security_headers) ? scanResult.security_headers : [];
+  const findings = Array.isArray(scanResult?.findings) ? scanResult.findings : [];
   const isDetailed = scanResult?.scan_type === "detailed" || scanType === "detailed";
+  const isNmapResult = scanResult?.scan_type === "nmap" || !!scanResult?.nmap;
+  const nmap = scanResult?.nmap || null;
+  const nmapResults = nmap?.results || {};
+  const nmapHosts = Array.isArray(nmapResults.hosts) ? nmapResults.hosts : [];
+  const nmapOpenPorts = nmapHosts.flatMap((host) =>
+    Array.isArray(host?.ports)
+      ? host.ports
+          .filter((port) => port?.state === "open")
+          .map((port) => ({
+            ...port,
+            host: host?.addresses?.[0]?.address || "—",
+          }))
+      : []
+  );
+  const nmapScripts = nmapHosts.flatMap((host) => {
+    const hostScripts = Array.isArray(host?.scripts)
+      ? host.scripts.map((script) => ({
+          ...script,
+          host: host?.addresses?.[0]?.address || "—",
+          port: null,
+        }))
+      : [];
+    const portScripts = Array.isArray(host?.ports)
+      ? host.ports.flatMap((port) =>
+          Array.isArray(port?.scripts)
+            ? port.scripts.map((script) => ({
+                ...script,
+                host: host?.addresses?.[0]?.address || "—",
+                port: port?.port,
+              }))
+            : []
+        )
+      : [];
+    return [...hostScripts, ...portScripts];
+  });
+  const nmapOs = nmapHosts.flatMap((host) => Array.isArray(host?.os_matches) ? host.os_matches : []);
+
 
   return (
     <div>
-      <div className="mb-8 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+      {/* VAPT HEADER */}
+      <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
         <div>
-          <p className="text-xs uppercase tracking-[0.3em] text-red-500">Security Workspace</p>
-          <h1 className="mt-2 text-3xl font-bold">VAPT Testing</h1>
+          <p className="text-xs uppercase tracking-[0.3em] text-red-500">
+            Security Workspace
+          </p>
+          <h1 className="mt-2 text-3xl font-bold text-white">
+            VAPT TESTING
+          </h1>
           <p className="mt-2 max-w-2xl text-sm text-gray-500">
-            Choose a fast security check or a detailed assessment for authorized targets.
+            Vulnerability Assessment & Penetration Testing Framework
           </p>
         </div>
 
         <div className="border border-white/10 bg-[#0d0d0d] px-4 py-3">
-          <p className="text-[10px] uppercase tracking-wider text-gray-600">Scan Status</p>
-          <p className={`mt-1 text-sm font-semibold ${
-            status === "Scanning" ? "text-yellow-500" :
-            status === "Completed" ? "text-green-500" :
-            status === "Failed" ? "text-red-500" : "text-gray-400"
-          }`}>
+          <p className="text-[10px] uppercase tracking-wider text-gray-600">
+            Scan Status
+          </p>
+          <p
+            className={`mt-1 text-sm font-semibold ${
+              status === "Scanning" || status === "Running"
+                ? "text-yellow-500"
+                : status === "Completed"
+                  ? "text-green-500"
+                  : status === "Failed"
+                    ? "text-red-500"
+                    : "text-gray-400"
+            }`}
+          >
             {status}
           </p>
         </div>
       </div>
 
-      <div className="mb-6 border border-red-600/20 bg-red-600/5 px-5 py-4">
-        <p className="text-xs uppercase tracking-wider text-red-500">Authorized Testing Only</p>
-        <p className="mt-1 text-sm leading-6 text-gray-500">
-          Only scan systems and URLs that you own or have explicit permission to test.
+      {/* AUTHORIZED TESTING */}
+      <div className="mb-5 border border-red-600/20 bg-red-600/5 px-5 py-3">
+        <p className="text-xs uppercase tracking-wider text-red-500">
+          Authorized Testing Only
+        </p>
+        <p className="mt-1 text-xs leading-5 text-gray-500">
+          Only scan systems and URLs that you own or have explicit permission
+          to test.
         </p>
       </div>
 
-      <div className="border border-white/10 bg-[#0d0d0d] p-6">
-        <div className="border-b border-white/10 pb-5">
-          <p className="text-sm font-semibold">New Security Assessment</p>
-          <p className="mt-1 text-xs text-gray-600">
-            Quick Scan is faster and shows essential results. Detailed Scan takes longer and shows richer findings.
+      {/* TARGET */}
+      <div className="mb-5 border border-white/10 bg-[#0d0d0d] p-5">
+        <p className="text-xs uppercase tracking-wider text-gray-500">
+          Target
+        </p>
+        <input
+          value={targetUrl}
+          onChange={(event) => setTargetUrl(event.target.value)}
+          disabled={loading}
+          placeholder="https://example.com or 172.17.5.198"
+          className="mt-3 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600/60"
+        />
+      </div>
+
+      {/* VAPT FRAMEWORK */}
+      <div className="border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-5 py-5">
+          <p className="text-xs uppercase tracking-[0.25em] text-red-500">
+            VAPT Framework
+          </p>
+          <p className="mt-2 text-xs text-gray-600">
+            Select a tool from the appropriate testing stage. Tools controlled
+            by your administrator appear locked.
           </p>
         </div>
 
-        <div className="mt-6">
-          <label className="text-xs uppercase tracking-wider text-gray-500">Target URL</label>
-          <input
-            type="url"
-            value={targetUrl}
-            onChange={(e) => setTargetUrl(e.target.value)}
-            placeholder="https://authorized-target.example.com"
-            disabled={loading}
-            className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600 disabled:opacity-50"
-          />
-        </div>
-
-        <div className="mt-7 grid gap-4 md:grid-cols-2">
-          <button
-            onClick={() => handleStartScan("quick")}
-            disabled={loading}
-            className={`border px-6 py-5 text-left transition disabled:cursor-not-allowed disabled:opacity-50 ${
-              scanType === "quick"
-                ? "border-red-600 bg-red-600/10"
-                : "border-white/10 bg-[#080808] hover:border-red-600/60"
-            }`}
-          >
-            <p className="text-sm font-semibold text-white">Quick Scan</p>
-            <p className="mt-2 text-xs leading-5 text-gray-500">
-              Fast check with essential HTTP, security-header and high-priority vulnerability information.
-            </p>
-            <span className="mt-4 inline-block text-[10px] uppercase tracking-wider text-red-500">
-              Faster
-            </span>
-          </button>
-
-          <button
-            onClick={() => handleStartScan("detailed")}
-            disabled={loading}
-            className={`border px-6 py-5 text-left transition disabled:cursor-not-allowed disabled:opacity-50 ${
-              scanType === "detailed"
-                ? "border-red-600 bg-red-600/10"
-                : "border-white/10 bg-[#080808] hover:border-red-600/60"
-            }`}
-          >
-            <p className="text-sm font-semibold text-white">Detailed Scan</p>
-            <p className="mt-2 text-xs leading-5 text-gray-500">
-              Extended scanner coverage with richer finding, CVE/CWE, CVSS, evidence and remediation information.
-            </p>
-            <span className="mt-4 inline-block text-[10px] uppercase tracking-wider text-red-500">
-              In Detail
-            </span>
-          </button>
-        </div>
-
-        <div className="mt-7 flex flex-col gap-3 sm:flex-row sm:items-center">
-          <button
-            onClick={() => handleStartScan(scanType)}
-            disabled={loading}
-            className="bg-red-600 px-6 py-3 text-sm font-semibold transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {loading ? "Scanning..." : `Run ${scanType === "quick" ? "Quick" : "Detailed"} Scan`}
-          </button>
-
-          <button
-            onClick={handleDownloadReport}
-            disabled={!scanResult || loading}
-            className="border border-red-600 px-6 py-3 text-sm font-semibold text-red-500 transition hover:bg-red-600 hover:text-white disabled:cursor-not-allowed disabled:border-white/10 disabled:text-gray-700 disabled:hover:bg-transparent disabled:hover:text-gray-700"
-          >
-            Download Report
-          </button>
-        </div>
-
-        {message && (
-          <div className="mt-5 border border-white/10 bg-[#080808] px-4 py-3">
-            <p className={`text-sm ${status === "Completed" ? "text-green-400" : status === "Failed" ? "text-red-400" : "text-gray-400"}`}>
-              {message}
-            </p>
-          </div>
-        )}
-      </div>
-
-      {scanResult && (
-        <>
-          <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <VAPTResultCard title="Scan Type" value={scanResult.scan_type === "detailed" ? "Detailed" : "Quick"} />
-            <VAPTResultCard title="Total Findings" value={scanResult.assessment?.findings_count ?? 0} />
-            <VAPTResultCard title="HTTP Status" value={scanResult.scan?.http_status ?? "—"} />
-            <VAPTResultCard title="Response Time" value={scanResult.scan?.response_time_ms != null ? `${scanResult.scan.response_time_ms} ms` : "—"} />
+        {/* 01 RECONNAISSANCE */}
+        <div className="border-b border-white/10 p-5">
+          <div className="mb-4 flex items-center gap-3">
+            <span className="text-xs font-bold text-red-500">01</span>
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-white">
+              Reconnaissance
+            </h2>
           </div>
 
-          {!isDetailed ? (
-            <div className="mt-6 grid gap-6 md:grid-cols-2">
-              <div className="border border-white/10 bg-[#0d0d0d] p-6">
-                <p className="text-xs uppercase tracking-wider text-gray-500">Quick Summary</p>
-                <div className="mt-5 space-y-4">
-                  <VAPTInfo label="Target" value={scanResult.target || "—"} />
-                  <VAPTInfo label="HTTPS" value={scanResult.scan?.https_enabled ? "Enabled" : "Not enabled"} />
-                  <VAPTInfo label="Findings" value={scanResult.assessment?.findings_count ?? 0} />
-                  <VAPTInfo label="Missing Headers" value={scanResult.summary?.missing_security_headers ?? 0} />
+          <div className="flex flex-wrap gap-2">
+            {(vaptRegistry?.stages?.find(
+              (stage) => stage.stage === "01 Reconnaissance"
+            )?.tools || []).filter((registryTool) => registryTool.enabled !== false).map((registryTool) => {
+              const id = registryTool.id;
+              const name = registryTool.name;
+
+              const tool = allVaptTools.find((item) => item.id === id) || registryTool;
+              const allowed = isToolAllowed(tool);
+              const selected = selectedTools.includes(id);
+
+              return (
+                <button
+                  key={`recon-${id}`}
+                  type="button"
+                  onClick={() => toggleTool(id)}
+                  disabled={loading || permissionsLoading || !allowed}
+                  title={
+                    allowed
+                      ? tool?.description
+                      : `${tool?.description || name} — Access denied by administrator.`
+                  }
+                  className={`border px-4 py-3 text-xs font-semibold transition ${
+                    selected
+                      ? "border-red-600 bg-red-600/10 text-red-400"
+                      : allowed
+                        ? "border-white/10 text-gray-400 hover:border-red-600/50 hover:text-white"
+                        : "border-white/5 text-gray-700 opacity-50"
+                  }`}
+                >
+                  {name}
+                  {!allowed && " 🔒"}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 02 SCANNING & ENUMERATION */}
+        <div className="border-b border-white/10 p-5">
+          <div className="mb-4 flex items-center gap-3">
+            <span className="text-xs font-bold text-red-500">02</span>
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-white">
+              Scanning & Enumeration
+            </h2>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {(vaptRegistry?.stages?.find(
+              (stage) => stage.stage === "02 Scanning & Enumeration"
+            )?.tools || []).filter((registryTool) => registryTool.enabled !== false).map((registryTool) => {
+              const id = registryTool.id;
+              const name = registryTool.name;
+
+              const tool = allVaptTools.find((item) => item.id === id);
+              const allowed = isToolAllowed(tool);
+              const selected = selectedTools.includes(id);
+
+              return (
+                <button
+                  key={`scan-${id}`}
+                  type="button"
+                  onClick={() => toggleTool(id)}
+                  disabled={loading || permissionsLoading || !allowed}
+                  title={
+                    allowed
+                      ? tool?.description
+                      : `${tool?.description || name} — Access denied by administrator.`
+                  }
+                  className={`border px-4 py-3 text-xs font-semibold transition ${
+                    selected
+                      ? "border-red-600 bg-red-600/10 text-red-400"
+                      : allowed
+                        ? "border-white/10 text-gray-400 hover:border-red-600/50 hover:text-white"
+                        : "border-white/5 text-gray-700 opacity-50"
+                  }`}
+                >
+                  {name}
+                  {!allowed && " 🔒"}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* NMAP CONTROLS INSIDE FRAMEWORK */}
+          {selectedTools.includes("nmap") && (
+            <div className="mt-5 border border-red-600/20 bg-black/20 p-4">
+              <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-red-400">
+                    Nmap
+                  </p>
+                  <p className="mt-1 text-[10px] text-gray-600">
+                    Select an Nmap scanning profile.
+                  </p>
                 </div>
+
+                {!permissionsLoading && (
+                  <span
+                    className={`border px-2 py-1 text-[9px] uppercase tracking-wider ${
+                      isToolAllowed(allVaptTools.find((tool) => tool.id === "nmap"))
+                        ? "border-green-600/30 bg-green-600/10 text-green-500"
+                        : "border-red-600/30 bg-red-600/10 text-red-500"
+                    }`}
+                  >
+                    {isToolAllowed(allVaptTools.find((tool) => tool.id === "nmap"))
+                      ? "Permitted"
+                      : "Not Permitted"}
+                  </span>
+                )}
               </div>
-              <div className="border border-white/10 bg-[#0d0d0d] p-6">
-                <p className="text-xs uppercase tracking-wider text-gray-500">Scanner Summary</p>
-                <div className="mt-5 space-y-4">
-                  <VAPTInfo label="Nuclei Status" value={scanResult.nuclei_scan?.status || "—"} />
-                  <VAPTInfo label="Matched Results" value={scanResult.nuclei_scan?.matched_results ?? 0} />
-                  <VAPTInfo label="Imported Findings" value={scanResult.nuclei_scan?.imported_findings?.length ?? 0} />
-                  <VAPTInfo label="Executed Tools" value={(scanResult.security_scanners?.executed_tools || []).join(", ") || "—"} />
-                </div>
+
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                {NMAP_PROFILES.map((profile) => (
+                  <button
+                    key={profile.id}
+                    type="button"
+                    onClick={() => setNmapProfile(profile.id)}
+                    disabled={loading}
+                    title={profile.description}
+                    className={`border px-4 py-3 text-left transition disabled:opacity-50 ${
+                      nmapProfile === profile.id
+                        ? "border-red-600 bg-red-600/10"
+                        : "border-white/10 hover:border-red-600/50"
+                    }`}
+                  >
+                    <p
+                      className={`text-xs font-semibold ${
+                        nmapProfile === profile.id
+                          ? "text-red-400"
+                          : "text-white"
+                      }`}
+                    >
+                      {profile.label}
+                    </p>
+                    <p className="mt-1 text-[9px] leading-4 text-gray-600">
+                      {profile.description}
+                    </p>
+                  </button>
+                ))}
               </div>
             </div>
-          ) : (
-            <>
-              <div className="mt-6 border border-white/10 bg-[#0d0d0d]">
-                <div className="border-b border-white/10 px-6 py-5">
-                  <p className="text-sm font-semibold">Detailed Security Headers</p>
+          )}
+        </div>
+
+        {/* 03 VULNERABILITY DISCOVERY */}
+        <div className="border-b border-white/10 p-5">
+          <div className="mb-4 flex items-center gap-3">
+            <span className="text-xs font-bold text-red-500">03</span>
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-white">
+              Vulnerability Discovery
+            </h2>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {(vaptRegistry?.stages?.find(
+              (stage) => stage.stage === "03 Vulnerability Discovery"
+            )?.tools || [
+              { id: "nikto", name: "Nikto", description: "Web server configuration and known-issue checks" },
+              { id: "burp", name: "Burp Suite", description: "Web application security testing workflow" },
+              { id: "owasp-zap", name: "OWASP ZAP", description: "Web application security assessment" },
+            ]).map((registryTool) => {
+              const id = registryTool.id;
+              const name = registryTool.name;
+              const tool =
+                allVaptTools.find((item) => item.id === id) ||
+                registryTool;
+              const allowed = isToolAllowed(tool);
+              const selected = selectedTools.includes(id);
+
+              return (
+                <button
+                  key={`vuln-${id}`}
+                  type="button"
+                  onClick={() => toggleTool(id)}
+                  disabled={loading || permissionsLoading || !allowed}
+                  title={
+                    allowed
+                      ? tool?.description
+                      : `${tool?.description || name} — Access denied by administrator.`
+                  }
+                  className={`border px-4 py-3 text-xs font-semibold transition ${
+                    selected
+                      ? "border-red-600 bg-red-600/10 text-red-400"
+                      : allowed
+                        ? "border-white/10 text-gray-400 hover:border-red-600/50 hover:text-white"
+                        : "border-white/5 text-gray-700 opacity-50"
+                  }`}
+                >
+                  {name}
+                  {!allowed && " 🔒"}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* NIKTO CONTROLS INSIDE FRAMEWORK */}
+          {selectedTools.includes("nikto") && (
+            <div className="mt-5 border border-red-600/20 bg-black/20 p-4">
+              <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-red-400">
+                    Nikto
+                  </p>
+                  <p className="mt-1 text-[10px] text-gray-600">
+                    Authorized HTTP/HTTPS web-server assessment.
+                  </p>
                 </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-sm">
-                    <thead className="border-b border-white/10 bg-[#0a0a0a] text-xs uppercase tracking-wider text-gray-600">
-                      <tr><th className="px-6 py-4">Header</th><th className="px-6 py-4">Result</th><th className="px-6 py-4">Value</th></tr>
-                    </thead>
-                    <tbody className="divide-y divide-white/5">
-                      {headers.map((item) => (
-                        <tr key={item.header}>
-                          <td className="px-6 py-4 text-gray-300">{item.header}</td>
-                          <td className={`px-6 py-4 ${item.present ? "text-green-500" : "text-red-400"}`}>{item.present ? "Present" : "Missing"}</td>
-                          <td className="px-6 py-4 text-gray-500 break-all">{item.value || "—"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+
+                {!permissionsLoading && (
+                  <span
+                    className={`border px-2 py-1 text-[9px] uppercase tracking-wider ${
+                      isToolAllowed(allVaptTools.find((tool) => tool.id === "nikto"))
+                        ? "border-green-600/30 bg-green-600/10 text-green-500"
+                        : "border-red-600/30 bg-red-600/10 text-red-500"
+                    }`}
+                  >
+                    {isToolAllowed(allVaptTools.find((tool) => tool.id === "nikto"))
+                      ? "Permitted"
+                      : "Not Permitted"}
+                  </span>
+                )}
               </div>
 
-              <div className="mt-6 border border-white/10 bg-[#0d0d0d] p-6">
-                <div className="flex items-center justify-between gap-4 border-b border-white/10 pb-5">
-                  <div>
-                    <p className="text-sm font-semibold">Detailed Findings</p>
-                    <p className="mt-1 text-xs text-gray-600">Full findings returned by the current assessment.</p>
-                  </div>
-                  <span className="text-xs text-gray-500">{findings.length} findings</span>
-                </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {NIKTO_PROFILES.map((profile) => (
+                  <button
+                    key={profile.id}
+                    type="button"
+                    onClick={() => setNiktoProfile(profile.id)}
+                    disabled={loading}
+                    title={profile.description}
+                    className={`border px-5 py-3 text-left transition disabled:opacity-50 ${
+                      niktoProfile === profile.id
+                        ? "border-red-600 bg-red-600/10"
+                        : "border-white/10 hover:border-red-600/50"
+                    }`}
+                  >
+                    <p
+                      className={`text-xs font-semibold ${
+                        niktoProfile === profile.id
+                          ? "text-red-400"
+                          : "text-white"
+                      }`}
+                    >
+                      {profile.label}
+                    </p>
+                    <p className="mt-1 text-[9px] leading-4 text-gray-600">
+                      {profile.description}
+                    </p>
+                  </button>
+                ))}
+              </div>
 
-                <div className="mt-5 space-y-4">
-                  {findings.length === 0 ? (
-                    <p className="py-8 text-center text-sm text-gray-600">No findings returned.</p>
-                  ) : findings.map((finding, index) => (
-                    <div key={`${finding.finding_id || finding.title}-${index}`} className="border border-white/10 bg-[#080808] p-5">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-xs font-mono text-red-500">{finding.finding_id || `FIND-${index + 1}`}</span>
-                        <span className="border border-red-600/30 bg-red-600/10 px-2 py-1 text-[10px] text-red-400">{finding.severity || "UNKNOWN"}</span>
-                        <span className="border border-white/10 px-2 py-1 text-[10px] text-gray-500">{finding.risk_level || "—"}</span>
-                      </div>
-                      <h3 className="mt-3 text-lg font-semibold text-white">{finding.title || "Security Finding"}</h3>
-                      <p className="mt-2 text-sm text-gray-500">{finding.description || finding.vulnerability || "No description available."}</p>
-                      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4 text-xs">
-                        <VAPTInfo label="Tool" value={finding.tool_name || "—"} />
-                        <VAPTInfo label="CVSS" value={finding.cvss_score ?? "N/A"} />
-                        <VAPTInfo label="CVE" value={finding.cve_id || "N/A"} />
-                        <VAPTInfo label="CWE" value={finding.cwe_id || "N/A"} />
-                      </div>
-                      <div className="mt-4 grid gap-4 md:grid-cols-2">
-                        <div><p className="text-[10px] uppercase tracking-wider text-gray-600">Evidence</p><p className="mt-2 whitespace-pre-wrap break-words text-xs leading-5 text-gray-500">{finding.evidence || "No evidence recorded."}</p></div>
-                        <div><p className="text-[10px] uppercase tracking-wider text-gray-600">Remediation</p><p className="mt-2 whitespace-pre-wrap break-words text-xs leading-5 text-gray-500">{finding.remediation || "No remediation information recorded."}</p></div>
-                      </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleStartScan("quick")}
+                  disabled={loading}
+                  className="border border-white/10 px-5 py-3 text-xs font-semibold uppercase tracking-wider text-gray-300 hover:border-red-600/60 hover:text-white disabled:opacity-50"
+                >
+                  Web Quick Scan
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleStartScan("detailed")}
+                  disabled={loading}
+                  className="border border-red-600/40 px-5 py-3 text-xs font-semibold uppercase tracking-wider text-red-400 hover:bg-red-600/10 disabled:opacity-50"
+                >
+                  Web Detailed Scan
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* 04 NETWORK SECURITY TESTING */}
+        <div className="border-b border-white/10 p-5">
+          <div className="mb-4 flex items-center gap-3">
+            <span className="text-xs font-bold text-red-500">04</span>
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-white">
+              Network Security Testing
+            </h2>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {(vaptRegistry?.stages?.find(
+              (stage) => stage.stage === "04 Network Security Testing"
+            )?.tools || []).filter((registryTool) => registryTool.enabled !== false).map((registryTool) => {
+              const id = registryTool.id;
+              const name = registryTool.name;
+
+              const tool = allVaptTools.find((item) => item.id === id);
+              const allowed = isToolAllowed(tool);
+              const selected = selectedTools.includes(id);
+
+              return (
+                <button
+                  key={`network-${id}`}
+                  type="button"
+                  onClick={() => toggleTool(id)}
+                  disabled={loading || permissionsLoading || !allowed}
+                  title={
+                    allowed
+                      ? tool?.description
+                      : `${tool?.description || name} — Access denied by administrator.`
+                  }
+                  className={`border px-4 py-3 text-xs font-semibold transition ${
+                    selected
+                      ? "border-red-600 bg-red-600/10 text-red-400"
+                      : allowed
+                        ? "border-white/10 text-gray-400 hover:border-red-600/50 hover:text-white"
+                        : "border-white/5 text-gray-700 opacity-50"
+                  }`}
+                >
+                  {name}
+                  {!allowed && " 🔒"}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 05 VALIDATION / EXPLOITATION */}
+        <div className="border-b border-white/10 p-5">
+          <div className="mb-4 flex items-center gap-3">
+            <span className="text-xs font-bold text-red-500">05</span>
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-white">
+              Validation / Exploitation
+            </h2>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {(vaptRegistry?.stages?.find(
+              (stage) => stage.stage === "05 Validation / Exploitation"
+            )?.tools || []).filter((registryTool) => registryTool.enabled !== false).map((registryTool) => {
+              const id = registryTool.id;
+              const name = registryTool.name;
+
+              const tool = allVaptTools.find((item) => item.id === id);
+              const allowed = isToolAllowed(tool);
+              const selected = selectedTools.includes(id);
+
+              return (
+                <button
+                  key={`exploit-${id}`}
+                  type="button"
+                  onClick={() => toggleTool(id)}
+                  disabled={loading || permissionsLoading || !allowed}
+                  className={`border px-4 py-3 text-xs font-semibold transition ${
+                    selected
+                      ? "border-red-600 bg-red-600/10 text-red-400"
+                      : allowed
+                        ? "border-white/10 text-gray-400 hover:border-red-600/50 hover:text-white"
+                        : "border-white/5 text-gray-700 opacity-50"
+                  }`}
+                >
+                  {name}
+                  {!allowed && " 🔒"}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 06 CREDENTIAL TESTING */}
+        <div className="border-b border-white/10 p-5">
+          <div className="mb-4 flex items-center gap-3">
+            <span className="text-xs font-bold text-red-500">06</span>
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-white">
+              Credential Testing
+            </h2>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {(vaptRegistry?.stages?.find(
+              (stage) => stage.stage === "06 Credential Testing"
+            )?.tools || []).filter((registryTool) => registryTool.enabled !== false).map((registryTool) => {
+              const id = registryTool.id;
+              const name = registryTool.name;
+              const tool = allVaptTools.find((item) => item.id === id) || registryTool;
+              const allowed = isToolAllowed(tool);
+              const selected = selectedTools.includes(id);
+
+              return (
+                <button
+                  key={`credential-${id}`}
+                  type="button"
+                  onClick={() => toggleTool(id)}
+                  disabled={loading || permissionsLoading || !allowed}
+                  title={
+                    allowed
+                      ? tool?.description
+                      : `${tool?.description || name} — Access denied by administrator.`
+                  }
+                  className={`border px-4 py-3 text-xs font-semibold transition ${
+                    selected
+                      ? "border-red-600 bg-red-600/10 text-red-400"
+                      : allowed
+                        ? "border-white/10 text-gray-400 hover:border-red-600/50 hover:text-white"
+                        : "border-white/5 text-gray-700 opacity-50"
+                  }`}
+                >
+                  {name}
+                  {!allowed && " 🔒"}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 07 POST-EXPLOITATION */}
+        <div className="border-b border-white/10 p-5">
+          <div className="mb-4 flex items-center gap-3">
+            <span className="text-xs font-bold text-red-500">07</span>
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-white">
+              Post-Exploitation
+            </h2>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {(vaptRegistry?.stages?.find(
+              (stage) => stage.stage === "07 Post-Exploitation"
+            )?.tools || []).filter((registryTool) => registryTool.enabled !== false).map((registryTool) => {
+              const id = registryTool.id;
+              const name = registryTool.name;
+              const tool = allVaptTools.find((item) => item.id === id) || registryTool;
+              const allowed = isToolAllowed(tool);
+              const selected = selectedTools.includes(id);
+
+              return (
+                <button
+                  key={`post-${id}`}
+                  type="button"
+                  onClick={() => {
+                    if (id === "access-validation") {
+                      onViewAccessValidationResults();
+                      return;
+                    }
+
+                    toggleTool(id);
+                  }}
+                  disabled={loading || permissionsLoading || !allowed}
+                  title={
+                    allowed
+                      ? tool?.description
+                      : `${tool?.description || name} — Access denied by administrator.`
+                  }
+                  className={`border px-4 py-3 text-xs font-semibold transition ${
+                    selected
+                      ? "border-red-600 bg-red-600/10 text-red-400"
+                      : allowed
+                        ? "border-white/10 text-gray-400 hover:border-red-600/50 hover:text-white"
+                        : "border-white/5 text-gray-700 opacity-50"
+                  }`}
+                >
+                  {name}
+                  {!allowed && " 🔒"}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 08 RISK ASSESSMENT */}
+        <div className="border-b border-white/10 p-5">
+          <div className="mb-4 flex items-center gap-3">
+            <span className="text-xs font-bold text-red-500">08</span>
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-white">
+              Risk Assessment
+            </h2>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {(vaptRegistry?.stages?.find(
+              (stage) => stage.stage === "08 Risk Assessment"
+            )?.tools || []).filter((registryTool) => registryTool.enabled !== false).map((registryTool) => {
+              const id = registryTool.id;
+              const name = registryTool.name;
+              const tool = allVaptTools.find((item) => item.id === id) || registryTool;
+              const allowed = isToolAllowed(tool);
+              const selected = selectedTools.includes(id);
+
+              return (
+                <button
+                  key={`risk-${id}`}
+                  type="button"
+                  onClick={() => {
+                    if (id === "risk-engine") {
+                      onViewRiskAssessmentResults();
+                      return;
+                    }
+
+                    toggleTool(id);
+                  }}
+                  disabled={loading || permissionsLoading || !allowed}
+                  title={
+                    allowed
+                      ? tool?.description
+                      : `${tool?.description || name} — Access denied by administrator.`
+                  }
+                  className={`border px-4 py-3 text-xs font-semibold transition ${
+                    selected
+                      ? "border-red-600 bg-red-600/10 text-red-400"
+                      : allowed
+                        ? "border-white/10 text-gray-400 hover:border-red-600/50 hover:text-white"
+                        : "border-white/5 text-gray-700 opacity-50"
+                  }`}
+                >
+                  {name}
+                  {!allowed && " 🔒"}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 09 REPORTING */}
+        <div className="p-5">
+          <div className="mb-4 flex items-center gap-3">
+            <span className="text-xs font-bold text-red-500">09</span>
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-white">
+              Reporting
+            </h2>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {(vaptRegistry?.stages?.find(
+              (stage) => stage.stage === "09 Reporting"
+            )?.tools || []).filter((registryTool) => registryTool.enabled !== false).map((registryTool) => {
+              const id = registryTool.id;
+              const name = registryTool.name;
+              const tool = allVaptTools.find((item) => item.id === id) || registryTool;
+              const allowed = isToolAllowed(tool);
+              const selected = selectedTools.includes(id);
+
+              return (
+                <button
+                  key={`report-${id}`}
+                  type="button"
+                  onClick={() => {
+                    if (id === "report-generator") {
+                      onViewReportResults();
+                      return;
+                    }
+                    toggleTool(id);
+                  }}
+                  disabled={loading || permissionsLoading || !allowed}
+                  title={
+                    allowed
+                      ? tool?.description
+                      : `${tool?.description || name} — Access denied by administrator.`
+                  }
+                  className={`border px-4 py-3 text-xs font-semibold transition ${
+                    selected
+                      ? "border-red-600 bg-red-600/10 text-red-400"
+                      : allowed
+                        ? "border-white/10 text-gray-400 hover:border-red-600/50 hover:text-white"
+                        : "border-white/5 text-gray-700 opacity-50"
+                  }`}
+                >
+                  {name}
+                  {!allowed && " 🔒"}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* FRAMEWORK ACTIONS */}
+        <div className="border-t border-white/10 bg-black/20 p-5">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedTools(allowedVaptTools.map((tool) => tool.id));
+                setToolStatuses({});
+              }}
+              disabled={loading || permissionsLoading}
+              className="border border-white/10 px-4 py-3 text-[10px] font-semibold uppercase tracking-wider text-gray-400 hover:border-red-600/60 hover:text-white disabled:opacity-50"
+            >
+              Select All
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedTools([]);
+                setToolStatuses({});
+              }}
+              disabled={loading}
+              className="border border-white/10 px-4 py-3 text-[10px] font-semibold uppercase tracking-wider text-gray-400 hover:border-red-600/60 hover:text-white disabled:opacity-50"
+            >
+              Clear
+            </button>
+
+            <button
+              type="button"
+              onClick={handlePrepareTools}
+              disabled={
+                loading ||
+                permissionsLoading ||
+                selectedTools.length === 0
+              }
+              className="bg-red-600 px-5 py-3 text-xs font-semibold uppercase tracking-wider text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {loading
+                ? "Scan Running..."
+                : permissionsLoading
+                  ? "Checking Permissions..."
+                  : "Run Selected Tools"}
+            </button>
+
+            {selectedTools.length > 0 && (
+              <span className="ml-auto border border-red-600/30 bg-red-600/10 px-3 py-2 text-[9px] uppercase tracking-wider text-red-400">
+                {selectedTools.length} Selected
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* TSHARK LIVE PROGRESS */}
+      {(tsharkJobId || tsharkResult) && (
+        <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-red-400">
+                TShark Live Capture
+              </p>
+              <p className="mt-1 text-sm font-semibold text-white">
+                {tsharkStage || "Capturing packets"}
+              </p>
+            </div>
+            <p className="text-2xl font-bold text-red-500">
+              {Math.round(tsharkProgress)}%
+            </p>
+          </div>
+
+          <div className="mt-4 h-2 overflow-hidden bg-white/5">
+            <div
+              className="h-full bg-red-600 transition-all duration-500"
+              style={{
+                width: `${Math.max(
+                  0,
+                  Math.min(100, tsharkProgress)
+                )}%`,
+              }}
+            />
+          </div>
+
+          <div className="mt-3 flex flex-col gap-1 text-[10px] text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+            <span>
+              {tsharkStage || "Running TShark capture"} · Packets:{" "}
+              {tsharkLivePackets.length}
+            </span>
+            <span>Job: {tsharkJobId || "Completed"}</span>
+          </div>
+
+          <div className="mt-4 overflow-hidden border border-white/10 bg-black/40">
+            <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+                Live Packet Stream
+              </span>
+              {tsharkJobId && (
+                <span className="flex items-center gap-2 text-[10px] text-green-400">
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-green-500" />
+                  LIVE
+                </span>
+              )}
+            </div>
+
+            {tsharkLivePackets.length > 0 ? (
+              <div className="max-h-72 overflow-auto">
+                <table className="w-full text-left text-[10px]">
+                  <thead className="sticky top-0 bg-[#111] text-gray-500">
+                    <tr>
+                      <th className="px-3 py-2">#</th>
+                      <th className="px-3 py-2">Time</th>
+                      <th className="px-3 py-2">Source</th>
+                      <th className="px-3 py-2">Destination</th>
+                      <th className="px-3 py-2">Protocol</th>
+                      <th className="px-3 py-2">Info</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tsharkLivePackets.map((packet, index) => {
+                      const parts = String(packet).split("\t");
+                      return (
+                        <tr
+                          key={`${index}-${packet}`}
+                          className="border-t border-white/5 text-gray-300"
+                        >
+                          <td className="px-3 py-2 text-gray-500">
+                            {parts[0] || index + 1}
+                          </td>
+                          <td className="px-3 py-2 whitespace-nowrap">
+                            {parts[1] || "-"}
+                          </td>
+                          <td className="px-3 py-2 whitespace-nowrap">
+                            {parts[2] || "-"}
+                          </td>
+                          <td className="px-3 py-2 whitespace-nowrap">
+                            {parts[3] || "-"}
+                          </td>
+                          <td className="px-3 py-2 text-red-400">
+                            {parts[4] || "-"}
+                          </td>
+                          <td className="px-3 py-2">
+                            {parts.slice(5).join(" ") || "-"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="px-3 py-6 text-center text-xs text-gray-600">
+                Waiting for packets...
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* SNORT LIVE PROGRESS */}
+      {(snortJobId || snortResult) && (
+        <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-red-400">
+                Snort Live Monitoring
+              </p>
+              <p className="mt-1 text-sm font-semibold text-white">
+                {snortStage || "Monitoring traffic"}
+              </p>
+            </div>
+            <p className="text-2xl font-bold text-red-500">
+              {Math.round(snortProgress)}%
+            </p>
+          </div>
+
+          <div className="mt-4 h-2 overflow-hidden bg-white/5">
+            <div
+              className="h-full bg-red-600 transition-all duration-500"
+              style={{
+                width: `${Math.max(
+                  0,
+                  Math.min(100, snortProgress)
+                )}%`,
+              }}
+            />
+          </div>
+
+          <div className="mt-3 flex flex-col gap-1 text-[10px] text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+            <span>
+              {snortStage || "Running Snort monitoring"} · Alerts:{" "}
+              {snortLiveAlerts.filter(
+                (line) =>
+                  String(line).includes("[**]") ||
+                  String(line).includes("[Classification:")
+              ).length}
+            </span>
+            <span>Job: {snortJobId || "Completed"}</span>
+          </div>
+
+          <div className="mt-4 overflow-hidden border border-white/10 bg-black/40">
+            <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+                Live Snort Alerts
+              </span>
+
+              {snortJobId && (
+                <span className="flex items-center gap-2 text-[10px] text-green-400">
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-green-500" />
+                  LIVE
+                </span>
+              )}
+            </div>
+
+            {snortLiveAlerts.length > 0 ? (
+              <div className="max-h-72 overflow-auto">
+                <div className="space-y-1 p-3">
+                  {snortLiveAlerts.map((alert, index) => (
+                    <div
+                      key={`${index}-${alert}`}
+                      className="border-l-2 border-red-600/60 bg-white/[0.02] px-3 py-2 font-mono text-[10px] text-gray-300"
+                    >
+                      <span className="mr-2 text-gray-600">
+                        #{index + 1}
+                      </span>
+                      {String(alert)}
                     </div>
                   ))}
                 </div>
               </div>
-            </>
-          )}
-        </>
+            ) : (
+              <div className="px-3 py-6 text-center text-xs text-gray-600">
+                Waiting for Snort alerts...
+              </div>
+            )}
+          </div>
+        </div>
       )}
+
+      {/* NIKTO LIVE PROGRESS */}
+      {niktoJobId && (
+        <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-red-400">
+                Nikto Live Progress
+              </p>
+              <p className="mt-1 text-sm font-semibold text-white">
+                {niktoProfile.toUpperCase()} scan running
+              </p>
+            </div>
+            <p className="text-2xl font-bold text-red-500">
+              {Math.round(niktoProgress)}%
+            </p>
+          </div>
+
+          <div className="mt-4 h-2 overflow-hidden bg-white/5">
+            <div
+              className="h-full bg-red-600 transition-all duration-500"
+              style={{
+                width: `${Math.max(
+                  0,
+                  Math.min(100, niktoProgress)
+                )}%`,
+              }}
+            />
+          </div>
+
+          <div className="mt-3 flex flex-col gap-1 text-[10px] text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+            <span>{niktoStage || "Running Nikto scan"}</span>
+            <span>Job: {niktoJobId}</span>
+          </div>
+        </div>
+      )}
+
+      {/* NUCLEI LIVE PROGRESS */}
+      {nucleiJobId && (
+        <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-red-400">
+                Nuclei Live Progress
+              </p>
+              <p className="mt-1 text-sm font-semibold text-white">
+                Vulnerability discovery scan
+              </p>
+            </div>
+            <p className="text-2xl font-bold text-red-500">
+              {Math.round(nucleiProgress)}%
+            </p>
+          </div>
+
+          <div className="mt-4 h-2 overflow-hidden bg-white/5">
+            <div
+              className="h-full bg-red-600 transition-all duration-500"
+              style={{
+                width: `${Math.max(
+                  0,
+                  Math.min(100, nucleiProgress)
+                )}%`,
+              }}
+            />
+          </div>
+
+          <div className="mt-3 flex flex-col gap-1 text-[10px] text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+            <span>{nucleiStage || "Running Nuclei scan"}</span>
+            <span>Job: {nucleiJobId}</span>
+          </div>
+        </div>
+      )}
+
+      {/* NMAP LIVE PROGRESS */}
+      {nmapJobId && (
+        <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-red-400">
+                Nmap Live Progress
+              </p>
+              <p className="mt-1 text-sm font-semibold text-white">
+                {nmapProfile.toUpperCase()} scan running
+              </p>
+            </div>
+            <p className="text-2xl font-bold text-red-500">
+              {Math.round(nmapProgress)}%
+            </p>
+          </div>
+
+          <div className="mt-4 h-2 overflow-hidden bg-white/5">
+            <div
+              className="h-full bg-red-600 transition-all duration-500"
+              style={{
+                width: `${Math.max(
+                  0,
+                  Math.min(100, nmapProgress)
+                )}%`,
+              }}
+            />
+          </div>
+
+          <div className="mt-3 flex flex-col gap-1 text-[10px] text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+            <span>{nmapStage || "Running Nmap scan"}</span>
+            <span>Job: {nmapJobId}</span>
+          </div>
+        </div>
+      )}
+
+      {/* MASSCAN LIVE PROGRESS */}
+      {masscanJobId && (
+        <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-red-400">
+                Masscan Live Progress
+              </p>
+              <p className="mt-1 text-sm font-semibold text-white">
+                High-speed port discovery scan running
+              </p>
+            </div>
+            <p className="text-2xl font-bold text-red-500">
+              {Math.round(masscanProgress)}%
+            </p>
+          </div>
+
+          <div className="mt-4 h-2 overflow-hidden bg-white/5">
+            <div
+              className="h-full bg-red-600 transition-all duration-500"
+              style={{
+                width: `${Math.max(
+                  0,
+                  Math.min(100, masscanProgress)
+                )}%`,
+              }}
+            />
+          </div>
+
+          <div className="mt-3 flex flex-col gap-1 text-[10px] text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+            <span>{masscanStage || "Running Masscan scan"}</span>
+            <span>Job: {masscanJobId}</span>
+          </div>
+        </div>
+      )}
+
+      {/* HPING3 LIVE PROGRESS */}
+      {(hping3JobId || hping3Result) && (
+        <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-red-400">
+                hping3 Live Progress
+              </p>
+              <p className="mt-1 text-sm font-semibold text-white">
+                {hping3Stage || "Running hping3 network test"}
+              </p>
+            </div>
+            <p className="text-2xl font-bold text-red-500">
+              {Math.round(hping3Progress)}%
+            </p>
+          </div>
+
+          <div className="mt-4 h-2 overflow-hidden bg-white/5">
+            <div
+              className="h-full bg-red-600 transition-all duration-300"
+              style={{
+                width: `${Math.max(
+                  0,
+                  Math.min(100, hping3Progress)
+                )}%`,
+              }}
+            />
+          </div>
+
+          {hping3Result && (
+            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="border border-white/10 bg-black/20 p-3">
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Target
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {hping3Result.target || "—"}:{hping3Result.port || "—"}
+                </p>
+              </div>
+
+              <div className="border border-white/10 bg-black/20 p-3">
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Transmitted
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {hping3Result.transmitted ?? 0}
+                </p>
+              </div>
+
+              <div className="border border-white/10 bg-black/20 p-3">
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Received
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {hping3Result.received ?? 0}
+                </p>
+              </div>
+
+              <div className="border border-white/10 bg-black/20 p-3">
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Packet Loss
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {hping3Result.packet_loss ?? 0}%
+                </p>
+              </div>
+            </div>
+          )}
+
+          {hping3Result?.rtt && (
+            <div className="mt-3 flex flex-wrap gap-4 text-[10px] text-gray-500">
+              <span>RTT Min: {hping3Result.rtt.min ?? "—"} ms</span>
+              <span>RTT Avg: {hping3Result.rtt.avg ?? "—"} ms</span>
+              <span>RTT Max: {hping3Result.rtt.max ?? "—"} ms</span>
+            </div>
+          )}
+
+          <div className="mt-3 flex flex-col gap-1 text-[10px] text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+            <span>{hping3Stage || "Running hping3 test"}</span>
+            <span>Job: {hping3JobId || "Completed"}</span>
+          </div>
+        </div>
+      )}
+
+      {/* WIRESHARK LIVE PROGRESS */}
+      {(wiresharkJobId || wiresharkResult) && (
+        <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-red-400">
+                Wireshark Live Capture
+              </p>
+              <p className="mt-1 text-sm font-semibold text-white">
+                {wiresharkStage || "Capturing packets"}
+              </p>
+            </div>
+
+            <p className="text-2xl font-bold text-red-500">
+              {Math.round(wiresharkProgress)}%
+            </p>
+          </div>
+
+          <div className="mt-4 h-2 overflow-hidden bg-white/5">
+            <div
+              className="h-full bg-red-600 transition-all duration-300"
+              style={{
+                width: `${Math.max(
+                  0,
+                  Math.min(100, Number(wiresharkProgress) || 0)
+                )}%`,
+              }}
+            />
+          </div>
+
+          {wiresharkResult && (
+            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+              <div className="border border-white/10 bg-black/20 p-3">
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Interface
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {wiresharkResult.interface || "—"}
+                </p>
+              </div>
+
+              <div className="border border-white/10 bg-black/20 p-3">
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Duration
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {wiresharkResult.duration || 0}s
+                </p>
+              </div>
+
+              <div className="border border-white/10 bg-black/20 p-3">
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Packets
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {wiresharkResult.packet_count ?? 0}
+                </p>
+              </div>
+            </div>
+          )}
+
+          <div className="mt-3 text-[10px] text-gray-500">
+            {wiresharkStage || "Capturing packets..."}
+          </div>
+        </div>
+      )}
+
+      {/* HYDRA LIVE PROGRESS */}
+      {hydraJobId && (
+        <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-red-400">
+                Hydra Live Progress
+              </p>
+              <p className="mt-1 text-sm font-semibold text-white">
+                {hydraStage || "Running Hydra credential test"}
+              </p>
+            </div>
+            <p className="text-2xl font-bold text-red-500">
+              {Math.round(hydraProgress)}%
+            </p>
+          </div>
+
+          <div className="mt-4 h-2 overflow-hidden bg-white/5">
+            <div
+              className="h-full bg-red-600 transition-all duration-300"
+              style={{
+                width: `${Math.max(
+                  0,
+                  Math.min(100, Number(hydraProgress) || 0)
+                )}%`,
+              }}
+            />
+          </div>
+
+          <div className="mt-3 flex flex-col gap-1 text-[10px] text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+            <span>{hydraStage || "Running Hydra credential test"}</span>
+            <span>Job: {hydraJobId}</span>
+          </div>
+        </div>
+      )}
+
+      {/* JOHN THE RIPPER LIVE PROGRESS */}
+      {(johnJobId || johnResult) && (
+        <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-red-400">
+                John the Ripper Live Progress
+              </p>
+              <p className="mt-1 text-sm font-semibold text-white">
+                {johnStage || "Running John the Ripper"}
+              </p>
+            </div>
+            <p className="text-2xl font-bold text-red-500">
+              {Math.round(johnProgress)}%
+            </p>
+          </div>
+
+          <div className="mt-4 h-2 overflow-hidden bg-white/5">
+            <div
+              className="h-full bg-red-600 transition-all duration-300"
+              style={{
+                width: `${Math.max(
+                  0,
+                  Math.min(100, Number(johnProgress) || 0)
+                )}%`,
+              }}
+            />
+          </div>
+
+          <div className="mt-3 flex flex-col gap-1 text-[10px] text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+            <span>{johnStage || "Running John the Ripper"}</span>
+            <span>Job: {johnJobId}</span>
+          </div>
+        </div>
+      )}
+
+      {/* OWASP ZAP LIVE PROGRESS */}
+      {(zapScanId || zapStage === "Completed" || zapStage === "Fetching results") && (
+        <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-red-400">
+                OWASP ZAP Live Progress
+              </p>
+              <p className="mt-1 text-sm font-semibold text-white">
+                {zapStage || "Running OWASP ZAP scan"}
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <p className="text-2xl font-bold text-red-500">{Math.round(zapProgress)}%</p>
+              {zapScanId && <button type="button" onClick={cancelZapScan} className="border border-red-500/40 px-3 py-2 text-[9px] font-semibold uppercase tracking-wider text-red-400 hover:bg-red-500/10">Stop / Cancel</button>}
+            </div>
+          </div>
+
+          <div className="mt-4 h-2 overflow-hidden bg-white/5">
+            <div
+              className="h-full bg-red-600 transition-all duration-500"
+              style={{
+                width: `${Math.max(
+                  0,
+                  Math.min(100, Number(zapProgress) || 0)
+                )}%`,
+              }}
+            />
+          </div>
+
+          <div className="mt-3 flex flex-col gap-1 text-[10px] text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+            <span>
+              Target: {targetUrl || "—"}
+            </span>
+            <span>
+              Scan ID: {zapScanId}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* METASPLOIT LIVE PROGRESS */}
+      {(metasploitJobId || metasploitStage || metasploitResult) && (
+        <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-red-400">
+                Metasploit Live Progress
+              </p>
+              <p className="mt-1 text-sm font-semibold text-white">
+                {metasploitStage || "Running Metasploit validation"}
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <p className="text-2xl font-bold text-red-500">
+                {Math.round(Number(metasploitProgress) || 0)}%
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-4 h-2 overflow-hidden bg-white/5">
+            <div
+              className="h-full bg-red-600 transition-all duration-500"
+              style={{
+                width: `${Math.max(
+                  0,
+                  Math.min(
+                    100,
+                    Number(metasploitProgress) || 0
+                  )
+                )}%`,
+              }}
+            />
+          </div>
+
+          <div className="mt-3 flex flex-col gap-1 text-[10px] text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+            <span>
+              Target: {metasploitResult?.target || "127.0.0.1"}
+            </span>
+
+            <span>
+              Module:{" "}
+              {metasploitResult?.module ||
+                "auxiliary/scanner/http/title"}
+            </span>
+
+            <span>
+              Job: {metasploitJobId || metasploitResult?.job_id || "—"}
+            </span>
+          </div>
+
+          {metasploitLiveOutput.length > 0 && (
+            <div className="mt-4 border border-white/5 bg-black p-3">
+              <p className="mb-2 text-[9px] uppercase tracking-wider text-gray-600">
+                Live Console Output
+              </p>
+
+              <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-[10px] leading-4 text-gray-500">
+                {metasploitLiveOutput.join("\n")}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* GENERIC TOOLS LIVE PROGRESS */}
+      {Object.entries(genericToolJobs).length > 0 && (
+        <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
+          <div className="mb-4 flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-red-400">
+                Generic Tools Live Progress
+              </p>
+              <p className="mt-1 text-sm font-semibold text-white">
+                Registry tool execution
+              </p>
+            </div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-500">
+              {Object.keys(genericToolJobs).length} Job
+              {Object.keys(genericToolJobs).length === 1 ? "" : "s"}
+            </p>
+          </div>
+
+          <div className="space-y-4">
+            {Object.entries(genericToolJobs).map(([toolId, job]) => {
+              const jobStatus = job?.status || "queued";
+              const completed =
+                jobStatus === "completed" ||
+                jobStatus === "completed_with_errors";
+              const failed = jobStatus === "failed";
+              const progress = failed || completed
+                ? 100
+                : jobStatus === "running"
+                  ? 50
+                  : 10;
+
+              return (
+                <div
+                  key={toolId}
+                  className="border border-white/10 bg-[#080808] p-4"
+                >
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="min-w-0">
+                      <p className="truncate text-xs font-semibold uppercase tracking-wider text-white">
+                        {job?.tool_name || toolId}
+                      </p>
+                      <p className="mt-1 text-[10px] uppercase tracking-wider text-gray-500">
+                        {job?.stage || jobStatus}
+                      </p>
+                    </div>
+
+                    <p
+                      className={`text-xs font-semibold uppercase tracking-wider ${
+                        failed
+                          ? "text-red-500"
+                          : completed
+                            ? "text-green-500"
+                            : "text-yellow-500"
+                      }`}
+                    >
+                      {failed
+                        ? "Failed"
+                        : completed
+                          ? jobStatus === "completed_with_errors"
+                            ? "Completed With Errors"
+                            : "Completed"
+                          : jobStatus === "running"
+                            ? "Running"
+                            : "Queued"}
+                    </p>
+                  </div>
+
+                  <div className="mt-3 h-2 overflow-hidden bg-white/5">
+                    <div
+                      className={`h-full transition-all duration-500 ${
+                        failed
+                          ? "bg-red-600"
+                          : completed
+                            ? "bg-green-600"
+                            : "bg-red-600"
+                      }`}
+                      style={{
+                        width: `${progress}%`,
+                      }}
+                    />
+                  </div>
+
+                  <div className="mt-3 flex flex-col gap-1 text-[10px] text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+                    <span>
+                      {job?.target ? `Target: ${job.target}` : "Processing"}
+                    </span>
+                    <span>Job: {job?.jobId || "—"}</span>
+                  </div>
+                  {completed && job?.result && (
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      {toolId === "dig" && typeof onViewDigResults === "function" && (
+                        <button
+                          type="button"
+                          onClick={() => onViewDigResults(job.result)}
+                          className="border border-red-600 px-4 py-2 text-xs font-semibold uppercase tracking-wider text-red-400 hover:bg-red-600 hover:text-white"
+                        >
+                          View DIG Results
+                        </button>
+                      )}
+
+                      {toolId === "dns-recon" && typeof onViewDnsReconResults === "function" && (
+                        <button
+                          type="button"
+                          onClick={() => onViewDnsReconResults(job.result)}
+                          className="border border-red-600 px-4 py-2 text-xs font-semibold uppercase tracking-wider text-red-400 hover:bg-red-600 hover:text-white"
+                        >
+                          View DNS Recon Results
+                        </button>
+                      )}
+
+                      {toolId === "nslookup" && typeof onViewNslookupResults === "function" && (
+                        <button
+                          type="button"
+                          onClick={() => onViewNslookupResults(job.result)}
+                          className="border border-red-600 px-4 py-2 text-xs font-semibold uppercase tracking-wider text-red-400 hover:bg-red-600 hover:text-white"
+                        >
+                          View nslookup Results
+                        </button>
+                      )}
+
+                      {toolId === "ping" && typeof onViewPingResults === "function" && (
+                        <button
+                          type="button"
+                          onClick={() => onViewPingResults(job.result)}
+                          className="border border-red-600 px-4 py-2 text-xs font-semibold uppercase tracking-wider text-red-400 hover:bg-red-600 hover:text-white"
+                        >
+                          View Ping Results
+                        </button>
+                      )}
+
+                      {toolId === "whois" && typeof onViewWhoisResults === "function" && (
+                        <button
+                          type="button"
+                          onClick={() => onViewWhoisResults(job.result)}
+                          className="border border-red-600 px-4 py-2 text-xs font-semibold uppercase tracking-wider text-red-400 hover:bg-red-600 hover:text-white"
+                        >
+                          View WHOIS Results
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* STATUS MESSAGE */}
+      {message && (
+        <div className="mt-5 border border-white/10 bg-[#0d0d0d] px-5 py-4 text-xs leading-5 text-gray-400">
+          {message}
+        </div>
+      )}
+
+      {/* RESULT STATUS */}
+      {scanResult && !hping3Result && (
+        <div className="mt-5 border border-green-600/30 bg-green-600/5 px-5 py-4 text-xs text-green-400">
+          Scan completed. Opening the dedicated results page...
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WiresharkResultsPage({ captureResult, onBack }) {
+  const apiBase = API_URL;
+
+  const downloadUrl = captureResult?.capture_id
+    ? `${apiBase}/vapt/network/wireshark/capture/${captureResult.capture_id}/download`
+    : null;
+
+  return (
+    <div className="min-h-full bg-[#050505] p-6 text-white">
+      <div className="mx-auto max-w-6xl">
+        <button
+          type="button"
+          onClick={onBack}
+          className="mb-6 border border-white/10 px-4 py-2 text-xs text-gray-400 hover:bg-white/5"
+        >
+          ← Back to VAPT
+        </button>
+
+        <div className="border border-red-600/30 bg-[#0d0d0d] p-6">
+          <p className="text-xs uppercase tracking-wider text-red-400">
+            Network Analysis
+          </p>
+
+          <h1 className="mt-2 text-2xl font-bold text-white">
+            Wireshark Results
+          </h1>
+
+          <p className="mt-1 text-xs text-gray-500">
+            Packet capture completed using the Wireshark capture engine.
+          </p>
+
+          <div className="mt-6 grid grid-cols-2 gap-4 md:grid-cols-4">
+            <div className="border border-white/10 bg-black/20 p-4">
+              <p className="text-[9px] uppercase text-gray-600">Interface</p>
+              <p className="mt-2 text-sm text-gray-300">
+                {captureResult?.interface || "—"}
+              </p>
+            </div>
+
+            <div className="border border-white/10 bg-black/20 p-4">
+              <p className="text-[9px] uppercase text-gray-600">Duration</p>
+              <p className="mt-2 text-sm text-gray-300">
+                {captureResult?.duration ?? 0}s
+              </p>
+            </div>
+
+            <div className="border border-white/10 bg-black/20 p-4">
+              <p className="text-[9px] uppercase text-gray-600">
+                Packets Captured
+              </p>
+              <p className="mt-2 text-sm font-semibold text-red-400">
+                {captureResult?.packet_count ?? 0}
+              </p>
+            </div>
+
+            <div className="border border-white/10 bg-black/20 p-4">
+              <p className="text-[9px] uppercase text-gray-600">Status</p>
+              <p className="mt-2 text-sm text-green-400">
+                {captureResult?.status || "—"}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-6 flex flex-wrap gap-3">
+            {downloadUrl && (
+              <a
+                href={downloadUrl}
+                className="border border-red-500/40 px-4 py-3 text-xs font-semibold uppercase tracking-wider text-red-400 hover:bg-red-500/10"
+              >
+                Download PCAPNG
+              </a>
+            )}
+          </div>
+
+          <div className="mt-6 border border-white/10 p-4">
+            <p className="text-xs uppercase tracking-wider text-gray-500">
+              Capture Information
+            </p>
+
+            <div className="mt-3 space-y-2 text-xs text-gray-400">
+              <p>
+                Capture ID:{" "}
+                <span className="text-gray-300">
+                  {captureResult?.capture_id || captureResult?.id || "—"}
+                </span>
+              </p>
+
+              <p>
+                Capture file:{" "}
+                <span className="text-gray-300">
+                  {captureResult?.file || "—"}
+                </span>
+              </p>
+
+              <p>
+                Stage:{" "}
+                <span className="text-gray-300">
+                  {captureResult?.stage || "Completed"}
+                </span>
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HydraResultsPage({ scanResult, onBack }) {
+  const result = scanResult || {};
+
+  return (
+    <div className="min-h-screen bg-[#080808] p-6 text-white">
+      <button
+        type="button"
+        onClick={onBack}
+        className="mb-6 border border-white/10 px-4 py-2 text-xs text-gray-400 hover:border-red-500/40 hover:text-white"
+      >
+        ← Back to VAPT
+      </button>
+
+      <div className="mb-6 border-b border-white/10 pb-5">
+        <p className="text-xs uppercase tracking-wider text-red-500">
+          Credential Testing
+        </p>
+        <h1 className="mt-2 text-3xl font-black tracking-tight">
+          HYDRA <span className="text-red-500">RESULTS</span>
+        </h1>
+        <p className="mt-2 text-xs text-gray-500">
+          Authorized network credential security testing results.
+        </p>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-4">
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Target
+          </p>
+          <p className="mt-2 text-sm font-semibold text-white">
+            {result.target || "—"}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Service
+          </p>
+          <p className="mt-2 text-sm font-semibold text-white">
+            {result.service || "—"}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Username
+          </p>
+          <p className="mt-2 text-sm font-semibold text-white">
+            {result.username || "—"}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Status
+          </p>
+          <p className="mt-2 text-sm font-semibold text-red-400">
+            {result.status || "—"}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-6 border border-white/10 bg-[#0d0d0d] p-5">
+        <p className="text-xs uppercase tracking-wider text-gray-500">
+          Test Information
+        </p>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-2 text-xs text-gray-400">
+          <p>
+            Job ID:{" "}
+            <span className="text-gray-300">{result.job_id || "—"}</span>
+          </p>
+          <p>
+            Port:{" "}
+            <span className="text-gray-300">{result.port || "—"}</span>
+          </p>
+          <p>
+            Progress:{" "}
+            <span className="text-gray-300">{result.progress ?? 0}%</span>
+          </p>
+          <p>
+            Return Code:{" "}
+            <span className="text-gray-300">
+              {result.return_code ?? "—"}
+            </span>
+          </p>
+          <p className="md:col-span-2">
+            Stage:{" "}
+            <span className="text-gray-300">{result.stage || "—"}</span>
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-6 border border-white/10 bg-[#0d0d0d] p-5">
+        <p className="text-xs uppercase tracking-wider text-gray-500">
+          Hydra Output
+        </p>
+
+        <pre className="mt-4 max-h-96 overflow-auto whitespace-pre-wrap text-xs leading-5 text-gray-400">
+          {result.output || "No output returned."}
+        </pre>
+      </div>
+
+      {result.error && (
+        <div className="mt-6 border border-red-500/30 bg-red-500/5 p-5">
+          <p className="text-xs uppercase tracking-wider text-red-400">
+            Error
+          </p>
+          <p className="mt-3 text-xs text-red-300">{result.error}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function JohnResultsPage({ scanResult, onBack }) {
+  const result = scanResult || {};
+
+  return (
+    <div className="min-h-screen bg-[#080808] p-6 text-white">
+      <button
+        type="button"
+        onClick={onBack}
+        className="mb-6 border border-white/10 px-4 py-2 text-xs text-gray-400 hover:border-red-500/40 hover:text-white"
+      >
+        ← Back to VAPT
+      </button>
+
+      <div className="mb-6 border-b border-white/10 pb-5">
+        <p className="text-xs uppercase tracking-wider text-red-500">
+          Credential Testing
+        </p>
+        <h1 className="mt-2 text-3xl font-black tracking-tight">
+          JOHN THE RIPPER <span className="text-red-500">RESULTS</span>
+        </h1>
+        <p className="mt-2 text-xs text-gray-500">
+          Authorized password hash auditing results.
+        </p>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-4">
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Hash File
+          </p>
+          <p className="mt-2 break-all text-xs font-semibold text-white">
+            {result.hash_file || "—"}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Wordlist
+          </p>
+          <p className="mt-2 break-all text-xs font-semibold text-white">
+            {result.wordlist || "Default"}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Progress
+          </p>
+          <p className="mt-2 text-2xl font-bold text-red-400">
+            {result.progress ?? 0}%
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Status
+          </p>
+          <p className="mt-2 text-sm font-semibold text-red-400">
+            {result.status || "—"}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-6 border border-white/10 bg-[#0d0d0d] p-5">
+        <p className="text-xs uppercase tracking-wider text-gray-500">
+          Test Information
+        </p>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-2 text-xs text-gray-400">
+          <p>
+            Job ID:{" "}
+            <span className="text-gray-300">{result.job_id || "—"}</span>
+          </p>
+          <p>
+            Return Code:{" "}
+            <span className="text-gray-300">
+              {result.return_code ?? "—"}
+            </span>
+          </p>
+          <p className="md:col-span-2">
+            Stage:{" "}
+            <span className="text-gray-300">{result.stage || "—"}</span>
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-6 border border-white/10 bg-[#0d0d0d] p-5">
+        <p className="text-xs uppercase tracking-wider text-gray-500">
+          John the Ripper Output
+        </p>
+
+        <pre className="mt-4 max-h-96 overflow-auto whitespace-pre-wrap text-xs leading-5 text-gray-400">
+          {result.output || "No output returned."}
+        </pre>
+      </div>
+
+      {result.error && (
+        <div className="mt-6 border border-red-500/30 bg-red-500/5 p-5">
+          <p className="text-xs uppercase tracking-wider text-red-400">
+            Error
+          </p>
+          <p className="mt-3 text-xs text-red-300">{result.error}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MetasploitResultsPage({ scanResult, onBack }) {
+  const result = scanResult || {};
+  const output = Array.isArray(result.output)
+    ? result.output
+    : [];
+
+  return (
+    <div className="min-h-screen bg-[#080808] p-6 text-white">
+      <button
+        type="button"
+        onClick={onBack}
+        className="mb-6 border border-white/10 px-4 py-2 text-xs text-gray-400 hover:border-red-500/40 hover:text-white"
+      >
+        ← Back to VAPT
+      </button>
+
+      <div className="mb-6 border-b border-white/10 pb-5">
+        <p className="text-xs uppercase tracking-wider text-red-500">
+          Penetration Testing
+        </p>
+
+        <h1 className="mt-2 text-3xl font-black tracking-tight">
+          METASPLOIT <span className="text-red-500">RESULTS</span>
+        </h1>
+
+        <p className="mt-2 text-xs text-gray-500">
+          Authorized vulnerability validation and security testing results.
+        </p>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-4">
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Target
+          </p>
+          <p className="mt-2 break-all text-sm font-semibold text-white">
+            {result.target || "—"}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Module
+          </p>
+          <p className="mt-2 break-all text-xs font-semibold text-white">
+            {result.module || "—"}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Port
+          </p>
+          <p className="mt-2 text-sm font-semibold text-white">
+            {result.port || "—"}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Status
+          </p>
+          <p className="mt-2 text-sm font-semibold text-red-400">
+            {result.status || "—"}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-6 border border-white/10 bg-[#0d0d0d] p-5">
+        <p className="text-xs uppercase tracking-wider text-gray-500">
+          Validation Information
+        </p>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-2 text-xs text-gray-400">
+          <p>
+            Job ID:{" "}
+            <span className="break-all text-gray-300">
+              {result.job_id || "—"}
+            </span>
+          </p>
+
+          <p>
+            Progress:{" "}
+            <span className="text-gray-300">
+              {result.progress ?? 0}%
+            </span>
+          </p>
+
+          <p>
+            Elapsed:{" "}
+            <span className="text-gray-300">
+              {result.elapsed != null
+                ? `${result.elapsed}s`
+                : "—"}
+            </span>
+          </p>
+
+          <p>
+            Return Code:{" "}
+            <span className="text-gray-300">
+              {result.return_code ?? "—"}
+            </span>
+          </p>
+
+          <p className="md:col-span-2">
+            Stage:{" "}
+            <span className="text-gray-300">
+              {result.stage || "—"}
+            </span>
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-6 border border-white/10 bg-[#0d0d0d] p-5">
+        <div className="flex items-center justify-between gap-4">
+          <p className="text-xs uppercase tracking-wider text-gray-500">
+            Metasploit Console Output
+          </p>
+
+          <span className="text-[10px] text-gray-600">
+            {output.length} lines
+          </span>
+        </div>
+
+        <pre className="mt-4 max-h-[500px] overflow-auto whitespace-pre-wrap break-words rounded border border-white/5 bg-black p-4 text-xs leading-5 text-gray-400">
+          {output.length > 0
+            ? output.join("\n")
+            : "No output returned."}
+        </pre>
+      </div>
+
+      {result.command_display && (
+        <div className="mt-6 border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-xs uppercase tracking-wider text-gray-500">
+            Executed Command
+          </p>
+
+          <pre className="mt-4 overflow-auto whitespace-pre-wrap break-words rounded border border-white/5 bg-black p-4 text-xs leading-5 text-gray-500">
+            {result.command_display}
+          </pre>
+        </div>
+      )}
+
+      {result.error && (
+        <div className="mt-6 border border-red-500/30 bg-red-500/5 p-5">
+          <p className="text-xs uppercase tracking-wider text-red-400">
+            Error
+          </p>
+
+          <p className="mt-3 text-xs text-red-300">
+            {result.error}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Hping3ResultsPage({ scanResult, onBack }) {
+  const result = scanResult?.result || scanResult || {};
+  const packets = Array.isArray(result.packets) ? result.packets : [];
+
+  // Use backend RTT statistics when available.
+  // Otherwise calculate them directly from the returned packet RTT values.
+  const packetRtts = packets
+    .map((packet) => Number(packet?.rtt_ms))
+    .filter((value) => Number.isFinite(value));
+
+  const calculatedRttMin =
+    packetRtts.length > 0
+      ? Math.min(...packetRtts)
+      : null;
+
+  const calculatedRttAvg =
+    packetRtts.length > 0
+      ? Number(
+          (
+            packetRtts.reduce((sum, value) => sum + value, 0) /
+            packetRtts.length
+          ).toFixed(2)
+        )
+      : null;
+
+  const calculatedRttMax =
+    packetRtts.length > 0
+      ? Math.max(...packetRtts)
+      : null;
+
+  const rttMin =
+    result.rtt_min_ms ??
+    result.rtt?.min_ms ??
+    result.rtt?.min ??
+    result.rtt_min ??
+    calculatedRttMin ??
+    "—";
+
+  const rttAvg =
+    result.rtt_avg_ms ??
+    result.rtt?.avg_ms ??
+    result.rtt?.avg ??
+    result.rtt_avg ??
+    calculatedRttAvg ??
+    "—";
+
+  const rttMax =
+    result.rtt_max_ms ??
+    result.rtt?.max_ms ??
+    result.rtt?.max ??
+    result.rtt_max ??
+    calculatedRttMax ??
+    "—";
+
+  const packetLoss =
+    result.packet_loss ??
+    result.packet_loss_percent ??
+    "—";
+
+  return (
+    <div className="min-h-screen bg-[#080808] p-6 text-white">
+      <button
+        type="button"
+        onClick={onBack}
+        className="mb-6 border border-white/10 px-4 py-2 text-xs text-gray-400 hover:border-red-500/40 hover:text-white"
+      >
+        ← Back to VAPT
+      </button>
+
+      <div className="mb-6 border-b border-white/10 pb-5">
+        <p className="text-xs uppercase tracking-wider text-red-500">
+          Network Security Testing
+        </p>
+        <h1 className="mt-2 text-3xl font-black tracking-tight">
+          HPING3 <span className="text-red-500">RESULTS</span>
+        </h1>
+        <p className="mt-2 text-xs text-gray-500">
+          Real-time TCP packet and network response analysis.
+        </p>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-4">
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Target
+          </p>
+          <p className="mt-2 text-sm font-semibold text-white">
+            {result.target || "—"}
+            {result.port ? `:${result.port}` : ""}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Transmitted
+          </p>
+          <p className="mt-2 text-2xl font-bold text-white">
+            {result.transmitted ?? 0}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Received
+          </p>
+          <p className="mt-2 text-2xl font-bold text-white">
+            {result.received ?? 0}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+            Packet Loss
+          </p>
+          <p className="mt-2 text-2xl font-bold text-red-400">
+            {packetLoss}%
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-6 border border-white/10 bg-[#0d0d0d] p-5">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-xs uppercase tracking-wider text-red-400">
+              RTT Statistics
+            </p>
+            <p className="mt-1 text-[10px] text-gray-600">
+              Round-trip response timing
+            </p>
+          </div>
+          <span className="border border-green-500/30 px-3 py-1 text-[9px] uppercase tracking-wider text-green-400">
+            {result.status || "Completed"}
+          </span>
+        </div>
+
+        <div className="mt-5 grid gap-4 md:grid-cols-3">
+          <div className="border border-white/10 bg-black/20 p-4">
+            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+              Minimum
+            </p>
+            <p className="mt-2 text-xl font-bold text-white">
+              {rttMin} <span className="text-xs text-gray-600">ms</span>
+            </p>
+          </div>
+
+          <div className="border border-white/10 bg-black/20 p-4">
+            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+              Average
+            </p>
+            <p className="mt-2 text-xl font-bold text-white">
+              {rttAvg} <span className="text-xs text-gray-600">ms</span>
+            </p>
+          </div>
+
+          <div className="border border-white/10 bg-black/20 p-4">
+            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+              Maximum
+            </p>
+            <p className="mt-2 text-xl font-bold text-white">
+              {rttMax} <span className="text-xs text-gray-600">ms</span>
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-6 border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 p-5">
+          <p className="text-xs uppercase tracking-wider text-red-400">
+            Packet Details
+          </p>
+          <p className="mt-1 text-[10px] text-gray-600">
+            Packets captured during the hping3 test.
+          </p>
+        </div>
+
+        {packets.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-[10px]">
+              <thead className="bg-black/30 text-gray-600">
+                <tr>
+                  <th className="px-5 py-3">SEQ</th>
+                  <th className="px-5 py-3">FLAGS</th>
+                  <th className="px-5 py-3">SOURCE</th>
+                  <th className="px-5 py-3">DESTINATION</th>
+                  <th className="px-5 py-3">RTT</th>
+                </tr>
+              </thead>
+              <tbody>
+                {packets.map((packet, index) => (
+                  <tr
+                    key={`${packet.seq ?? index}-${index}`}
+                    className="border-t border-white/5"
+                  >
+                    <td className="px-5 py-3 text-gray-300">
+                      {packet.seq ?? index}
+                    </td>
+                    <td className="px-5 py-3 text-red-400">
+                      {packet.flags || "—"}
+                    </td>
+                    <td className="px-5 py-3 text-gray-400">
+                      {packet.source || packet.src || "—"}
+                    </td>
+                    <td className="px-5 py-3 text-gray-400">
+                      {packet.destination || packet.dst || "—"}
+                    </td>
+                    <td className="px-5 py-3 text-gray-300">
+                      {packet.rtt_ms ?? "—"} ms
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="p-5 text-xs text-gray-600">
+            No individual packet records were returned.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DigResultsPage({ scanResult, onBack }) {
+  const result = scanResult?.result || scanResult || {};
+  const stdout = result.stdout || "";
+  const stderr = result.stderr || "";
+
+  return (
+    <div className="min-h-full bg-black p-6 text-white">
+      <div className="mb-6 flex items-center justify-between">
+        <div>
+          <p className="text-xs uppercase tracking-[0.25em] text-red-500">
+            VAPT Results
+          </p>
+          <h1 className="mt-2 text-2xl font-bold">dig Results</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Real native DNS query output
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={onBack}
+          className="border border-white/10 px-4 py-2 text-xs font-semibold text-gray-300 hover:border-red-600 hover:text-white"
+        >
+          Back to VAPT
+        </button>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-4">
+        <div className="border border-white/10 bg-[#0d0d0d] p-4">
+          <p className="text-xs text-gray-500">Target</p>
+          <p className="mt-2 break-all text-sm text-white">
+            {result.target || "—"}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-4">
+          <p className="text-xs text-gray-500">Status</p>
+          <p className="mt-2 text-sm text-green-400">
+            {result.status || "—"}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-4">
+          <p className="text-xs text-gray-500">Return Code</p>
+          <p className="mt-2 text-sm text-white">
+            {result.return_code ?? "—"}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-4">
+          <p className="text-xs text-gray-500">Command</p>
+          <p className="mt-2 break-all font-mono text-xs text-gray-300">
+            {Array.isArray(result.command)
+              ? result.command.join(" ")
+              : result.command || "—"}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-6 border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-5 py-4">
+          <h2 className="text-sm font-semibold uppercase tracking-wider">
+            Native dig Output
+          </h2>
+        </div>
+
+        <pre className="max-h-[650px] overflow-auto whitespace-pre-wrap p-5 font-mono text-xs leading-6 text-gray-300">
+          {stdout || "No stdout returned."}
+        </pre>
+      </div>
+
+      {stderr && (
+        <div className="mt-4 border border-yellow-500/20 bg-[#0d0d0d]">
+          <div className="border-b border-white/10 px-5 py-4">
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-yellow-400">
+              STDERR
+            </h2>
+          </div>
+
+          <pre className="overflow-auto whitespace-pre-wrap p-5 font-mono text-xs leading-6 text-yellow-200">
+            {stderr}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NucleiResultsPage({ scanResult, onBack }) {
+  const nuclei = scanResult?.nuclei || {};
+
+  const findings = Array.isArray(nuclei?.findings)
+    ? nuclei.findings
+    : [];
+
+  const severityOrder = [
+    "CRITICAL",
+    "HIGH",
+    "MEDIUM",
+    "LOW",
+    "INFO",
+  ];
+
+  const severityCounts = findings.reduce((counts, finding) => {
+    const severity = String(
+      finding?.severity || "INFO"
+    ).toUpperCase();
+
+    counts[severity] = (counts[severity] || 0) + 1;
+
+    return counts;
+  }, {});
+
+  const severityClass = (severity) => {
+    switch (String(severity || "INFO").toUpperCase()) {
+      case "CRITICAL":
+        return "border-red-600/50 bg-red-600/15 text-red-300";
+      case "HIGH":
+        return "border-orange-600/40 bg-orange-600/10 text-orange-300";
+      case "MEDIUM":
+        return "border-yellow-600/40 bg-yellow-600/10 text-yellow-300";
+      case "LOW":
+        return "border-blue-600/40 bg-blue-600/10 text-blue-300";
+      default:
+        return "border-gray-600/40 bg-gray-600/10 text-gray-300";
+    }
+  };
+
+  const formatList = (value) => {
+    if (Array.isArray(value)) {
+      return value.filter(Boolean).join(", ");
+    }
+
+    return value || "—";
+  };
+
+  return (
+    <div className="space-y-5">
+      {/* HEADER */}
+      <div className="flex flex-col gap-4 border border-white/10 bg-[#0d0d0d] p-5 md:flex-row md:items-center md:justify-between">
+        <div>
+          <p className="text-xs uppercase tracking-[0.25em] text-red-500">
+            Nuclei Results
+          </p>
+
+          <h1 className="mt-2 text-xl font-semibold text-white">
+            Vulnerability Discovery Assessment
+          </h1>
+
+          <p className="mt-2 break-all text-xs text-gray-500">
+            Target: {scanResult?.target || nuclei?.target || "—"}
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={onBack}
+          className="border border-white/10 px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-400 transition hover:border-red-600/50 hover:text-white"
+        >
+          Back to VAPT
+        </button>
+      </div>
+
+      {/* SCAN SUMMARY */}
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="border border-white/10 bg-[#0d0d0d] p-4">
+          <p className="text-[10px] uppercase tracking-wider text-gray-500">
+            Status
+          </p>
+
+          <p className="mt-2 text-lg font-semibold text-green-400">
+            {String(nuclei?.status || "completed").toUpperCase()}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-4">
+          <p className="text-[10px] uppercase tracking-wider text-gray-500">
+            Findings
+          </p>
+
+          <p className="mt-2 text-lg font-semibold text-white">
+            {nuclei?.finding_count ?? findings.length}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-4">
+          <p className="text-[10px] uppercase tracking-wider text-gray-500">
+            Return Code
+          </p>
+
+          <p className="mt-2 text-lg font-semibold text-white">
+            {nuclei?.return_code ?? "—"}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-4">
+          <p className="text-[10px] uppercase tracking-wider text-gray-500">
+            Target
+          </p>
+
+          <p className="mt-2 break-all text-sm font-semibold text-white">
+            {scanResult?.target || nuclei?.target || "—"}
+          </p>
+        </div>
+      </div>
+
+      {/* SEVERITY SUMMARY */}
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        {severityOrder.map((severity) => (
+          <div
+            key={severity}
+            className="border border-white/10 bg-[#0d0d0d] p-4"
+          >
+            <p className="text-[10px] uppercase tracking-wider text-gray-500">
+              {severity}
+            </p>
+
+            <p className="mt-2 text-lg font-semibold text-white">
+              {severityCounts[severity] || 0}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      {/* FINDINGS */}
+      <div className="border border-white/10 bg-[#0d0d0d]">
+        <div className="flex flex-col gap-2 border-b border-white/10 px-5 py-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wider text-white">
+              Nuclei Findings
+            </p>
+
+            <p className="mt-1 text-[10px] text-gray-500">
+              Normalized vulnerability findings returned by the Nuclei engine.
+            </p>
+          </div>
+
+          <span className="text-[10px] uppercase tracking-wider text-gray-500">
+            {findings.length} finding{findings.length === 1 ? "" : "s"}
+          </span>
+        </div>
+
+        {findings.length === 0 ? (
+          <div className="px-5 py-10 text-center text-sm text-gray-500">
+            No vulnerabilities were reported by Nuclei for this target.
+          </div>
+        ) : (
+          <div className="space-y-3 p-4">
+            {findings.map((finding, index) => {
+              const severity = String(
+                finding?.severity || "INFO"
+              ).toUpperCase();
+
+              const cve = formatList(finding?.cve);
+              const cwe = formatList(finding?.cwe);
+              const tags = formatList(finding?.tags);
+              const references = formatList(finding?.reference);
+
+              const location =
+                finding?.matched_at ||
+                finding?.url ||
+                finding?.host ||
+                "—";
+
+              return (
+                <div
+                  key={`${finding?.template_id || "finding"}-${index}`}
+                  className="border border-white/10 bg-black/20"
+                >
+                  {/* FINDING HEADER */}
+                  <div className="flex flex-col gap-3 border-b border-white/10 p-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className={`border px-2 py-1 text-[9px] font-semibold uppercase tracking-wider ${severityClass(
+                            severity
+                          )}`}
+                        >
+                          {severity}
+                        </span>
+
+                        <span className="border border-white/10 bg-white/5 px-2 py-1 text-[9px] uppercase tracking-wider text-gray-400">
+                          {finding?.type || "finding"}
+                        </span>
+                      </div>
+
+                      <h2 className="mt-3 text-sm font-semibold text-white">
+                        {finding?.name || "Unnamed finding"}
+                      </h2>
+
+                      <p className="mt-2 break-all text-[10px] leading-5 text-gray-500">
+                        {location}
+                      </p>
+                    </div>
+
+                    <div className="shrink-0 text-left lg:text-right">
+                      <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                        Template
+                      </p>
+
+                      <p className="mt-1 break-all text-[10px] font-semibold text-gray-400">
+                        {finding?.template_id || "—"}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* FINDING DETAILS */}
+                  <div className="grid gap-4 p-4 lg:grid-cols-2">
+                    <div>
+                      <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                        Description
+                      </p>
+
+                      <p className="mt-2 text-[10px] leading-5 text-gray-400">
+                        {finding?.description ||
+                          "No description provided by the Nuclei template."}
+                      </p>
+                    </div>
+
+                    <div>
+                      <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                        Template Path
+                      </p>
+
+                      <p className="mt-2 break-all text-[10px] leading-5 text-gray-400">
+                        {finding?.template_path || "—"}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* NETWORK / CLASSIFICATION */}
+                  <div className="grid gap-3 border-t border-white/10 p-4 sm:grid-cols-2 lg:grid-cols-4">
+                    <div>
+                      <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                        Host
+                      </p>
+
+                      <p className="mt-1 break-all text-[10px] text-gray-400">
+                        {finding?.host || "—"}
+                      </p>
+                    </div>
+
+                    <div>
+                      <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                        IP / Port
+                      </p>
+
+                      <p className="mt-1 break-all text-[10px] text-gray-400">
+                        {finding?.ip || "—"}
+                        {finding?.port ? `:${finding.port}` : ""}
+                      </p>
+                    </div>
+
+                    <div>
+                      <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                        Protocol
+                      </p>
+
+                      <p className="mt-1 text-[10px] text-gray-400">
+                        {finding?.protocol || "—"}
+                      </p>
+                    </div>
+
+                    <div>
+                      <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                        CVE / CWE
+                      </p>
+
+                      <p className="mt-1 break-all text-[10px] text-gray-400">
+                        {cve !== "—" ? cve : "—"}
+                        {cwe !== "—" ? ` / ${cwe}` : ""}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* TAGS */}
+                  <div className="border-t border-white/10 p-4">
+                    <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                      Tags
+                    </p>
+
+                    <p className="mt-2 break-all text-[10px] leading-5 text-gray-400">
+                      {tags}
+                    </p>
+                  </div>
+
+                  {/* REFERENCES */}
+                  <div className="border-t border-white/10 p-4">
+                    <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                      References
+                    </p>
+
+                    <p className="mt-2 break-all whitespace-pre-wrap text-[10px] leading-5 text-gray-400">
+                      {references}
+                    </p>
+                  </div>
+
+                  {/* CURL */}
+                  {finding?.curl_command && (
+                    <div className="border-t border-white/10 p-4">
+                      <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                        Reproduction Command
+                      </p>
+
+                      <pre className="mt-2 overflow-x-auto border border-white/5 bg-black/40 p-3 text-[10px] leading-5 text-gray-500">
+                        {finding.curl_command}
+                      </pre>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* RAW RESULT */}
+      <div className="border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-5 py-4">
+          <p className="text-xs font-semibold uppercase tracking-wider text-white">
+            Raw Nuclei Result
+          </p>
+
+          <p className="mt-1 text-[10px] text-gray-500">
+            Complete normalized response returned by the Nuclei integration.
+          </p>
+        </div>
+
+        <pre className="max-h-[500px] overflow-auto p-5 text-[10px] leading-5 text-gray-500">
+          {JSON.stringify(nuclei, null, 2)}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+function NiktoResultsPage({ scanResult, onBack }) {
+  const nikto = scanResult?.nikto || {};
+
+  const rawFindings = Array.isArray(nikto?.findings)
+    ? nikto.findings
+    : Array.isArray(scanResult?.findings)
+      ? scanResult.findings
+      : [];
+
+  const niktoMeta =
+    rawFindings.find((item) => Array.isArray(item?.vulnerabilities)) ||
+    rawFindings[0] ||
+    {};
+
+  const findings = rawFindings.flatMap((item) => {
+    if (Array.isArray(item?.vulnerabilities)) {
+      return item.vulnerabilities.map((vulnerability) => ({
+        ...vulnerability,
+        host: item?.host,
+        ip: item?.ip,
+        port: item?.port,
+        server_banner: item?.server_banner,
+        ssl_info: item?.ssl_info,
+        start_time: item?.start_time,
+        end_time: item?.end_time,
+      }));
+    }
+
+    return [item];
+  });
+
+  const severityCounts = findings.reduce(
+    (counts, finding) => {
+      const severity = String(
+        finding?.severity || finding?.risk || "INFO"
+      ).toLowerCase();
+
+      if (severity === "critical") counts.critical += 1;
+      else if (severity === "high") counts.high += 1;
+      else if (severity === "medium") counts.medium += 1;
+      else if (severity === "low") counts.low += 1;
+      else counts.info += 1;
+
+      return counts;
+    },
+    { critical: 0, high: 0, medium: 0, low: 0, info: 0 }
+  );
+
+  const rawOutput =
+    nikto?.raw_output ||
+    nikto?.stdout ||
+    nikto?.output ||
+    JSON.stringify(nikto, null, 2);
+
+  const safeTarget = String(scanResult?.target || "target")
+    .replace(/^https?:\/\//i, "")
+    .replace(/[^a-z0-9.-]+/gi, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 50) || "target";
+
+  const downloadBlob = (content, filename, type) => {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadJSON = () => {
+    downloadBlob(
+      JSON.stringify(scanResult, null, 2),
+      `SOC-Nikto-${safeTarget}.json`,
+      "application/json;charset=utf-8"
+    );
+  };
+
+  const handleDownloadHTML = () => {
+    const rows = findings
+      .map(
+        (finding) => `
+          <tr>
+            <td>${escapeHtml(finding?.id || "—")}</td>
+            <td>${escapeHtml(finding?.severity || finding?.risk || "INFO")}</td>
+            <td>${escapeHtml(finding?.message || finding?.title || finding?.description || "—")}</td>
+            <td>${escapeHtml(finding?.url || finding?.uri || "—")}</td>
+            <td><pre>${escapeHtml(finding?.evidence || finding?.output || "")}</pre></td>
+          </tr>
+        `
+      )
+      .join("");
+
+    const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>SOC Platform — Nikto Report</title>
+<style>
+body{font-family:Arial,sans-serif;background:#080808;color:#eee;padding:30px}
+h1,h2{color:#ef3340}
+.card{border:1px solid #333;background:#0d0d0d;padding:16px;margin:12px 0}
+table{width:100%;border-collapse:collapse;margin-top:16px}
+th,td{border:1px solid #333;padding:8px;text-align:left;vertical-align:top;font-size:12px}
+th{background:#151515}
+pre{white-space:pre-wrap;word-break:break-word;color:#aaa}
+</style>
+</head>
+<body>
+<h1>SOC Platform — Nikto Security Report</h1>
+<div class="card">
+<b>Target:</b> ${escapeHtml(scanResult?.target || "—")}<br>
+<b>Profile:</b> ${escapeHtml(nikto?.scan_type || scanResult?.scan_profile || "—")}<br>
+<b>Status:</b> ${escapeHtml(nikto?.status || "completed")}<br>
+<b>Findings:</b> ${findings.length}<br>
+<b>Generated:</b> ${escapeHtml(new Date().toLocaleString())}
+</div>
+<h2>Severity Summary</h2>
+<div class="card">
+Critical: ${severityCounts.critical} |
+High: ${severityCounts.high} |
+Medium: ${severityCounts.medium} |
+Low: ${severityCounts.low} |
+Info: ${severityCounts.info}
+</div>
+<h2>Nikto Findings</h2>
+<table>
+<thead><tr><th>ID</th><th>Severity</th><th>Finding</th><th>URL</th><th>Evidence</th></tr></thead>
+<tbody>${rows || "<tr><td colspan='5'>No findings returned.</td></tr>"}</tbody>
+</table>
+<h2>Raw Nikto Output</h2>
+<pre>${escapeHtml(rawOutput)}</pre>
+</body>
+</html>`;
+
+    downloadBlob(
+      html,
+      `SOC-Nikto-${safeTarget}.html`,
+      "text/html;charset=utf-8"
+    );
+  };
+
+  const handleDownloadPDF = () => {
+    const doc = new jsPDF();
+    let y = 20;
+
+    const add = (value, size = 9, gap = 6) => {
+      doc.setFontSize(size);
+      const lines = doc.splitTextToSize(String(value ?? "—"), 170);
+
+      if (y + lines.length * 5 > 275) {
+        doc.addPage();
+        y = 20;
+      }
+
+      doc.text(lines, 20, y);
+      y += lines.length * 5 + gap;
+    };
+
+    doc.setFont("helvetica", "bold");
+    add("SOC Platform — Nikto Security Report", 18, 10);
+    doc.setFont("helvetica", "normal");
+    add(`Target: ${scanResult?.target || "—"}`);
+    add(`Profile: ${nikto?.scan_type || scanResult?.scan_profile || "—"}`);
+    add(`Status: ${nikto?.status || "completed"}`);
+    add(`Total findings: ${findings.length}`);
+
+    add("Severity Summary", 12, 5);
+    add(
+      `Critical: ${severityCounts.critical} | High: ${severityCounts.high} | Medium: ${severityCounts.medium} | Low: ${severityCounts.low} | Info: ${severityCounts.info}`,
+      8,
+      6
+    );
+
+    add("Nikto Findings", 12, 5);
+
+    if (!findings.length) {
+      add("No findings returned.", 8, 5);
+    } else {
+      findings.forEach((finding, index) => {
+        add(
+          `${index + 1}. ${finding?.severity || finding?.risk || "INFO"} — ${finding?.message || finding?.title || finding?.description || "Finding"}`,
+          8,
+          3
+        );
+
+        add(
+          [
+            finding?.id ? `ID: ${finding.id}` : null,
+            finding?.url || finding?.uri
+              ? `URL: ${finding.url || finding.uri}`
+              : null,
+            finding?.evidence || finding?.output
+              ? `Evidence: ${finding.evidence || finding.output}`
+              : null,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+          7,
+          5
+        );
+      });
+    }
+
+    add("Raw Nikto Output", 12, 5);
+    add(rawOutput, 7, 4);
+
+    doc.setFontSize(8);
+    doc.text(
+      "SOC Platform • Authorized web-server security assessment report",
+      20,
+      285
+    );
+
+    doc.save(`SOC-Nikto-${safeTarget}.pdf`);
+  };
+
+  return (
+    <div>
+      <div className="mb-6 flex flex-col gap-4 border-b border-white/10 pb-5 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.3em] text-red-500">
+            Security Workspace / Nikto Results
+          </p>
+          <h1 className="mt-2 text-3xl font-bold text-white">
+            Nikto Scan Report
+          </h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Dedicated web-server assessment results for{" "}
+            {scanResult?.target || "the scanned target"}
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={onBack}
+          className="border border-white/10 px-4 py-2 text-xs text-gray-400 hover:border-red-600 hover:text-white"
+        >
+          ← Back to VAPT Testing
+        </button>
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d] p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-5">
+          <div>
+            <p className="text-xs uppercase tracking-wider text-gray-500">
+              Nikto Security Intelligence
+            </p>
+            <p className="mt-1 text-sm text-white">
+              {scanResult?.target || "—"}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleDownloadJSON}
+              className="border border-white/10 px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-300 hover:border-red-500/50 hover:text-white"
+            >
+              Download JSON
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadHTML}
+              className="border border-white/10 px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-300 hover:border-red-500/50 hover:text-white"
+            >
+              Download HTML
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadPDF}
+              className="bg-red-600 px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-white hover:bg-red-700"
+            >
+              Download PDF
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          {[
+            ["Target", scanResult?.target || "—"],
+            ["Profile", nikto?.scan_type || scanResult?.scan_profile || "—"],
+            ["Status", nikto?.status || "completed"],
+            ["Findings", findings.length],
+            ["Elapsed", nikto?.elapsed_seconds != null ? `${nikto.elapsed_seconds}s` : "—"],
+          ].map(([label, value]) => (
+            <div
+              key={label}
+              className="border border-white/10 bg-[#080808] p-4"
+            >
+              <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                {label}
+              </p>
+              <p className="mt-2 truncate text-sm font-semibold text-white">
+                {value}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-5 grid gap-4 lg:grid-cols-2">
+          <div className="border border-white/10 bg-[#080808] p-5">
+            <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+              Finding Severity
+            </p>
+
+            <div className="mt-4 space-y-3">
+              {Object.entries(severityCounts).map(([severity, count]) => (
+                <div key={severity}>
+                  <div className="flex justify-between text-[10px]">
+                    <span className="capitalize text-gray-400">
+                      {severity}
+                    </span>
+                    <span className="text-white">{count}</span>
+                  </div>
+                  <div className="mt-1 h-2 bg-white/5">
+                    <div
+                      className="h-full bg-red-600"
+                      style={{
+                        width: `${findings.length ? Math.min(100, (count / findings.length) * 100) : 0}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="border border-white/10 bg-[#080808] p-5">
+            <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+              Web Server Assessment
+            </p>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Host
+                </p>
+                <p className="mt-1 break-all text-xs text-white">
+                  {niktoMeta?.host || scanResult?.target || "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  IP Address
+                </p>
+                <p className="mt-1 text-xs text-white">
+                  {niktoMeta?.ip || "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Port
+                </p>
+                <p className="mt-1 text-xs text-white">
+                  {niktoMeta?.port || "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Web Server
+                </p>
+                <p className="mt-1 text-xs text-white">
+                  {niktoMeta?.server || "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Server Banner
+                </p>
+                <p className="mt-1 break-all text-xs text-white">
+                  {niktoMeta?.banner || niktoMeta?.server_banner || "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  SSL / TLS
+                </p>
+                <p className="mt-1 break-all text-xs text-white">
+                  {typeof niktoMeta?.ssl_info === "object" &&
+                  niktoMeta?.ssl_info !== null
+                    ? Object.entries(niktoMeta.ssl_info)
+                        .map(([key, value]) => {
+                          const displayValue =
+                            typeof value === "object" && value !== null
+                              ? JSON.stringify(value)
+                              : String(value ?? "—");
+
+                          return `${key}: ${displayValue}`;
+                        })
+                        .join(" • ")
+                    : niktoMeta?.ssl_info || "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Start Time
+                </p>
+                <p className="mt-1 text-xs text-white">
+                  {niktoMeta?.start_time
+                    ? new Date(niktoMeta.start_time).toLocaleString()
+                    : "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  End Time
+                </p>
+                <p className="mt-1 text-xs text-white">
+                  {niktoMeta?.end_time
+                    ? new Date(niktoMeta.end_time).toLocaleString()
+                    : "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Command Profile
+                </p>
+                <p className="mt-1 text-xs text-white">
+                  {nikto?.command_profile ||
+                    "Nikto standard web server assessment"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Return Code
+                </p>
+                <p className="mt-1 text-xs text-white">
+                  {nikto?.return_code ?? "—"}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 border border-white/10 bg-[#080808] p-5">
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+            Nikto Findings
+          </p>
+
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full min-w-[900px] text-left text-xs">
+              <thead className="border-b border-white/10 text-[9px] uppercase tracking-wider text-gray-600">
+                <tr>
+                  <th className="px-3 py-2">ID</th>
+                  <th className="px-3 py-2">Severity</th>
+                  <th className="px-3 py-2">Finding</th>
+                  <th className="px-3 py-2">URL</th>
+                  <th className="px-3 py-2">Evidence</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {findings.map((finding, index) => (
+                  <tr
+                    key={`${finding?.id || "finding"}-${index}`}
+                    className="border-b border-white/5"
+                  >
+                    <td className="px-3 py-3 text-gray-500">
+                      {finding?.id || "—"}
+                    </td>
+                    <td className="px-3 py-3 text-yellow-400">
+                      {finding?.severity || finding?.risk || "INFO"}
+                    </td>
+                    <td className="max-w-[360px] px-3 py-3 text-gray-300">
+                      {finding?.message ||
+                        finding?.title ||
+                        finding?.description ||
+                        "—"}
+                    </td>
+                    <td className="max-w-[220px] truncate px-3 py-3 text-gray-500">
+                      {finding?.url || finding?.uri || "—"}
+                    </td>
+                    <td className="max-w-[420px] px-3 py-3 text-gray-600">
+                      <pre className="max-h-32 overflow-auto whitespace-pre-wrap text-[9px] leading-4">
+                        {typeof (finding?.evidence ?? finding?.output) === "string"
+                          ? (finding?.evidence ?? finding?.output)
+                          : JSON.stringify(finding?.evidence ?? finding?.output ?? "—", null, 2)}
+                      </pre>
+                    </td>
+                  </tr>
+                ))}
+
+                {findings.length === 0 && (
+                  <tr>
+                    <td
+                      colSpan="5"
+                      className="px-3 py-8 text-center text-xs text-gray-600"
+                    >
+                      No Nikto findings were returned.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {Array.isArray(nikto?.errors) && nikto.errors.length > 0 && (
+          <div className="mt-4 border border-yellow-600/20 bg-yellow-600/5 p-5">
+            <p className="text-xs font-semibold uppercase tracking-wider text-yellow-500">
+              Warnings / Errors
+            </p>
+            <div className="mt-3 space-y-2">
+              {nikto.errors.map((error, index) => (
+                <p key={index} className="text-xs leading-5 text-gray-500">
+                  {error}
+                </p>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="mt-4 border border-white/10 bg-[#080808] p-5">
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+            Raw Nikto Output / Evidence
+          </p>
+          <pre className="mt-3 max-h-[420px] overflow-auto whitespace-pre-wrap text-[10px] leading-5 text-gray-500">
+            {rawOutput}
+          </pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ZapResultsPage({ scanResult, onBack }) {
+  const [expandedFinding, setExpandedFinding] = useState(null);
+  const [riskFilter, setRiskFilter] = useState("ALL");
+  const [history, setHistory] = useState([]);
+  const [displayResult, setDisplayResult] = useState(scanResult || null);
+  const [showConfig, setShowConfig] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [config, setConfig] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("zap_scan_config")) || {
+        scanPolicyName: "Dev CICD",
+        recurse: true,
+        inScopeOnly: false,
+        followRedirects: true,
+      };
+    } catch {
+      return {
+        scanPolicyName: "Dev CICD",
+        recurse: true,
+        inScopeOnly: false,
+        followRedirects: true,
+      };
+    }
+  });
+
+  const safeText = (value, fallback = "—") => {
+    if (value === null || value === undefined || value === "") return fallback;
+    if (typeof value === "object") {
+      try { return JSON.stringify(value); } catch { return fallback; }
+    }
+    return String(value);
+  };
+
+  const alerts = Array.isArray(displayResult?.alerts)
+    ? displayResult.alerts
+    : Array.isArray(displayResult?.findings)
+      ? displayResult.findings
+      : [];
+
+  const getRisk = (finding) => String(
+    finding?.risk || finding?.severity || finding?.risk_level || "Informational"
+  ).toUpperCase();
+
+  const normalizeRisk = (risk) => {
+    const value = String(risk || "").toUpperCase();
+    return value === "INFO" ? "INFORMATIONAL" : value;
+  };
+
+  const counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFORMATIONAL: 0 };
+  alerts.forEach((finding) => {
+    const risk = normalizeRisk(getRisk(finding));
+    if (counts[risk] !== undefined) counts[risk] += 1;
+  });
+
+  const filteredAlerts = riskFilter === "ALL"
+    ? alerts
+    : alerts.filter((finding) => normalizeRisk(getRisk(finding)) === riskFilter);
+
+  const riskClass = (risk) => {
+    const value = String(risk || "").toLowerCase();
+    if (value.includes("critical")) return "border-red-500/40 bg-red-500/10 text-red-400";
+    if (value.includes("high")) return "border-orange-500/40 bg-orange-500/10 text-orange-300";
+    if (value.includes("medium")) return "border-yellow-500/40 bg-yellow-500/10 text-yellow-300";
+    if (value.includes("low")) return "border-blue-500/40 bg-blue-500/10 text-blue-300";
+    return "border-purple-500/40 bg-purple-500/10 text-purple-300";
+  };
+
+  const getCwe = (finding) => {
+    const raw = finding?.cweid ?? finding?.cwe_id ?? finding?.cwe;
+    if (raw === null || raw === undefined || raw === "" || String(raw) === "-1") return null;
+    const value = String(raw);
+    return value.toUpperCase().startsWith("CWE-") ? value : `CWE-${value}`;
+  };
+
+  const cweInfo = {
+    "CWE-693": "Protection Mechanism Failure — a required security control is missing or ineffective.",
+    "CWE-264": "Permissions, Privileges, and Access Controls — access-control behavior is incorrectly implemented or configured.",
+    "CWE-497": "Exposure of Sensitive System Information — implementation details may be disclosed to an untrusted party.",
+  };
+
+  const getOwaspMappings = (finding) => {
+    const tags = finding?.tags && typeof finding.tags === "object" ? finding.tags : {};
+    return Object.entries(tags)
+      .filter(([key, value]) => /OWASP_(2025|2021|2017)_/.test(key) && value)
+      .map(([key, url]) => ({ key, url }));
+  };
+
+  const getReferences = (finding) => {
+    const raw = finding?.reference || finding?.references;
+    if (!raw) return [];
+    if (Array.isArray(raw)) return raw.filter(Boolean).map(String);
+    return String(raw).split(/\r?\n+/).map((item) => item.trim()).filter(Boolean);
+  };
+
+  const escapeHtml = (value) => String(value ?? "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+
+  const exportJson = () => {
+    const blob = new Blob([JSON.stringify(displayResult || {}, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `zap-report-${Date.now()}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportCsv = () => {
+    const rows = [["Risk", "Alert", "URL", "Plugin ID", "CWE", "Confidence", "Method", "Evidence", "Solution"]];
+    alerts.forEach((finding) => rows.push([
+      getRisk(finding), finding?.alert || finding?.name || "", finding?.url || finding?.nodeName || "",
+      finding?.pluginId || finding?.plugin_id || "", getCwe(finding) || "", finding?.confidence || "",
+      finding?.method || "", finding?.evidence || finding?.otherinfo || "", finding?.solution || finding?.remediation || "",
+    ]));
+    const csv = rows.map((row) => row.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `zap-report-${Date.now()}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportHtml = () => {
+    const rows = alerts.map((finding) => `
+      <section style="margin:24px 0;padding:20px;border:1px solid #ddd">
+        <h2>${escapeHtml(finding?.alert || finding?.name || "ZAP Finding")}</h2>
+        <p><b>Risk:</b> ${escapeHtml(getRisk(finding))} &nbsp; <b>CWE:</b> ${escapeHtml(getCwe(finding) || "N/A")}</p>
+        <p><b>URL:</b> ${escapeHtml(finding?.url || finding?.nodeName || "")}</p>
+        <h3>Description</h3><p>${escapeHtml(finding?.description || "No description provided.")}</p>
+        <h3>Evidence</h3><pre>${escapeHtml(finding?.evidence || finding?.otherinfo || "No evidence provided.")}</pre>
+        <h3>Solution</h3><p>${escapeHtml(finding?.solution || finding?.remediation || "No solution provided.")}</p>
+      </section>`).join("");
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>OWASP ZAP Report</title><style>body{font-family:Arial,sans-serif;max-width:1000px;margin:40px auto;color:#222}pre{white-space:pre-wrap;background:#f5f5f5;padding:12px}h1{border-bottom:2px solid #d00;padding-bottom:10px}</style></head><body><h1>OWASP ZAP Security Report</h1><p><b>Target:</b> ${escapeHtml(displayResult?.target || "")}</p><p><b>Scan ID:</b> ${escapeHtml(displayResult?.scan_id || "")}</p>${rows}</body></html>`;
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a"); link.href = url; link.download = `zap-report-${Date.now()}.html`; link.click(); URL.revokeObjectURL(url);
+  };
+
+  useEffect(() => {
+    if (!scanResult) return;
+    setDisplayResult(scanResult);
+    setRiskFilter("ALL");
+    setExpandedFinding(null);
+    try {
+      const previous = JSON.parse(localStorage.getItem("zap_scan_history") || "[]");
+      const entry = {
+        ...scanResult,
+        saved_at: new Date().toISOString(),
+        history_key: `${scanResult.scan_id || "scan"}-${scanResult.target || "target"}`,
+      };
+      const withoutDuplicate = previous.filter((item) => item.history_key !== entry.history_key);
+      const next = [entry, ...withoutDuplicate].slice(0, 20);
+      localStorage.setItem("zap_scan_history", JSON.stringify(next));
+      setHistory(next);
+    } catch {
+      setHistory([]);
+    }
+  }, [scanResult]);
+
+  useEffect(() => {
+    try {
+      setHistory(JSON.parse(localStorage.getItem("zap_scan_history") || "[]"));
+    } catch { setHistory([]); }
+  }, []);
+
+  const saveConfig = (next) => {
+    setConfig(next);
+    localStorage.setItem("zap_scan_config", JSON.stringify(next));
+  };
+
+  const clearHistory = () => {
+    localStorage.removeItem("zap_scan_history");
+    setHistory([]);
+  };
+
+  return (
+    <div className="min-h-full bg-[#070707] px-6 py-8 text-white lg:px-8">
+      <div className="mx-auto max-w-[1500px]">
+        <div className="border border-red-600/30 bg-[#0d0d0d]">
+          <div className="flex flex-col gap-5 border-b border-white/10 px-7 py-7 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <p className="text-xs uppercase tracking-[0.25em] text-red-500">Security Assessment</p>
+              <h1 className="mt-2 text-3xl font-black tracking-tight">OWASP ZAP <span className="text-red-500">RESULTS</span></h1>
+              <p className="mt-2 text-sm text-gray-500">Dedicated results from the OWASP ZAP web application security scan.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={exportHtml} className="border border-white/10 px-4 py-2 text-[10px] uppercase tracking-wider text-gray-300 hover:bg-white/5">Export HTML</button>
+              <button type="button" onClick={exportCsv} className="border border-white/10 px-4 py-2 text-[10px] uppercase tracking-wider text-gray-300 hover:bg-white/5">Export CSV</button>
+              <button type="button" onClick={exportJson} className="border border-white/10 px-4 py-2 text-[10px] uppercase tracking-wider text-gray-300 hover:bg-white/5">Export JSON</button>
+              <button type="button" onClick={() => setShowHistory((v) => !v)} className="border border-red-600/40 px-4 py-2 text-[10px] uppercase tracking-wider text-red-400 hover:bg-red-600/10">Scan History</button>
+              <button type="button" onClick={() => setShowConfig((v) => !v)} className="border border-white/10 px-4 py-2 text-[10px] uppercase tracking-wider text-gray-300 hover:bg-white/5">ZAP Configuration</button>
+              <button type="button" onClick={onBack} className="border border-red-600/40 bg-red-600/5 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-red-400 hover:bg-red-600/10">← Back to VAPT</button>
+            </div>
+          </div>
+
+          {showHistory && (
+            <div className="border-b border-white/10 bg-[#090909] p-6">
+              <div className="flex items-center justify-between gap-3"><div><p className="text-xs uppercase tracking-wider text-red-400">ZAP Scan History</p><p className="mt-1 text-[10px] text-gray-600">Completed scans saved locally in this browser.</p></div><button onClick={clearHistory} className="border border-red-500/20 px-3 py-2 text-[9px] text-red-400">Clear History</button></div>
+              <div className="mt-4 space-y-2">{history.length === 0 ? <p className="text-xs text-gray-600">No saved scans.</p> : history.map((item) => <button key={item.history_key} onClick={() => { setDisplayResult(item); setRiskFilter("ALL"); setExpandedFinding(null); }} className="block w-full border border-white/10 bg-black/20 p-3 text-left hover:bg-white/5"><span className="text-xs font-semibold text-white">{safeText(item.target)}</span><span className="ml-3 text-[9px] text-gray-600">Scan {safeText(item.scan_id)} · {item.saved_at ? new Date(item.saved_at).toLocaleString() : ""}</span></button>)}</div>
+            </div>
+          )}
+
+          {showConfig && (
+            <div className="border-b border-white/10 bg-[#090909] p-6">
+              <p className="text-xs uppercase tracking-wider text-red-400">ZAP Scan Configuration</p>
+              <p className="mt-1 text-[10px] text-gray-600">These settings are saved locally and used for the next OWASP ZAP scan.</p>
+              <div className="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                <label className="border border-white/10 p-4"><span className="text-[9px] uppercase tracking-wider text-gray-600">Scan Policy</span><select value={config.scanPolicyName} onChange={(e) => saveConfig({...config, scanPolicyName:e.target.value})} className="mt-2 w-full bg-black px-2 py-2 text-xs text-white"><option>Dev CICD</option><option>Default Policy</option></select></label>
+                <label className="flex items-center gap-3 border border-white/10 p-4 text-xs"><input type="checkbox" checked={config.recurse} onChange={(e) => saveConfig({...config, recurse:e.target.checked})}/><span>Recurse target paths</span></label>
+                <label className="flex items-center gap-3 border border-white/10 p-4 text-xs"><input type="checkbox" checked={config.inScopeOnly} onChange={(e) => saveConfig({...config, inScopeOnly:e.target.checked})}/><span>Scan in-scope URLs only</span></label>
+                <label className="flex items-center gap-3 border border-white/10 p-4 text-xs"><input type="checkbox" checked={config.followRedirects} onChange={(e) => saveConfig({...config, followRedirects:e.target.checked})}/><span>Follow redirects</span></label>
+              </div>
+            </div>
+          )}
+
+          <div className="grid gap-4 p-6 md:grid-cols-2 xl:grid-cols-4">
+            <div className="border border-white/10 bg-[#090909] p-5"><p className="text-[10px] uppercase tracking-wider text-gray-600">Target</p><p className="mt-2 break-all text-sm font-semibold text-white">{safeText(displayResult?.target)}</p></div>
+            <div className="border border-white/10 bg-[#090909] p-5"><p className="text-[10px] uppercase tracking-wider text-gray-600">Scan Status</p><p className="mt-2 text-sm font-semibold text-emerald-400">COMPLETED</p></div>
+            <div className="border border-white/10 bg-[#090909] p-5"><p className="text-[10px] uppercase tracking-wider text-gray-600">Scan ID</p><p className="mt-2 text-sm font-semibold text-white">{safeText(displayResult?.scan_id)}</p></div>
+            <div className="border border-white/10 bg-[#090909] p-5"><p className="text-[10px] uppercase tracking-wider text-gray-600">Total Findings</p><p className="mt-2 text-2xl font-black text-red-500">{alerts.length}</p></div>
+          </div>
+        </div>
+
+        <div className="mt-6 grid gap-4 md:grid-cols-5">
+          {[["CRITICAL",counts.CRITICAL],["HIGH",counts.HIGH],["MEDIUM",counts.MEDIUM],["LOW",counts.LOW],["INFO",counts.INFORMATIONAL]].map(([label,value]) => <div key={label} className="border border-white/10 bg-[#0b0b0b] p-5"><p className="text-[10px] uppercase tracking-wider text-gray-600">{label}</p><p className="mt-2 text-2xl font-black text-white">{value}</p></div>)}
+        </div>
+
+        <div className="mt-6 border border-white/10 bg-[#0b0b0b]">
+          <div className="border-b border-white/10 px-6 py-5"><p className="text-xs uppercase tracking-wider text-red-400">ZAP Findings</p><h2 className="mt-1 text-lg font-semibold text-white">Detected Web Application Issues</h2><p className="mt-2 text-[10px] text-gray-600">Filter by risk and select a finding to expand its security details, evidence and remediation information.</p></div>
+          <div className="border-b border-white/10 px-6 py-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-[9px] uppercase tracking-wider text-gray-600">Risk Filter</p><p className="mt-1 text-xs text-gray-400">Showing {filteredAlerts.length} of {alerts.length} finding(s)</p></div><div className="flex flex-wrap gap-2">{[["ALL",alerts.length],["CRITICAL",counts.CRITICAL],["HIGH",counts.HIGH],["MEDIUM",counts.MEDIUM],["LOW",counts.LOW],["INFORMATIONAL",counts.INFORMATIONAL]].map(([label,value]) => <button key={label} type="button" onClick={() => {setRiskFilter(label);setExpandedFinding(null);}} className={`border px-3 py-2 text-[9px] font-semibold uppercase tracking-wider ${riskFilter===label ? "border-red-500/60 bg-red-500/10 text-red-400" : "border-white/10 text-gray-500 hover:bg-white/5"}`}>{label === "INFORMATIONAL" ? "INFO" : label} ({value})</button>)}</div></div></div>
+
+          <div className="space-y-3 p-6">
+            {filteredAlerts.length === 0 ? <div className="border border-white/10 bg-[#080808] p-6 text-sm text-gray-500">No findings match the selected risk filter.</div> : filteredAlerts.map((finding,index) => {
+              const risk=getRisk(finding), title=finding?.alert||finding?.name||`OWASP ZAP Finding ${index+1}`, cwe=getCwe(finding), owaspMappings=getOwaspMappings(finding), references=getReferences(finding), isExpanded=expandedFinding===index;
+              const findingId=`${finding?.pluginId||finding?.plugin_id||index}-${finding?.url||finding?.affected_url||"finding"}-${index}`;
+              return <div key={findingId} className={`overflow-hidden border bg-[#080808] transition ${isExpanded?"border-red-500/30":"border-white/10"}`}>
+                <button type="button" onClick={()=>setExpandedFinding(isExpanded?null:index)} aria-expanded={isExpanded} className="w-full px-5 py-5 text-left transition hover:bg-white/[0.02]"><div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className={`border px-2 py-1 text-[9px] font-bold uppercase tracking-wider ${riskClass(risk)}`}>{risk}</span>{finding?.pluginId&&<span className="text-[9px] uppercase tracking-wider text-gray-600">Plugin {finding.pluginId}</span>}{cwe&&<span className="text-[9px] uppercase tracking-wider text-gray-600">{cwe}</span>}{finding?.confidence&&<span className="text-[9px] uppercase tracking-wider text-gray-600">Confidence {finding.confidence}</span>}</div><h3 className="mt-3 text-base font-bold text-white">{safeText(title)}</h3><p className="mt-2 break-all text-[10px] text-gray-500">{safeText(finding?.url||finding?.nodeName)}</p></div><div className="flex shrink-0 items-center gap-3 text-[10px] text-gray-600">{finding?.method&&<span>{finding.method}</span>}<span className="border border-white/10 px-2 py-1 text-gray-400">{isExpanded?"HIDE DETAILS":"VIEW DETAILS"}</span><span className="text-base text-red-400">{isExpanded?"−":"+"}</span></div></div></button>
+                {isExpanded&&<div className="border-t border-white/10 px-5 pb-6 pt-5">
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{[["Plugin ID",finding?.pluginId||finding?.plugin_id],["Confidence",finding?.confidence],["Method",finding?.method],["Parameter",finding?.param||finding?.parameter]].map(([label,value])=><div key={label} className="border border-white/10 bg-black/20 p-4"><p className="text-[9px] uppercase tracking-wider text-gray-600">{label}</p><p className="mt-2 break-all text-xs font-semibold text-white">{safeText(value)}</p></div>)}</div>
+                  <div className="mt-5 grid gap-5 lg:grid-cols-2"><div className="border border-white/10 bg-black/20 p-5"><p className="text-[10px] uppercase tracking-wider text-red-400">Description</p><p className="mt-3 text-xs leading-6 text-gray-300">{safeText(finding?.description,"No description was provided by ZAP.")}</p></div><div className="border border-white/10 bg-black/20 p-5"><p className="text-[10px] uppercase tracking-wider text-red-400">Remediation / Solution</p><p className="mt-3 text-xs leading-6 text-gray-300">{safeText(finding?.solution||finding?.remediation,"No remediation guidance was provided by ZAP.")}</p></div></div>
+                  <div className="mt-5 border border-white/10 bg-black/20 p-5"><p className="text-[10px] uppercase tracking-wider text-red-400">Evidence</p>{finding?.evidence||finding?.otherinfo?<pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words text-[10px] leading-5 text-gray-400">{safeText(finding?.evidence||finding?.otherinfo)}</pre>:<p className="mt-3 text-xs text-gray-600">No evidence was returned by ZAP.</p>}</div>
+                  <div className="mt-5 grid gap-5 lg:grid-cols-2"><div className="border border-white/10 bg-black/20 p-5"><p className="text-[10px] uppercase tracking-wider text-red-400">CWE Details</p>{cwe?<><a href={`https://cwe.mitre.org/data/definitions/${String(cwe).replace("CWE-","")}.html`} target="_blank" rel="noreferrer" className="mt-3 inline-flex text-xs font-semibold text-blue-400 underline underline-offset-4">{cwe} — View MITRE CWE ↗</a><p className="mt-3 text-xs leading-5 text-gray-400">{cweInfo[cwe]||"Detailed description is maintained by MITRE. Use the link above for the authoritative CWE entry."}</p></>:<p className="mt-3 text-xs text-gray-600">No CWE mapping was returned.</p>}</div><div className="border border-white/10 bg-black/20 p-5"><p className="text-[10px] uppercase tracking-wider text-red-400">OWASP Mapping</p>{owaspMappings.length>0?<div className="mt-3 space-y-2">{owaspMappings.map((mapping)=><a key={`${mapping.key}-${mapping.url}`} href={mapping.url} target="_blank" rel="noreferrer" className="block break-all text-xs font-semibold text-red-400 underline underline-offset-4">{mapping.key.replace(/_/g," ")} ↗</a>)}</div>:<p className="mt-3 text-xs text-gray-600">No OWASP mapping was returned by ZAP for this alert.</p>}</div></div>
+                  <div className="mt-5 border border-white/10 bg-black/20 p-5"><p className="text-[10px] uppercase tracking-wider text-red-400">References</p>{references.length>0?<div className="mt-3 space-y-2">{references.map((reference,referenceIndex)=>/^https?:\/\//i.test(reference)?<a key={`${reference}-${referenceIndex}`} href={reference} target="_blank" rel="noreferrer" className="block break-all text-[10px] leading-5 text-blue-400 underline">{reference} ↗</a>:<p key={`${reference}-${referenceIndex}`} className="text-[10px] leading-5 text-gray-500">{reference}</p>)}</div>:<p className="mt-3 text-xs text-gray-600">No references were returned by ZAP.</p>}</div>
+                  {finding?.tags&&typeof finding.tags==="object"&&<div className="mt-5 border border-white/10 bg-black/20 p-5"><p className="text-[10px] uppercase tracking-wider text-red-400">ZAP Alert Tags</p><div className="mt-3 flex flex-wrap gap-2">{Object.keys(finding.tags).map(tag=><span key={tag} className="border border-white/10 px-2 py-1 text-[9px] uppercase tracking-wider text-gray-500">{tag}</span>)}</div></div>}
+                </div>}
+              </div>;
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MultiToolResultsPage({ scanResult, onBack }) {
+  const results = scanResult?.results || {};
+  const statuses = scanResult?.tool_statuses || {};
+  const tools = Array.isArray(scanResult?.tools) ? scanResult.tools : [];
+
+  const getToolResult = (toolId) => results?.[toolId] || null;
+
+  const safeText = (value, fallback = "—") => {
+    if (value === null || value === undefined || value === "") return fallback;
+    if (typeof value === "object") {
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return fallback;
+      }
+    }
+    return String(value);
+  };
+
+  const formatStatus = (toolId) => {
+    const status = statuses?.[toolId];
+    if (status) return status;
+
+    const result = getToolResult(toolId);
+    if (result?.status === "failed") return "Failed";
+    if (result?.status === "completed_with_errors") {
+      return "Completed with warnings";
+    }
+    return result ? "Completed" : "No result";
+  };
+
+  const statusClass = (status) => {
+    const value = String(status || "").toLowerCase();
+
+    if (value.includes("failed") || value.includes("timeout")) {
+      return "border-red-500/40 bg-red-500/10 text-red-400";
+    }
+
+    if (value.includes("warning")) {
+      return "border-yellow-500/40 bg-yellow-500/10 text-yellow-300";
+    }
+
+    if (value.includes("completed")) {
+      return "border-emerald-500/40 bg-emerald-500/10 text-emerald-400";
+    }
+
+    return "border-blue-500/30 bg-blue-500/10 text-blue-300";
+  };
+
+  // Accept both the normalized multi-tool payloads and the native
+  // tool payloads. This keeps the result page independent of which
+  // specialized poller supplied the completed result.
+
+  const nmap = getToolResult("nmap") || {};
+  const nmapData =
+    nmap?.nmap ||
+    (nmap?.results ? nmap : {});
+  const nmapNativeResults = nmapData?.results || {};
+  const nmapHosts = Array.isArray(nmapNativeResults?.hosts)
+    ? nmapNativeResults.hosts
+    : [];
+
+  const nmapPorts = nmapHosts.flatMap((host) =>
+    Array.isArray(host?.ports)
+      ? host.ports.map((port) => ({
+          ...port,
+          host:
+            host?.addresses?.[0]?.address ||
+            host?.host ||
+            host?.ip ||
+            "—",
+        }))
+      : []
+  );
+
+  const nmapOpenPorts = nmapPorts.filter(
+    (port) => String(port?.state || "").toLowerCase() === "open"
+  );
+
+  const nmapScripts = nmapHosts.flatMap((host) => {
+    const hostScripts = Array.isArray(host?.scripts)
+      ? host.scripts.map((script) => ({
+          ...script,
+          host:
+            host?.addresses?.[0]?.address ||
+            host?.host ||
+            host?.ip ||
+            "—",
+          port: null,
+        }))
+      : [];
+
+    const portScripts = Array.isArray(host?.ports)
+      ? host.ports.flatMap((port) =>
+          Array.isArray(port?.scripts)
+            ? port.scripts.map((script) => ({
+                ...script,
+                host:
+                  host?.addresses?.[0]?.address ||
+                  host?.host ||
+                  host?.ip ||
+                  "—",
+                port: port?.port,
+              }))
+            : []
+        )
+      : [];
+
+    return [...hostScripts, ...portScripts];
+  });
+
+  const nmapOs = nmapHosts.flatMap((host) =>
+    Array.isArray(host?.os_matches) ? host.os_matches : []
+  );
+
+  const masscan = getToolResult("masscan") || {};
+  const masscanData = masscan?.results || masscan || {};
+  const masscanHosts = Array.isArray(masscanData?.hosts)
+    ? masscanData.hosts
+    : [];
+
+  const masscanOpenPorts = masscanHosts.flatMap((host) =>
+    Array.isArray(host?.ports)
+      ? host.ports
+          .filter(
+            (port) =>
+              String(port?.state || "").toLowerCase() === "open"
+          )
+          .map((port) => ({
+            ...port,
+            host: host?.host || host?.ip || "—",
+          }))
+      : []
+  );
+
+  const nikto = getToolResult("nikto") || {};
+  const niktoData =
+    nikto?.nikto ||
+    nikto?.results ||
+    nikto;
+
+  const niktoRawFindings = Array.isArray(niktoData?.findings)
+    ? niktoData.findings
+    : Array.isArray(nikto?.findings)
+      ? nikto.findings
+      : [];
+
+  const niktoFindings = niktoRawFindings.flatMap((item) => {
+    if (Array.isArray(item?.vulnerabilities)) {
+      return item.vulnerabilities.map((vulnerability) => ({
+        ...vulnerability,
+        host: item?.host,
+        ip: item?.ip,
+        port: item?.port,
+        server_banner: item?.server_banner,
+        ssl_info: item?.ssl_info,
+      }));
+    }
+
+    return [item];
+  });
+
+  const nuclei = getToolResult("nuclei") || {};
+  const nucleiData =
+    nuclei?.nuclei ||
+    nuclei?.results ||
+    nuclei;
+
+  const nucleiFindings = Array.isArray(nucleiData?.findings)
+    ? nucleiData.findings
+    : Array.isArray(nuclei?.findings)
+      ? nuclei.findings
+      : [];
+
+  const zap = getToolResult("owasp-zap") || {};
+  const zapData = zap?.results || zap;
+  const zapFindings = Array.isArray(zapData?.findings)
+    ? zapData.findings
+    : Array.isArray(zapData?.alerts)
+      ? zapData.alerts
+      : [];
+
+  const severityCounts = {
+    CRITICAL: 0,
+    HIGH: 0,
+    MEDIUM: 0,
+    LOW: 0,
+    INFO: 0,
+  };
+
+  [...niktoFindings, ...nucleiFindings, ...zapFindings].forEach((finding) => {
+    const severity = String(
+      finding?.severity ||
+        finding?.risk ||
+        finding?.risk_level ||
+        "INFO"
+    ).toUpperCase();
+
+    if (severityCounts[severity] !== undefined) {
+      severityCounts[severity] += 1;
+    }
+  });
+
+  const totalFindings =
+    niktoFindings.length + nucleiFindings.length + zapFindings.length;
+
+  const hostSet = new Set();
+
+  nmapHosts.forEach((host) => {
+    const value =
+      host?.addresses?.[0]?.address ||
+      host?.host ||
+      host?.ip;
+
+    if (value) hostSet.add(String(value));
+  });
+
+  masscanHosts.forEach((host) => {
+    const value = host?.host || host?.ip;
+    if (value) hostSet.add(String(value));
+  });
+
+  const hostsDiscovered = hostSet.size;
+
+  const totalOpenPorts =
+    nmapOpenPorts.length + masscanOpenPorts.length;
+
+  const toolFindings = {
+    nmap: nmapScripts.length,
+    masscan: 0,
+    nikto: niktoFindings.length,
+    nuclei: nucleiFindings.length,
+    "owasp-zap": zapFindings.length,
+  };
+
+  const toolOpenPorts = {
+    nmap: nmapOpenPorts.length,
+    masscan: masscanOpenPorts.length,
+    nikto: 0,
+    nuclei: 0,
+    "owasp-zap": 0,
+  };
+
+  const severityTotal = Object.values(severityCounts).reduce(
+    (sum, value) => sum + value,
+    0
+  );
+
+  const severityColors = {
+    CRITICAL: "#ef3340",
+    HIGH: "#ff7a59",
+    MEDIUM: "#f5b942",
+    LOW: "#4da3ff",
+    INFO: "#9b6cff",
+  };
+
+  const severitySegments = Object.entries(severityCounts).filter(
+    ([, value]) => value > 0
+  );
+
+  let severityCursor = 0;
+
+  const severityGradient =
+    severityTotal > 0
+      ? (() => {
+          const parts = severitySegments.map(([severity, value]) => {
+            const start = severityCursor;
+            const end =
+              severityCursor + (value / severityTotal) * 360;
+            severityCursor = end;
+
+            return `${severityColors[severity]} ${start}deg ${end}deg`;
+          });
+
+          return `conic-gradient(${parts.join(", ")})`;
+        })()
+      : "conic-gradient(#252525 0deg 360deg)";
+
+  const maxToolPorts = Math.max(
+    ...Object.values(toolOpenPorts),
+    1
+  );
+
+  const maxToolFindings = Math.max(
+    ...Object.values(toolFindings),
+    1
+  );
+
+  const elapsedValues = tools
+    .map((toolId) => {
+      const result = getToolResult(toolId);
+      const value = Number(
+        result?.results?.elapsed_seconds ??
+          result?.elapsed_seconds ??
+          result?.duration_seconds
+      );
+
+      return Number.isFinite(value) ? value : 0;
+    })
+    .filter((value) => value > 0);
+
+  const observedRuntime =
+    elapsedValues.length > 0
+      ? Math.max(...elapsedValues)
+      : null;
+
+  const completedCount = tools.filter((tool) =>
+    ["Completed", "Completed with warnings"].includes(
+      formatStatus(tool)
+    )
+  ).length;
+
+  const failedCount = tools.filter((tool) =>
+    ["Failed", "Timed Out"].includes(formatStatus(tool))
+  ).length;
+
+  const toolMeta = {
+    nmap: {
+      title: "NMAP",
+      subtitle: "Network Intelligence",
+      icon: "◎",
+      accent: "text-red-400",
+      border: "border-red-500/30",
+    },
+    masscan: {
+      title: "MASSCAN",
+      subtitle: "Port Discovery",
+      icon: "ϟ",
+      accent: "text-orange-300",
+      border: "border-orange-500/30",
+    },
+    nikto: {
+      title: "NIKTO",
+      subtitle: "Web Server Assessment",
+      icon: "◉",
+      accent: "text-pink-300",
+      border: "border-pink-500/30",
+    },
+    nuclei: {
+      title: "NUCLEI",
+      subtitle: "Template-Based Detection",
+      icon: "⬡",
+      accent: "text-purple-300",
+      border: "border-purple-500/30",
+    },
+    "owasp-zap": {
+      title: "OWASP ZAP",
+      subtitle: "Web Application Assessment",
+      icon: "◈",
+      accent: "text-red-300",
+      border: "border-red-500/30",
+    },
+  };
+
+  const renderZapDetails = () => (
+    <div className="space-y-5 pt-5">
+      <div className="grid gap-3 sm:grid-cols-4">
+        {[
+          ["Alerts", zapData?.total_alerts ?? zapFindings.length],
+          ["Findings", zapData?.total_findings ?? zapFindings.length],
+          ["Medium", zapFindings.filter((item) => String(item?.severity || item?.risk || "").toUpperCase() === "MEDIUM").length],
+          ["Low / Info", zapFindings.filter((item) => ["LOW", "INFORMATIONAL", "INFO"].includes(String(item?.severity || item?.risk || "").toUpperCase())).length],
+        ].map(([label, value]) => (
+          <div key={label} className="border border-white/10 bg-[#080808] p-4">
+            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+              {label}
+            </p>
+            <p className="mt-2 text-xl font-bold text-white">{value}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="overflow-hidden border border-white/10">
+        <div className="border-b border-white/10 bg-white/[0.02] px-4 py-3">
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-300">
+            OWASP ZAP Findings
+          </p>
+        </div>
+
+        {zapFindings.length === 0 ? (
+          <p className="p-5 text-xs text-gray-500">
+            No ZAP findings were returned.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-[#090909] text-[9px] uppercase tracking-wider text-gray-600">
+                <tr>
+                  <th className="px-4 py-3">Severity</th>
+                  <th className="px-4 py-3">Finding</th>
+                  <th className="px-4 py-3">URL</th>
+                  <th className="px-4 py-3">CWE</th>
+                  <th className="px-4 py-3">Evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {zapFindings.map((finding, index) => (
+                  <tr key={`${finding?.id || finding?.plugin_id || "zap"}-${index}`} className="border-t border-white/5 align-top">
+                    <td className="px-4 py-3 font-semibold text-yellow-300">
+                      {safeText(finding?.severity || finding?.risk || "INFO")}
+                    </td>
+                    <td className="max-w-[320px] px-4 py-3 text-gray-200">
+                      {safeText(finding?.title || finding?.name || finding?.alert, "ZAP Finding")}
+                    </td>
+                    <td className="max-w-[260px] break-all px-4 py-3 text-gray-500">
+                      {safeText(finding?.affected_url || finding?.url || finding?.uri)}
+                    </td>
+                    <td className="px-4 py-3 text-gray-400">
+                      {safeText(finding?.cwe_id || finding?.cweid || finding?.cwe)}
+                    </td>
+                    <td className="max-w-[360px] px-4 py-3 text-gray-500">
+                      <pre className="max-h-32 overflow-auto whitespace-pre-wrap text-[9px] leading-4">
+                        {safeText(finding?.evidence || finding?.otherinfo || finding?.description)}
+                      </pre>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <details className="border border-white/10">
+        <summary className="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-400 hover:text-white">
+          Raw OWASP ZAP Evidence
+        </summary>
+        <pre className="max-h-[500px] overflow-auto whitespace-pre-wrap break-words border-t border-white/10 bg-black/50 p-4 text-[10px] leading-5 text-gray-500">
+          {JSON.stringify(zap, null, 2)}
+        </pre>
+      </details>
+    </div>
+  );
+
+  const renderNmapDetails = () => (
+    <div className="space-y-5 pt-5">
+      <div className="grid gap-3 sm:grid-cols-4">
+        {[
+          ["Hosts", nmapHosts.length],
+          ["Total Ports", nmapPorts.length],
+          ["Open Ports", nmapOpenPorts.length],
+          ["NSE Results", nmapScripts.length],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            className="border border-white/10 bg-[#080808] p-4"
+          >
+            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+              {label}
+            </p>
+            <p className="mt-2 text-xl font-bold text-white">
+              {value}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <div className="overflow-hidden border border-white/10">
+        <div className="border-b border-white/10 bg-white/[0.02] px-4 py-3">
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-300">
+            Open Ports & Services
+          </p>
+        </div>
+
+        {nmapOpenPorts.length === 0 ? (
+          <p className="p-5 text-xs text-gray-500">
+            No open ports were returned by Nmap.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-[#090909] text-[9px] uppercase tracking-wider text-gray-600">
+                <tr>
+                  <th className="px-4 py-3">Host</th>
+                  <th className="px-4 py-3">Port</th>
+                  <th className="px-4 py-3">Protocol</th>
+                  <th className="px-4 py-3">Service</th>
+                  <th className="px-4 py-3">Version</th>
+                </tr>
+              </thead>
+              <tbody>
+                {nmapOpenPorts.map((port, index) => (
+                  <tr
+                    key={`${port.host}-${port.port}-${index}`}
+                    className="border-t border-white/5"
+                  >
+                    <td className="px-4 py-3 text-gray-300">
+                      {safeText(port.host)}
+                    </td>
+                    <td className="px-4 py-3 font-semibold text-red-400">
+                      {safeText(port.port)}
+                    </td>
+                    <td className="px-4 py-3 text-gray-400">
+                      {safeText(port.protocol, "tcp")}
+                    </td>
+                    <td className="px-4 py-3 text-white">
+                      {safeText(port?.service?.name, "unknown")}
+                    </td>
+                    <td className="px-4 py-3 text-gray-400">
+                      {[
+                        port?.service?.product,
+                        port?.service?.version,
+                      ]
+                        .filter(Boolean)
+                        .join(" ") || "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="grid gap-5 lg:grid-cols-2">
+        <div className="border border-white/10 bg-[#080808] p-5">
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-300">
+            OS Detection
+          </p>
+
+          {nmapOs.length === 0 ? (
+            <p className="mt-4 text-xs text-gray-500">
+              No OS match was returned by Nmap.
+            </p>
+          ) : (
+            <div className="mt-4 space-y-3">
+              {nmapOs.map((os, index) => (
+                <div
+                  key={`${os?.name || "os"}-${index}`}
+                  className="border border-white/10 bg-black/30 p-4"
+                >
+                  <p className="text-sm font-semibold text-white">
+                    {safeText(os?.name, "Unknown OS")}
+                  </p>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Accuracy: {safeText(os?.accuracy)}%
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="border border-white/10 bg-[#080808] p-5">
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-300">
+            NSE / Security Findings
+          </p>
+
+          {nmapScripts.length === 0 ? (
+            <p className="mt-4 text-xs text-gray-500">
+              No NSE output was returned by Nmap.
+            </p>
+          ) : (
+            <div className="mt-4 space-y-3">
+              {nmapScripts.map((script, index) => (
+                <div
+                  key={`${script?.id || "script"}-${index}`}
+                  className="border border-red-500/20 bg-red-500/[0.03] p-4"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs font-semibold text-red-300">
+                      {safeText(script?.id, "NSE script")}
+                    </p>
+                    {script?.port && (
+                      <span className="text-[9px] text-gray-500">
+                        Port {safeText(script.port)}
+                      </span>
+                    )}
+                  </div>
+                  <pre className="mt-3 whitespace-pre-wrap text-[11px] leading-5 text-gray-400">
+                    {safeText(script?.output, "No output.")}
+                  </pre>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <details className="border border-white/10">
+        <summary className="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-400 hover:text-white">
+          Raw Nmap Evidence
+        </summary>
+        <pre className="max-h-[450px] overflow-auto whitespace-pre-wrap break-words border-t border-white/10 bg-black/50 p-4 text-[10px] leading-5 text-gray-500">
+          {JSON.stringify(nmap, null, 2)}
+        </pre>
+      </details>
+    </div>
+  );
+
+  const renderMasscanDetails = () => (
+    <div className="space-y-5 pt-5">
+      <div className="grid gap-3 sm:grid-cols-4">
+        {[
+          ["Hosts", masscanHosts.length],
+          ["Open Ports", masscanOpenPorts.length],
+          [
+            "Elapsed",
+            masscanData?.elapsed_seconds
+              ? `${masscanData.elapsed_seconds}s`
+              : masscan?.elapsed_seconds
+                ? `${masscan.elapsed_seconds}s`
+                : "—",
+          ],
+          ["Return Code", safeText(masscan?.return_code)],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            className="border border-white/10 bg-[#080808] p-4"
+          >
+            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+              {label}
+            </p>
+            <p className="mt-2 text-xl font-bold text-white">
+              {value}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <div className="overflow-hidden border border-white/10">
+        <div className="border-b border-white/10 bg-white/[0.02] px-4 py-3">
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-300">
+            Open Ports
+          </p>
+        </div>
+
+        {masscanOpenPorts.length === 0 ? (
+          <p className="p-5 text-xs text-gray-500">
+            No open ports were reported by Masscan.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-[#090909] text-[9px] uppercase tracking-wider text-gray-600">
+                <tr>
+                  <th className="px-4 py-3">Host</th>
+                  <th className="px-4 py-3">Port</th>
+                  <th className="px-4 py-3">Protocol</th>
+                  <th className="px-4 py-3">State</th>
+                </tr>
+              </thead>
+              <tbody>
+                {masscanOpenPorts.map((port, index) => (
+                  <tr
+                    key={`${port.host}-${port.port}-${index}`}
+                    className="border-t border-white/5"
+                  >
+                    <td className="px-4 py-3 text-gray-300">
+                      {safeText(port.host)}
+                    </td>
+                    <td className="px-4 py-3 font-semibold text-orange-300">
+                      {safeText(port.port)}
+                    </td>
+                    <td className="px-4 py-3 text-gray-400">
+                      {safeText(port.protocol, "tcp")}
+                    </td>
+                    <td className="px-4 py-3 text-emerald-400">
+                      {safeText(port.state, "open")}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <details className="border border-white/10">
+        <summary className="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-400 hover:text-white">
+          Raw Masscan Evidence
+        </summary>
+        <pre className="max-h-[450px] overflow-auto whitespace-pre-wrap break-words border-t border-white/10 bg-black/50 p-4 text-[10px] leading-5 text-gray-500">
+          {JSON.stringify(masscan, null, 2)}
+        </pre>
+      </details>
+    </div>
+  );
+
+  const renderNiktoDetails = () => {
+    const severity = niktoFindings.reduce(
+      (counts, finding) => {
+        const value = String(
+          finding?.severity ||
+            finding?.risk ||
+            finding?.risk_level ||
+            "INFO"
+        ).toUpperCase();
+
+        const key = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"].includes(
+          value
+        )
+          ? value
+          : "INFO";
+
+        counts[key] += 1;
+        return counts;
+      },
+      {
+        CRITICAL: 0,
+        HIGH: 0,
+        MEDIUM: 0,
+        LOW: 0,
+        INFO: 0,
+      }
+    );
+
+    return (
+      <div className="space-y-5 pt-5">
+        <div className="grid gap-3 sm:grid-cols-5">
+          {Object.entries(severity).map(([label, value]) => (
+            <div
+              key={label}
+              className="border border-white/10 bg-[#080808] p-4"
+            >
+              <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                {label}
+              </p>
+              <p
+                className={`mt-2 text-xl font-bold ${
+                  label === "CRITICAL"
+                    ? "text-red-400"
+                    : label === "HIGH"
+                      ? "text-orange-300"
+                      : label === "MEDIUM"
+                        ? "text-yellow-300"
+                        : label === "LOW"
+                          ? "text-blue-300"
+                          : "text-purple-300"
+                }`}
+              >
+                {value}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        <div className="overflow-hidden border border-white/10">
+          <div className="border-b border-white/10 bg-white/[0.02] px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-wider text-gray-300">
+              Nikto Findings
+            </p>
+          </div>
+
+          {niktoFindings.length === 0 ? (
+            <p className="p-5 text-xs text-gray-500">
+              No Nikto findings were returned.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-[#090909] text-[9px] uppercase tracking-wider text-gray-600">
+                  <tr>
+                    <th className="px-4 py-3">ID</th>
+                    <th className="px-4 py-3">Severity</th>
+                    <th className="px-4 py-3">Finding</th>
+                    <th className="px-4 py-3">URL</th>
+                    <th className="px-4 py-3">Evidence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {niktoFindings.map((finding, index) => (
+                    <tr
+                      key={`${finding?.id || "finding"}-${index}`}
+                      className="border-t border-white/5 align-top"
+                    >
+                      <td className="px-4 py-4 text-gray-400">
+                        {safeText(finding?.id)}
+                      </td>
+                      <td className="px-4 py-4">
+                        <span className="border border-white/10 bg-white/[0.03] px-2 py-1 text-[9px] font-semibold uppercase text-gray-300">
+                          {safeText(
+                            finding?.severity ||
+                              finding?.risk ||
+                              "INFO"
+                          )}
+                        </span>
+                      </td>
+                      <td className="max-w-[360px] px-4 py-4 text-gray-200">
+                        {safeText(
+                          finding?.message ||
+                            finding?.msg ||
+                            finding?.title ||
+                            finding?.description
+                        )}
+                      </td>
+                      <td className="px-4 py-4 text-gray-400">
+                        {safeText(finding?.url || finding?.uri)}
+                      </td>
+                      <td className="max-w-[320px] px-4 py-4">
+                        <pre className="whitespace-pre-wrap break-words text-[10px] leading-4 text-gray-500">
+                          {safeText(
+                            finding?.evidence ||
+                              finding?.output ||
+                              finding
+                          )}
+                        </pre>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <details className="border border-white/10">
+          <summary className="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-400 hover:text-white">
+            Raw Nikto Evidence
+          </summary>
+          <pre className="max-h-[450px] overflow-auto whitespace-pre-wrap break-words border-t border-white/10 bg-black/50 p-4 text-[10px] leading-5 text-gray-500">
+            {JSON.stringify(nikto, null, 2)}
+          </pre>
+        </details>
+      </div>
+    );
+  };
+
+  const renderNucleiDetails = () => (
+    <div className="space-y-5 pt-5">
+      <div className="grid gap-3 sm:grid-cols-5">
+        {Object.entries(
+          nucleiFindings.reduce(
+            (counts, finding) => {
+              const severity = String(
+                finding?.severity || "INFO"
+              ).toUpperCase();
+
+              if (counts[severity] !== undefined) {
+                counts[severity] += 1;
+              }
+
+              return counts;
+            },
+            {
+              CRITICAL: 0,
+              HIGH: 0,
+              MEDIUM: 0,
+              LOW: 0,
+              INFO: 0,
+            }
+          )
+        ).map(([label, value]) => (
+          <div
+            key={label}
+            className="border border-white/10 bg-[#080808] p-4"
+          >
+            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+              {label}
+            </p>
+            <p className="mt-2 text-xl font-bold text-white">
+              {value}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      {nucleiFindings.length === 0 ? (
+        <div className="border border-purple-500/20 bg-purple-500/[0.03] p-5">
+          <p className="text-sm font-semibold text-purple-200">
+            No vulnerabilities reported by Nuclei
+          </p>
+          <p className="mt-1 text-xs text-gray-500">
+            The native Nuclei execution completed without returning findings.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {nucleiFindings.map((finding, index) => (
+            <div
+              key={`${finding?.template_id || "finding"}-${index}`}
+              className="border border-purple-500/20 bg-purple-500/[0.03] p-5"
+            >
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-white">
+                    {safeText(
+                      finding?.name ||
+                        finding?.template_id ||
+                        "Nuclei Finding"
+                    )}
+                  </p>
+
+                  <p className="mt-1 text-[10px] uppercase tracking-wider text-purple-300">
+                    {safeText(finding?.severity, "INFO")} ·{" "}
+                    {safeText(finding?.type, "—")}
+                  </p>
+                </div>
+
+                <span className="border border-purple-500/30 bg-purple-500/10 px-2 py-1 text-[9px] font-semibold text-purple-300">
+                  {safeText(finding?.template_id)}
+                </span>
+              </div>
+
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                <div>
+                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                    Location
+                  </p>
+                  <p className="mt-1 break-all text-xs text-gray-300">
+                    {safeText(
+                      finding?.matched_at ||
+                        finding?.url ||
+                        finding?.host
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                    CVE / CWE
+                  </p>
+                  <p className="mt-1 text-xs text-gray-300">
+                    {safeText(finding?.cve, "—")} /{" "}
+                    {safeText(finding?.cwe, "—")}
+                  </p>
+                </div>
+              </div>
+
+              {(finding?.description || finding?.tags) && (
+                <div className="mt-4 border-t border-white/5 pt-4">
+                  <p className="text-[10px] leading-5 text-gray-500">
+                    {safeText(finding?.description)}
+                  </p>
+
+                  {finding?.tags && (
+                    <p className="mt-2 text-[10px] text-purple-300">
+                      Tags: {safeText(finding.tags)}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <details className="border border-white/10">
+        <summary className="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-400 hover:text-white">
+          Raw Nuclei Evidence
+        </summary>
+        <pre className="max-h-[450px] overflow-auto whitespace-pre-wrap break-words border-t border-white/10 bg-black/50 p-4 text-[10px] leading-5 text-gray-500">
+          {JSON.stringify(nuclei, null, 2)}
+        </pre>
+      </details>
+    </div>
+  );
+
+  const renderToolDetails = (toolId) => {
+    switch (String(toolId).toLowerCase()) {
+      case "nmap":
+        return renderNmapDetails();
+      case "masscan":
+        return renderMasscanDetails();
+      case "nikto":
+        return renderNiktoDetails();
+      case "nuclei":
+        return renderNucleiDetails();
+      case "owasp-zap":
+        return renderZapDetails();
+      default:
+        return (
+          <div className="pt-5">
+            <p className="mb-3 text-xs text-yellow-400">
+              Native result renderer is not configured for this tool.
+            </p>
+            <details className="border border-white/10">
+              <summary className="cursor-pointer px-4 py-3 text-xs uppercase tracking-wider text-gray-400">
+                Raw Evidence
+              </summary>
+              <pre className="max-h-[450px] overflow-auto whitespace-pre-wrap break-words border-t border-white/10 bg-black/50 p-4 text-[10px] text-gray-500">
+                {JSON.stringify(getToolResult(toolId), null, 2)}
+              </pre>
+            </details>
+          </div>
+        );
+    }
+  };
+
+  return (
+    <div className="relative space-y-6">
+      {/* HEADER */}
+      <div className="relative overflow-hidden border border-red-500/20 bg-[#07090c] p-6 shadow-[0_0_40px_rgba(239,51,64,0.08)]">
+        <div className="pointer-events-none absolute -right-24 -top-24 h-72 w-72 rounded-full bg-red-600/10 blur-3xl" />
+        <div className="pointer-events-none absolute right-10 top-0 h-40 w-40 rounded-full bg-purple-600/10 blur-3xl" />
+
+        <div className="relative flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.35em] text-red-500">
+              Security Assessment
+            </p>
+
+            <h1 className="mt-2 text-3xl font-black tracking-tight text-white md:text-4xl">
+              MULTI-TOOL{" "}
+              <span className="text-red-500">VAPT RESULTS</span>
+            </h1>
+
+            <p className="mt-2 text-sm text-gray-500">
+              Combined native results from the authorized VAPT assessment.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={onBack}
+            className="border border-red-500/30 bg-red-500/[0.03] px-5 py-3 text-xs font-semibold uppercase tracking-wider text-white transition hover:border-red-500 hover:bg-red-500/10"
+          >
+            ← Back to VAPT
+          </button>
+        </div>
+
+        <div className="relative mt-6 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div className="border border-white/10 bg-black/30 p-4">
+            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+              Target
+            </p>
+            <p className="mt-2 break-all text-xs font-semibold text-white">
+              {safeText(scanResult?.target)}
+            </p>
+          </div>
+
+          <div className="border border-white/10 bg-black/30 p-4">
+            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+              Assessment ID
+            </p>
+            <p className="mt-2 break-all text-xs font-semibold text-white">
+              {safeText(
+                scanResult?.assessment_id ||
+                  scanResult?.run_id ||
+                  scanResult?.vapt_run_id
+              )}
+            </p>
+          </div>
+
+          <div className="border border-white/10 bg-black/30 p-4">
+            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+              Execution
+            </p>
+            <p className="mt-2 text-xs font-semibold text-white">
+              {completedCount}/{tools.length} completed
+            </p>
+          </div>
+
+          <div className="border border-emerald-500/20 bg-emerald-500/[0.03] p-4">
+            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+              Assessment Status
+            </p>
+            <p className="mt-2 text-xs font-bold uppercase tracking-wider text-emerald-400">
+              {failedCount > 0
+                ? `${failedCount} failed`
+                : completedCount === tools.length
+                  ? "Completed"
+                  : "Running"}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* SUMMARY METRICS */}
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        {[
+          ["Tools Executed", tools.length, "text-red-400", "◈"],
+          ["Hosts Discovered", hostsDiscovered, "text-cyan-300", "▣"],
+          ["Open Ports", totalOpenPorts, "text-red-400", "⌁"],
+          ["Total Findings", totalFindings, "text-purple-300", "▤"],
+          [
+            "Observed Runtime",
+            observedRuntime !== null
+              ? `${observedRuntime.toFixed(2)}s`
+              : "—",
+            "text-orange-300",
+            "◷",
+          ],
+        ].map(([label, value, accent, icon]) => (
+          <div
+            key={label}
+            className="group border border-white/10 bg-[#0b0d10] p-4 transition hover:border-red-500/30"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <p className={`text-xl ${accent}`}>{icon}</p>
+              <span className="text-[8px] uppercase tracking-wider text-gray-700">
+                Live Data
+              </span>
+            </div>
+            <p className="mt-4 text-2xl font-black text-white">
+              {value}
+            </p>
+            <p className="mt-1 text-[9px] uppercase tracking-wider text-gray-600">
+              {label}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      {/* GRAPHS */}
+      <div className="grid gap-5 xl:grid-cols-3">
+        {/* SEVERITY DONUT */}
+        <div className="border border-white/10 bg-[#0b0d10] p-5">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-bold text-white">
+              Findings by Severity
+            </p>
+            <span className="text-[9px] uppercase tracking-wider text-red-400">
+              Native Data
+            </span>
+          </div>
+
+          <div className="mt-5 flex items-center justify-center gap-6">
+            <div
+              className="relative flex h-36 w-36 shrink-0 items-center justify-center rounded-full"
+              style={{ background: severityGradient }}
+            >
+              <div className="flex h-24 w-24 flex-col items-center justify-center rounded-full bg-[#0b0d10]">
+                <span className="text-2xl font-black text-white">
+                  {severityTotal}
+                </span>
+                <span className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Findings
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              {Object.entries(severityCounts).map(
+                ([severity, value]) => (
+                  <div
+                    key={severity}
+                    className="flex items-center gap-2 text-[10px]"
+                  >
+                    <span
+                      className="h-2 w-2 rounded-full"
+                      style={{
+                        background:
+                          severityColors[severity],
+                      }}
+                    />
+                    <span className="w-16 text-gray-500">
+                      {severity}
+                    </span>
+                    <span className="font-semibold text-white">
+                      {value}
+                    </span>
+                  </div>
+                )
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* OPEN PORTS */}
+        <div className="border border-white/10 bg-[#0b0d10] p-5">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-bold text-white">
+              Open Ports by Tool
+            </p>
+            <span className="text-[9px] uppercase tracking-wider text-red-400">
+              Network
+            </span>
+          </div>
+
+          <div className="mt-6 space-y-5">
+            {["nmap", "masscan", "nikto", "nuclei"].map(
+              (toolId) => {
+                const value = toolOpenPorts[toolId] || 0;
+                const width =
+                  maxToolPorts > 0
+                    ? Math.max(
+                        value > 0 ? 4 : 0,
+                        (value / maxToolPorts) * 100
+                      )
+                    : 0;
+
+                const meta = toolMeta[toolId];
+
+                return (
+                  <div key={toolId}>
+                    <div className="mb-2 flex items-center justify-between text-[10px]">
+                      <span className="font-semibold text-gray-400">
+                        {meta?.title || toolId.toUpperCase()}
+                      </span>
+                      <span className="font-bold text-white">
+                        {value}
+                      </span>
+                    </div>
+
+                    <div className="h-2 overflow-hidden bg-white/5">
+                      <div
+                        className="h-full transition-all duration-700"
+                        style={{
+                          width: `${width}%`,
+                          background:
+                            toolId === "nmap"
+                              ? "#ef3340"
+                              : toolId === "masscan"
+                                ? "#ff7a59"
+                                : toolId === "nikto"
+                                  ? "#ec4899"
+                                  : "#8b5cf6",
+                        }}
+                      />
+                    </div>
+                  </div>
+                );
+              }
+            )}
+          </div>
+        </div>
+
+        {/* FINDINGS BY TOOL */}
+        <div className="border border-white/10 bg-[#0b0d10] p-5">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-bold text-white">
+              Findings by Tool
+            </p>
+            <span className="text-[9px] uppercase tracking-wider text-purple-300">
+              Detection
+            </span>
+          </div>
+
+          <div className="mt-5 flex h-40 items-end justify-around gap-4 border-b border-white/10 px-2">
+            {["nmap", "masscan", "nikto", "nuclei"].map(
+              (toolId) => {
+                const value = toolFindings[toolId] || 0;
+                const height =
+                  value > 0
+                    ? Math.max(
+                        8,
+                        (value / maxToolFindings) * 100
+                      )
+                    : 2;
+
+                const color =
+                  toolId === "nmap"
+                    ? "#ef3340"
+                    : toolId === "masscan"
+                      ? "#ff7a59"
+                      : toolId === "nikto"
+                        ? "#ec4899"
+                        : "#8b5cf6";
+
+                return (
+                  <div
+                    key={toolId}
+                    className="flex h-full w-14 flex-col items-center justify-end gap-2"
+                  >
+                    <span className="text-[10px] font-bold text-white">
+                      {value}
+                    </span>
+
+                    <div
+                      className="w-10 rounded-t-sm transition-all duration-700"
+                      style={{
+                        height: `${height}%`,
+                        background: color,
+                        boxShadow: `0 0 18px ${color}55`,
+                      }}
+                    />
+
+                    <span className="mb-2 text-[8px] uppercase tracking-wider text-gray-600">
+                      {toolId}
+                    </span>
+                  </div>
+                );
+              }
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* TOOL EXECUTION SUMMARY */}
+      <div>
+        <div className="mb-4 flex items-center gap-3">
+          <span className="h-5 w-1 bg-red-500" />
+          <h2 className="text-lg font-bold text-white">
+            Tool Execution Summary
+          </h2>
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-4">
+          {tools.map((toolId) => {
+            const id = String(toolId).toLowerCase();
+            const result = getToolResult(id);
+            const status = formatStatus(id);
+            const meta =
+              toolMeta[id] || {
+                title: id.toUpperCase(),
+                subtitle: "VAPT Tool",
+                icon: "◈",
+                accent: "text-red-400",
+                border: "border-white/10",
+              };
+
+            let primaryValue = "—";
+            let primaryLabel = "Result";
+
+            if (id === "nmap") {
+              primaryValue = nmapOpenPorts.length;
+              primaryLabel = "Open Ports";
+            } else if (id === "masscan") {
+              primaryValue = masscanOpenPorts.length;
+              primaryLabel = "Open Ports";
+            } else if (id === "nikto") {
+              primaryValue = niktoFindings.length;
+              primaryLabel = "Findings";
+            } else if (id === "nuclei") {
+              primaryValue = nucleiFindings.length;
+              primaryLabel = "Findings";
+            }
+
+            return (
+              <div
+                key={id}
+                className={`border ${meta.border} bg-[#0b0d10] p-4 shadow-[0_0_24px_rgba(239,51,64,0.04)]`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <span
+                      className={`text-2xl ${meta.accent}`}
+                    >
+                      {meta.icon}
+                    </span>
+
+                    <div>
+                      <p className="text-sm font-black text-white">
+                        {meta.title}
+                      </p>
+                      <p className="text-[9px] text-gray-600">
+                        {meta.subtitle}
+                      </p>
+                    </div>
+                  </div>
+
+                  <span
+                    className={`border px-2 py-1 text-[8px] font-bold uppercase tracking-wider ${statusClass(status)}`}
+                  >
+                    {status}
+                  </span>
+                </div>
+
+                <div className="mt-5 grid grid-cols-2 gap-3">
+                  <div>
+                    <p className="text-[8px] uppercase tracking-wider text-gray-600">
+                      {primaryLabel}
+                    </p>
+                    <p className="mt-1 text-lg font-black text-white">
+                      {primaryValue}
+                    </p>
+                  </div>
+
+                  <div>
+                    <p className="text-[8px] uppercase tracking-wider text-gray-600">
+                      Evidence
+                    </p>
+                    <p className="mt-1 text-lg font-black text-white">
+                      {result ? "Available" : "None"}
+                    </p>
+                  </div>
+                </div>
+
+                <details className="mt-4">
+                  <summary className="cursor-pointer border border-red-500/20 bg-red-500/[0.03] px-3 py-2 text-center text-[9px] font-semibold uppercase tracking-wider text-red-400 transition hover:bg-red-500/10">
+                    View Results
+                  </summary>
+
+                  {renderToolDetails(id)}
+                </details>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* DETAILED TOOL RESULTS */}
+      <div>
+        <div className="mb-4 flex items-center gap-3">
+          <span className="h-5 w-1 bg-red-500" />
+          <h2 className="text-lg font-bold text-white">
+            Detailed Tool Results
+          </h2>
+        </div>
+
+        <div className="space-y-2">
+          {tools.map((toolId) => {
+            const id = String(toolId).toLowerCase();
+            const result = getToolResult(id);
+            const status = formatStatus(id);
+            const meta =
+              toolMeta[id] || {
+                title: id.toUpperCase(),
+                subtitle: "VAPT Tool",
+                icon: "◈",
+                accent: "text-red-400",
+              };
+
+            let metric = "No result";
+
+            if (id === "nmap") {
+              metric = `${nmapHosts.length} Hosts | ${nmapOpenPorts.length} Open Ports`;
+            } else if (id === "masscan") {
+              metric = `${masscanHosts.length} Hosts | ${masscanOpenPorts.length} Open Ports`;
+            } else if (id === "nikto") {
+              metric = `${niktoFindings.length} Findings`;
+            } else if (id === "nuclei") {
+              metric = `${nucleiFindings.length} Findings`;
+            } else if (id === "owasp-zap") {
+              metric = `${zapFindings.length} Findings`;
+            }
+
+            return (
+              <details
+                key={id}
+                className="group border border-white/10 bg-[#0a0c0f]"
+              >
+                <summary className="cursor-pointer list-none px-5 py-4">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                    <div className="flex items-center gap-3">
+                      <span className={`text-xl ${meta.accent}`}>
+                        {meta.icon}
+                      </span>
+
+                      <div>
+                        <p className="text-sm font-bold text-white">
+                          {meta.title}
+                          <span className="mx-2 text-gray-700">
+                            —
+                          </span>
+                          <span className="font-normal text-gray-500">
+                            {meta.subtitle}
+                          </span>
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <span className="border border-white/10 bg-white/[0.02] px-3 py-1 text-[9px] text-gray-500">
+                        {metric}
+                      </span>
+
+                      <span
+                        className={`text-[9px] font-bold uppercase tracking-wider ${
+                          status === "Completed"
+                            ? "text-emerald-400"
+                            : status === "Failed"
+                              ? "text-red-400"
+                              : "text-yellow-300"
+                        }`}
+                      >
+                        {status}
+                      </span>
+
+                      <span className="text-gray-600 transition group-open:rotate-180">
+                        ↓
+                      </span>
+                    </div>
+                  </div>
+                </summary>
+
+                <div className="border-t border-white/10 px-5 pb-5">
+                  {!result ? (
+                    <p className="pt-5 text-xs text-gray-500">
+                      No result payload was returned for this tool.
+                    </p>
+                  ) : (
+                    renderToolDetails(id)
+                  )}
+                </div>
+              </details>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* COMPLETION FOOTER */}
+      <div className="border border-white/10 bg-[#080a0d] p-5">
+        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="text-[9px] uppercase tracking-[0.25em] text-red-500">
+              Assessment Evidence
+            </p>
+            <p className="mt-1 text-xs text-gray-500">
+              All displayed values are derived from the native VAPT tool payloads returned for this assessment.
+            </p>
+          </div>
+
+          <div className="text-right">
+            <p className="text-xs font-bold text-white">
+              {completedCount}/{tools.length} tools completed
+            </p>
+            {failedCount > 0 && (
+              <p className="mt-1 text-[10px] text-red-400">
+                {failedCount} tool(s) failed
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NmapResultsPage({ scanResult, onBack }) {
+  const nmap = scanResult?.nmap || null;
+  const nmapResults = nmap?.results || {};
+  const nmapHosts = Array.isArray(nmapResults.hosts) ? nmapResults.hosts : [];
+  const nmapOpenPorts = nmapHosts.flatMap((host) =>
+    Array.isArray(host?.ports)
+      ? host.ports
+          .filter((port) => String(port?.state || "").toLowerCase() === "open")
+          .map((port) => ({
+            ...port,
+            host: host?.addresses?.[0]?.address || "—",
+          }))
+      : []
+  );
+  const nmapScripts = nmapHosts.flatMap((host) => {
+    const hostScripts = Array.isArray(host?.scripts)
+      ? host.scripts.map((script) => ({
+          ...script,
+          host: host?.addresses?.[0]?.address || "—",
+          port: null,
+        }))
+      : [];
+    const portScripts = Array.isArray(host?.ports)
+      ? host.ports.flatMap((port) =>
+          Array.isArray(port?.scripts)
+            ? port.scripts.map((script) => ({
+                ...script,
+                host: host?.addresses?.[0]?.address || "—",
+                port: port?.port,
+              }))
+            : []
+        )
+      : [];
+    return [...hostScripts, ...portScripts];
+  });
+  const nmapOs = nmapHosts.flatMap((host) =>
+    Array.isArray(host?.os_matches) ? host.os_matches : []
+  );
+
+  const downloadBlob = (content, filename, type) => {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const safeTarget = String(scanResult?.target || "target")
+    .replace(/^https?:\/\//i, "")
+    .replace(/[^a-z0-9.-]+/gi, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 50) || "target";
+
+  const handleDownloadJSON = () => {
+    downloadBlob(
+      JSON.stringify(scanResult, null, 2),
+      `SOC-Nmap-${safeTarget}.json`,
+      "application/json;charset=utf-8"
+    );
+  };
+
+  const handleDownloadHTML = () => {
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>SOC Platform Nmap Report</title><style>body{font-family:Arial,sans-serif;background:#080808;color:#eee;padding:30px}h1,h2{color:#ef3340}.card,table{border:1px solid #333;padding:12px;margin:12px 0}table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:8px;text-align:left}pre{white-space:pre-wrap;word-break:break-word;color:#aaa}</style></head><body><h1>SOC Platform — Nmap Report</h1><p><b>Target:</b> ${escapeHtml(scanResult?.target || "—")}</p><p><b>Profile:</b> ${escapeHtml(nmap?.scan_type || "—")}</p>${renderNmapHtmlContent(nmap)}</body></html>`;
+    downloadBlob(html, `SOC-Nmap-${safeTarget}.html`, "text/html;charset=utf-8");
+  };
+
+  const handleDownloadPDF = () => {
+    const doc = new jsPDF();
+    let y = 20;
+    const add = (value, size = 9, gap = 6) => {
+      doc.setFontSize(size);
+      const lines = doc.splitTextToSize(String(value ?? "—"), 170);
+      if (y + lines.length * 5 > 275) {
+        doc.addPage();
+        y = 20;
+      }
+      doc.text(lines, 20, y);
+      y += lines.length * 5 + gap;
+    };
+
+    doc.setFont("helvetica", "bold");
+    add("SOC Platform — Nmap Security Report", 18, 10);
+    doc.setFont("helvetica", "normal");
+    add(`Target: ${scanResult?.target || "—"}`);
+    add(`Profile: ${nmap?.scan_type || "—"}`);
+    add(`Hosts discovered: ${nmapResults.host_count ?? nmapHosts.length}`);
+    add(`Open ports: ${nmapOpenPorts.length}`);
+
+    add("Open Ports & Services", 12, 5);
+    nmapOpenPorts.forEach((port) =>
+      add(`${port.host}  ${port.port}/${port.protocol || "tcp"}  ${port.service?.name || "unknown"} ${port.service?.product || ""} ${port.service?.version || ""}`, 8, 4)
+    );
+
+    add("OS Detection", 12, 5);
+    if (nmapOs.length) {
+      nmapOs.forEach((os) => add(`${os.name || "Unknown OS"} — Accuracy: ${os.accuracy ?? "—"}%`, 8, 4));
+    } else {
+      add("No OS match returned.", 8, 4);
+    }
+
+    add("NSE / Security Findings", 12, 5);
+    if (nmapScripts.length) {
+      nmapScripts.forEach((script) => {
+        add(`${script.id || "NSE script"}${script.port ? ` — Port ${script.port}` : ""}`, 8, 3);
+        add(script.output || "No output.", 7, 4);
+      });
+    } else {
+      add("No NSE output was returned.", 8, 4);
+    }
+
+    if (Array.isArray(nmap?.errors) && nmap.errors.length) {
+      add("Warnings / Errors", 12, 5);
+      nmap.errors.forEach((error) => add(error, 8, 4));
+    }
+
+    doc.setFontSize(8);
+    doc.text("SOC Platform • Authorized security assessment report", 20, 285);
+    doc.save(`SOC-Nmap-${safeTarget}.pdf`);
+  };
+
+  return (
+    <div>
+      <div className="mb-6 flex flex-col gap-4 border-b border-white/10 pb-5 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.3em] text-red-500">Security Workspace / Nmap Results</p>
+          <h1 className="mt-2 text-3xl font-bold text-white">Nmap Scan Report</h1>
+          <p className="mt-1 text-sm text-gray-500">Dedicated results page for {scanResult?.target || "the scanned target"}</p>
+        </div>
+        <button type="button" onClick={onBack} className="border border-white/10 px-4 py-2 text-xs text-gray-400 hover:border-red-600 hover:text-white">
+          ← Back to VAPT Testing
+        </button>
+      </div>
+
+      <NmapResultsDashboard
+        scanResult={scanResult}
+        targetUrl={scanResult?.target || ""}
+        nmap={nmap}
+        nmapResults={nmapResults}
+        nmapHosts={nmapHosts}
+        nmapOpenPorts={nmapOpenPorts}
+        nmapScripts={nmapScripts}
+        nmapOs={nmapOs}
+        onDownloadJSON={handleDownloadJSON}
+        onDownloadHTML={handleDownloadHTML}
+        onDownloadPDF={handleDownloadPDF}
+      />
+    </div>
+  );
+}
+
+function NmapResultsDashboard({
+  scanResult, targetUrl, nmap, nmapResults, nmapHosts, nmapOpenPorts,
+  nmapScripts, nmapOs, onDownloadJSON, onDownloadHTML, onDownloadPDF,
+}) {
+  const allPorts = nmapHosts.flatMap((host) => Array.isArray(host?.ports) ? host.ports.map((p) => ({
+    ...p, host: host?.addresses?.[0]?.address || "—"
+  })) : []);
+  const open = allPorts.filter((p) => String(p?.state).toLowerCase() === "open").length;
+  const closed = allPorts.filter((p) => String(p?.state).toLowerCase() === "closed").length;
+  const filtered = allPorts.filter((p) => String(p?.state).toLowerCase() === "filtered").length;
+  const other = Math.max(allPorts.length - open - closed - filtered, 0);
+  const serviceCounts = {};
+  nmapOpenPorts.forEach((p) => { const name = p?.service?.name || "unknown"; serviceCounts[name] = (serviceCounts[name] || 0) + 1; });
+  const serviceEntries = Object.entries(serviceCounts).sort((a,b) => b[1]-a[1]);
+  const maxService = Math.max(...serviceEntries.map(([,v]) => v), 1);
+  const findings = Array.isArray(scanResult?.findings) ? scanResult.findings : [];
+  const severityCounts = { critical:0, high:0, medium:0, low:0 };
+  findings.forEach((f) => { const sev = String(f?.severity || f?.risk_level || "").toLowerCase(); if (sev in severityCounts) severityCounts[sev] += 1; });
+  const httpPorts = nmapOpenPorts.filter((p) => ["http","https","http-alt"].includes(String(p?.service?.name || "").toLowerCase()) || [80,443,8080,8443].includes(Number(p?.port)));
+  const rawOutputValue =
+    nmap?.raw_output ??
+    nmap?.stdout ??
+    nmap?.output ??
+    nmap;
+
+  const rawOutput =
+    typeof rawOutputValue === "string"
+      ? rawOutputValue
+      : JSON.stringify(rawOutputValue, null, 2);
+
+  const donut = (values) => {
+    const colors = ["#ef3340","#64748b","#f59e0b","#22c55e"];
+    const total = values.reduce((a,v) => a + Math.max(Number(v)||0,0), 0);
+    if (!total) return "conic-gradient(#272727 0deg 360deg)";
+    let cursor = 0;
+    const stops = values.map((v,i) => {
+      const next = cursor + (Math.max(Number(v)||0,0) / total) * 360;
+      const part = `${colors[i % colors.length]} ${cursor}deg ${next}deg`;
+      cursor = next; return part;
+    });
+    return `conic-gradient(${stops.join(",")})`;
+  };
+
+  return (
+    <div className="border border-white/10 bg-[#0d0d0d] p-5">
+      <div className="flex flex-col gap-4 border-b border-white/10 pb-5 lg:flex-row lg:items-center lg:justify-between">
+        <div><p className="text-xs uppercase tracking-[0.25em] text-red-500">Nmap Security Intelligence</p>
+          <h2 className="mt-2 text-2xl font-bold text-white">Nmap {nmap?.scan_type || "Scan"} Results</h2>
+          <p className="mt-1 text-xs text-gray-500">{scanResult?.target || targetUrl || "—"}</p></div>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={onDownloadJSON} className="border border-white/10 px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-300 hover:border-red-500/50 hover:text-white">Download JSON</button>
+          <button type="button" onClick={onDownloadHTML} className="border border-white/10 px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-300 hover:border-red-500/50 hover:text-white">Download HTML</button>
+          <button type="button" onClick={onDownloadPDF} className="bg-red-600 px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-white hover:bg-red-700">Download PDF</button>
+        </div>
+      </div>
+
+      <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        {[
+          ["Target", scanResult?.target || targetUrl || "—"], ["Profile", nmap?.scan_type || "—"],
+          ["Hosts", nmapResults?.host_count ?? nmapHosts.length], ["Open Ports", open], ["NSE Results", nmapScripts.length]
+        ].map(([label,value]) => <div key={label} className="border border-white/10 bg-[#080808] p-4"><p className="text-[9px] uppercase tracking-wider text-gray-600">{label}</p><p className="mt-2 truncate text-sm font-semibold text-white">{value}</p></div>)}
+      </div>
+
+      <div className="mt-5 grid gap-4 xl:grid-cols-3">
+        <div className="border border-white/10 bg-[#080808] p-5"><p className="text-xs font-semibold uppercase tracking-wider text-gray-400">Port Statistics</p>
+          <div className="mt-4 flex items-center gap-5"><div className="relative flex h-36 w-36 shrink-0 items-center justify-center rounded-full" style={{background:donut([open,closed,filtered,other])}}><div className="flex h-24 w-24 flex-col items-center justify-center rounded-full bg-[#080808]"><span className="text-2xl font-bold text-white">{allPorts.length}</span><span className="text-[9px] text-gray-600">Total</span></div></div>
+          <div className="space-y-2 text-[10px]"><p className="text-green-400">● Open: {open}</p><p className="text-gray-400">● Closed: {closed}</p><p className="text-yellow-400">● Filtered: {filtered}</p><p className="text-gray-500">● Other: {other}</p></div></div>
+        </div>
+
+        <div className="border border-white/10 bg-[#080808] p-5"><p className="text-xs font-semibold uppercase tracking-wider text-gray-400">Service Distribution</p>
+          <div className="mt-4 flex items-center gap-5"><div className="relative flex h-36 w-36 shrink-0 items-center justify-center rounded-full" style={{background:donut(serviceEntries.slice(0,4).map(([,v])=>v))}}><div className="flex h-24 w-24 flex-col items-center justify-center rounded-full bg-[#080808]"><span className="text-2xl font-bold text-white">{serviceEntries.length}</span><span className="text-[9px] text-gray-600">Services</span></div></div>
+          <div className="space-y-2 text-[10px]">{serviceEntries.slice(0,5).map(([name,count])=><p key={name} className="text-gray-400">● {name}: <span className="text-white">{count}</span></p>)}{serviceEntries.length===0&&<p className="text-gray-600">No services detected.</p>}</div></div>
+        </div>
+
+        <div className="border border-white/10 bg-[#080808] p-5"><p className="text-xs font-semibold uppercase tracking-wider text-gray-400">Finding Severity</p>
+          <div className="mt-5 space-y-3">{Object.entries(severityCounts).map(([severity,count])=><div key={severity}><div className="flex justify-between text-[10px]"><span className="capitalize text-gray-400">{severity}</span><span className="text-white">{count}</span></div><div className="mt-1 h-2 bg-white/5"><div className="h-full bg-red-600" style={{width:`${Math.min(100,count*20)}%`}}/></div></div>)}{findings.length===0&&<p className="text-[10px] text-gray-600">No application findings were returned.</p>}</div>
+        </div>
+      </div>
+
+      <div className="mt-4 border border-white/10 bg-[#080808] p-5"><p className="text-xs font-semibold uppercase tracking-wider text-gray-400">Top Services</p>
+        <div className="mt-4 space-y-3">{serviceEntries.slice(0,8).map(([name,count])=><div key={name}><div className="mb-1 flex justify-between text-[10px]"><span className="text-gray-400">{name}</span><span className="text-white">{count}</span></div><div className="h-2 bg-white/5"><div className="h-full bg-red-600" style={{width:`${(count/maxService)*100}%`}}/></div></div>)}{serviceEntries.length===0&&<p className="text-xs text-gray-600">No open services detected.</p>}</div>
+      </div>
+
+      <div className="mt-4 border border-white/10 bg-[#080808] p-5"><div className="flex items-center justify-between"><p className="text-xs font-semibold uppercase tracking-wider text-gray-400">Host Information & OS Detection</p><span className="text-[10px] text-gray-600">{nmapHosts.length} host(s)</span></div>
+        <div className="mt-4 space-y-3">{nmapHosts.map((host,index)=><div key={`${host?.addresses?.[0]?.address||"host"}-${index}`} className="border border-white/10 p-4"><div className="flex flex-wrap justify-between gap-2"><div><p className="text-sm font-semibold text-white">{host?.addresses?.map(a=>a.address).join(", ")||"Unknown address"}</p><p className="mt-1 text-[10px] text-gray-600">{host?.hostnames?.join(", ")||"No hostname reported"}</p></div><span className="text-[9px] uppercase tracking-wider text-green-500">{host?.status||"unknown"}</span></div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">{(Array.isArray(host?.os_matches)?host.os_matches:[]).slice(0,4).map((os,index)=><div key={`${os?.name}-${index}`} className="border border-white/10 bg-black/20 p-3"><p className="text-xs text-white">{os?.name||"Unknown OS"}</p><p className="mt-1 text-[10px] text-gray-500">Accuracy: {os?.accuracy??"—"}%</p></div>)}{(!Array.isArray(host?.os_matches)||host.os_matches.length===0)&&<p className="text-xs text-gray-600">No OS match returned.</p>}</div>
+        </div>)}</div>
+      </div>
+
+      <div className="mt-4 border border-white/10 bg-[#080808] p-5"><p className="text-xs font-semibold uppercase tracking-wider text-gray-400">Open Ports & Services</p>
+        <div className="mt-4 overflow-x-auto"><table className="w-full min-w-[850px] text-left text-xs"><thead className="border-b border-white/10 text-[9px] uppercase tracking-wider text-gray-600"><tr><th className="px-3 py-2">Host</th><th className="px-3 py-2">Port</th><th className="px-3 py-2">Protocol</th><th className="px-3 py-2">State</th><th className="px-3 py-2">Service</th><th className="px-3 py-2">Product</th><th className="px-3 py-2">Version</th></tr></thead><tbody>{allPorts.map((p,i)=><tr key={`${p?.host}-${p?.port}-${i}`} className="border-b border-white/5"><td className="px-3 py-2 text-gray-400">{p?.host}</td><td className="px-3 py-2 text-white">{p?.port??"—"}</td><td className="px-3 py-2 text-gray-500">{p?.protocol||"—"}</td><td className={`px-3 py-2 ${p?.state==="open"?"text-green-400":"text-gray-500"}`}>{p?.state||"—"}</td><td className="px-3 py-2 text-gray-300">{p?.service?.name||"—"}</td><td className="px-3 py-2 text-gray-500">{p?.service?.product||"—"}</td><td className="px-3 py-2 text-gray-500">{p?.service?.version||"—"}</td></tr>)}</tbody></table>{allPorts.length===0&&<p className="mt-3 text-xs text-gray-600">No port records were returned.</p>}</div>
+      </div>
+
+      <div className="mt-4 border border-white/10 bg-[#080808] p-5"><p className="text-xs font-semibold uppercase tracking-wider text-gray-400">NSE / Security Findings</p>
+        <div className="mt-4 space-y-3">{nmapScripts.map((script,index)=><div key={`${script?.id||"script"}-${index}`} className="border border-white/10 p-4"><div className="flex justify-between gap-2"><p className="text-xs font-semibold text-white">{script?.id||"Unknown script"}</p>{script?.port&&<span className="text-[9px] text-gray-500">Port {script.port}</span>}</div><pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap text-[10px] leading-5 text-gray-500">{script?.output||"No script output."}</pre></div>)}{nmapScripts.length===0&&<p className="text-xs text-gray-600">No NSE output was returned.</p>}</div>
+      </div>
+
+      <div className="mt-4 border border-white/10 bg-[#080808] p-5"><p className="text-xs font-semibold uppercase tracking-wider text-gray-400">HTTP / HTTPS Services</p>
+        <div className="mt-3 grid gap-3 md:grid-cols-2">{httpPorts.map((p,i)=><div key={`${p?.port}-${i}`} className="border border-white/10 p-4"><p className="text-sm font-semibold text-white">{p?.service?.name||"HTTP/HTTPS"} — {p?.port}/{p?.protocol||"tcp"}</p><p className="mt-1 text-[10px] text-gray-500">{p?.service?.product||"Unknown product"} {p?.service?.version||""}</p></div>)}{httpPorts.length===0&&<p className="text-xs text-gray-600">No HTTP/HTTPS service was detected.</p>}</div>
+      </div>
+
+      {Array.isArray(nmap?.errors)&&nmap.errors.length>0&&<div className="mt-4 border border-yellow-600/20 bg-yellow-600/5 p-5"><p className="text-xs font-semibold uppercase tracking-wider text-yellow-500">Warnings / Errors</p><div className="mt-3 space-y-2">{nmap.errors.map((e,i)=><p key={i} className="text-xs leading-5 text-gray-500">{e}</p>)}</div></div>}
+
+      <div className="mt-4 border border-white/10 bg-[#080808] p-5"><p className="text-xs font-semibold uppercase tracking-wider text-gray-400">Raw Nmap Output / Evidence</p><pre className="mt-3 max-h-[420px] overflow-auto whitespace-pre-wrap text-[10px] leading-5 text-gray-500">{rawOutput}</pre></div>
     </div>
   );
 }
@@ -12943,6 +25907,2006 @@ function CopilotContextCard({ label, value, detail }) {
 
 
 // ==================================================
+// INCIDENT MANAGEMENT
+// ==================================================
+function IncidentManagement() {
+  const [incidents, setIncidents] = useState([]);
+  const [selectedIncident, setSelectedIncident] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [caseData, setCaseData] = useState(null);
+  const [caseStarting, setCaseStarting] = useState(false);
+  const [caseAction, setCaseAction] = useState("");
+  const [resolutionText, setResolutionText] = useState("");
+  const [assignmentText, setAssignmentText] = useState("");
+  const [investigationNotes, setInvestigationNotes] = useState("");
+  const [caseError, setCaseError] = useState("");
+
+  const loadIncidents = async () => {
+    try {
+      setLoading(true);
+      setError("");
+
+      const response = await axios.get(`${API_URL}/incidents/`);
+      setIncidents(
+        Array.isArray(response.data?.incidents)
+          ? response.data.incidents
+          : []
+      );
+    } catch (err) {
+      console.error("Incident list load error:", err);
+
+      if (err.response?.data?.detail) {
+        setError(err.response.data.detail);
+      } else {
+        setError("Unable to load incidents.");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadIncidentDetails = async (incidentId) => {
+    try {
+      setDetailLoading(true);
+      setError("");
+
+      const response = await axios.get(
+        `${API_URL}/incidents/${encodeURIComponent(incidentId)}`
+      );
+
+      setSelectedIncident(response.data);
+      setCaseData(response.data?.case || null);
+      setAssignmentText(response.data?.case?.assigned_to || "");
+      setInvestigationNotes(response.data?.case?.investigation_notes || "");
+      setCaseError("");
+    } catch (err) {
+      console.error("Incident detail load error:", err);
+
+      if (err.response?.data?.detail) {
+        setError(err.response.data.detail);
+      } else {
+        setError("Unable to load incident details.");
+      }
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const startInvestigation = async () => {
+    if (!selectedIncident?.incident_id) {
+      return;
+    }
+
+    const incidentId = encodeURIComponent(selectedIncident.incident_id);
+
+    try {
+      setCaseStarting(true);
+      setCaseAction("start");
+      setCaseError("");
+
+      if (!caseData) {
+        await axios.post(`${API_URL}/incidents/${incidentId}/case`);
+      }
+
+      const response = await axios.patch(
+        `${API_URL}/incidents/${incidentId}/case/start`,
+        {}
+      );
+
+      setCaseData(response.data?.case || null);
+      await loadIncidentDetails(selectedIncident.incident_id);
+    } catch (err) {
+      console.error("Incident investigation start error:", err);
+
+      if (err.response?.data?.detail) {
+        setCaseError(err.response.data.detail);
+      } else {
+        setCaseError("Unable to start the incident investigation.");
+      }
+    } finally {
+      setCaseStarting(false);
+      setCaseAction("");
+    }
+  };
+
+  const containIncident = async () => {
+    if (!selectedIncident?.incident_id) {
+      return;
+    }
+
+    const incidentId = encodeURIComponent(selectedIncident.incident_id);
+
+    try {
+      setCaseAction("contain");
+      setCaseError("");
+
+      const response = await axios.patch(
+        `${API_URL}/incidents/${incidentId}/case/contain`,
+        {}
+      );
+
+      setCaseData(response.data?.case || null);
+      await loadIncidentDetails(selectedIncident.incident_id);
+    } catch (err) {
+      console.error("Incident containment error:", err);
+
+      if (err.response?.data?.detail) {
+        setCaseError(err.response.data.detail);
+      } else {
+        setCaseError("Unable to contain the incident.");
+      }
+    } finally {
+      setCaseAction("");
+    }
+  };
+
+  const resolveIncident = async () => {
+    if (!selectedIncident?.incident_id) {
+      return;
+    }
+
+    const trimmedResolution = resolutionText.trim();
+
+    if (!trimmedResolution) {
+      setCaseError("Enter a resolution summary before resolving the incident.");
+      return;
+    }
+
+    const incidentId = encodeURIComponent(selectedIncident.incident_id);
+
+    try {
+      setCaseAction("resolve");
+      setCaseError("");
+
+      const response = await axios.patch(
+        `${API_URL}/incidents/${incidentId}/case/resolve?resolution=${encodeURIComponent(trimmedResolution)}`,
+        {}
+      );
+
+      setCaseData(response.data?.case || null);
+      setResolutionText("");
+      await loadIncidentDetails(selectedIncident.incident_id);
+    } catch (err) {
+      console.error("Incident resolution error:", err);
+
+      if (err.response?.data?.detail) {
+        setCaseError(err.response.data.detail);
+      } else {
+        setCaseError("Unable to resolve the incident.");
+      }
+    } finally {
+      setCaseAction("");
+    }
+  };
+
+  const closeIncident = async () => {
+    if (!selectedIncident?.incident_id) {
+      return;
+    }
+
+    const incidentId = encodeURIComponent(selectedIncident.incident_id);
+
+    try {
+      setCaseAction("close");
+      setCaseError("");
+
+      const response = await axios.patch(
+        `${API_URL}/incidents/${incidentId}/case/close`,
+        {}
+      );
+
+      setCaseData(response.data?.case || null);
+      await loadIncidentDetails(selectedIncident.incident_id);
+    } catch (err) {
+      console.error("Incident close error:", err);
+
+      if (err.response?.data?.detail) {
+        setCaseError(err.response.data.detail);
+      } else {
+        setCaseError("Unable to close the incident.");
+      }
+    } finally {
+      setCaseAction("");
+    }
+  };
+
+  const assignIncident = async () => {
+    if (!selectedIncident?.incident_id) {
+      return;
+    }
+
+    const analyst = assignmentText.trim();
+
+    if (!analyst) {
+      setCaseError("Enter an analyst identifier before assigning the incident.");
+      return;
+    }
+
+    const incidentId = encodeURIComponent(selectedIncident.incident_id);
+
+    try {
+      setCaseAction("assign");
+      setCaseError("");
+
+      const response = await axios.patch(
+        `${API_URL}/incidents/${incidentId}/case/assign?assigned_to=${encodeURIComponent(analyst)}`,
+        {}
+      );
+
+      setCaseData(response.data?.case || null);
+      setAssignmentText(response.data?.case?.assigned_to || analyst);
+      await loadIncidentDetails(selectedIncident.incident_id);
+    } catch (err) {
+      console.error("Incident assignment error:", err);
+
+      if (err.response?.data?.detail) {
+        setCaseError(err.response.data.detail);
+      } else {
+        setCaseError("Unable to assign the incident.");
+      }
+    } finally {
+      setCaseAction("");
+    }
+  };
+
+
+  const saveInvestigationNotes = async () => {
+    if (!selectedIncident?.incident_id) {
+      return;
+    }
+
+    const notes = investigationNotes.trim();
+
+    if (!notes) {
+      setCaseError("Enter investigation notes before saving.");
+      return;
+    }
+
+    const incidentId = encodeURIComponent(selectedIncident.incident_id);
+
+    try {
+      setCaseAction("notes");
+      setCaseError("");
+
+      const response = await axios.patch(
+        `${API_URL}/incidents/${incidentId}/case/notes?notes=${encodeURIComponent(notes)}`,
+        {}
+      );
+
+      setCaseData(response.data?.case || null);
+      setInvestigationNotes(
+        response.data?.case?.investigation_notes || notes
+      );
+      await loadIncidentDetails(selectedIncident.incident_id);
+    } catch (err) {
+      console.error("Incident investigation notes error:", err);
+
+      if (err.response?.data?.detail) {
+        setCaseError(err.response.data.detail);
+      } else {
+        setCaseError("Unable to save the investigation notes.");
+      }
+    } finally {
+      setCaseAction("");
+    }
+  };
+
+  useEffect(() => {
+    loadIncidents();
+  }, []);
+
+  const severityClass = (severity) => {
+    const value = String(severity || "").toUpperCase();
+
+    if (value === "CRITICAL") {
+      return "border-red-500/40 bg-red-500/15 text-red-400";
+    }
+
+    if (value === "HIGH") {
+      return "border-orange-500/40 bg-orange-500/15 text-orange-400";
+    }
+
+    if (value === "ERROR") {
+      return "border-yellow-500/40 bg-yellow-500/15 text-yellow-300";
+    }
+
+    return "border-white/10 bg-white/5 text-gray-400";
+  };
+
+  const statusClass = (status) => {
+    const value = String(status || "").toUpperCase();
+
+    if (value === "RESOLVED" || value === "CLOSED") {
+      return "border-green-500/30 bg-green-500/10 text-green-400";
+    }
+
+    if (value === "ACKNOWLEDGED" || value === "IN_PROGRESS") {
+      return "border-blue-500/30 bg-blue-500/10 text-blue-400";
+    }
+
+    if (value === "CONTAINED") {
+      return "border-orange-500/30 bg-orange-500/10 text-orange-400";
+    }
+
+    return "border-red-500/30 bg-red-500/10 text-red-400";
+  };
+
+  const caseStatusClass = (status) => {
+    const value = String(status || "OPEN").toUpperCase();
+
+    if (value === "CLOSED" || value === "RESOLVED") {
+      return "border-green-500/30 bg-green-500/10 text-green-400";
+    }
+
+    if (value === "CONTAINED") {
+      return "border-orange-500/30 bg-orange-500/10 text-orange-400";
+    }
+
+    if (value === "IN_PROGRESS") {
+      return "border-blue-500/30 bg-blue-500/10 text-blue-400";
+    }
+
+    return "border-red-500/30 bg-red-500/10 text-red-400";
+  };
+
+  const renderJson = (value) => {
+    if (value === null || value === undefined) {
+      return "—";
+    }
+
+    if (typeof value === "string") {
+      return value;
+    }
+
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  };
+
+  if (selectedIncident) {
+    const detection = selectedIncident.raw_event?.detection;
+    const correlation = selectedIncident.raw_event?.correlation;
+    const triggerEvent = selectedIncident.raw_event?.trigger_event;
+    const correlationEvents = Array.isArray(correlation?.events)
+      ? correlation.events
+      : [];
+
+    return (
+      <div>
+        <div className="mb-6 flex flex-col justify-between gap-4 md:flex-row md:items-start">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.25em] text-red-500">
+              Incident Investigation
+            </p>
+            <h1 className="mt-2 text-2xl font-bold text-white">
+              {selectedIncident.incident_id}
+            </h1>
+            <p className="mt-2 max-w-3xl text-xs leading-5 text-gray-500">
+              Full investigation context for the selected SOC security incident.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setSelectedIncident(null)}
+            className="rounded-md border border-white/10 px-4 py-2 text-[10px] text-gray-300 transition hover:border-red-500/40 hover:text-white"
+          >
+            ← Back to Incidents
+          </button>
+        </div>
+
+        {error && (
+          <div className="mb-5 rounded-md border border-red-500/25 bg-red-500/10 px-4 py-3 text-xs text-red-400">
+            {error}
+          </div>
+        )}
+
+        {caseError && (
+          <div className="mb-5 rounded-md border border-red-500/25 bg-red-500/10 px-4 py-3 text-xs text-red-400">
+            {caseError}
+          </div>
+        )}
+
+        <section className="mb-4 rounded-lg border border-white/10 bg-[#0b1014] p-5">
+          <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
+            <div>
+              <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500">
+                Incident Case
+              </p>
+
+              {caseData ? (
+                <div className="mt-2 flex flex-wrap items-center gap-3">
+                  <p className="text-sm font-semibold text-white">
+                    {caseData.incident_id}
+                  </p>
+                  <span
+                    className={`rounded-md border px-2 py-1 text-[9px] font-semibold ${caseStatusClass(
+                      caseData.status
+                    )}`}
+                  >
+                    {caseData.status || "OPEN"}
+                  </span>
+                </div>
+              ) : (
+                <p className="mt-2 text-xs text-gray-500">
+                  No persistent incident case has been created for this detection yet.
+                </p>
+              )}
+            </div>
+
+            {!caseData ? (
+              <button
+                type="button"
+                onClick={startInvestigation}
+                disabled={caseStarting || detailLoading || !!caseAction}
+                className="rounded-md border border-red-500/30 bg-red-500/10 px-4 py-2 text-[10px] font-semibold text-red-400 transition hover:bg-red-500/20 hover:text-red-300 disabled:opacity-50"
+              >
+                {caseAction === "start" ? "Starting..." : "Start Investigation"}
+              </button>
+            ) : (
+              <>
+                {String(caseData.status || "OPEN").toUpperCase() === "OPEN" && (
+                  <button
+                    type="button"
+                    onClick={startInvestigation}
+                    disabled={!!caseAction || detailLoading}
+                    className="rounded-md border border-red-500/30 bg-red-500/10 px-4 py-2 text-[10px] font-semibold text-red-400 transition hover:bg-red-500/20 hover:text-red-300 disabled:opacity-50"
+                  >
+                    {caseAction === "start" ? "Starting..." : "Start Investigation"}
+                  </button>
+                )}
+
+                {String(caseData.status || "").toUpperCase() === "IN_PROGRESS" && (
+                  <button
+                    type="button"
+                    onClick={containIncident}
+                    disabled={!!caseAction || detailLoading}
+                    className="rounded-md border border-orange-500/30 bg-orange-500/10 px-4 py-2 text-[10px] font-semibold text-orange-400 transition hover:bg-orange-500/20 hover:text-orange-300 disabled:opacity-50"
+                  >
+                    {caseAction === "contain" ? "Containing..." : "Contain Incident"}
+                  </button>
+                )}
+
+                {String(caseData.status || "").toUpperCase() === "CONTAINED" && (
+                  <div className="flex w-full flex-col gap-2 md:w-auto md:min-w-[340px]">
+                    <textarea
+                      value={resolutionText}
+                      onChange={(event) => setResolutionText(event.target.value)}
+                      placeholder="Enter resolution summary..."
+                      rows={3}
+                      className="w-full rounded-md border border-white/10 bg-black/30 px-3 py-2 text-xs text-gray-200 outline-none transition placeholder:text-gray-600 focus:border-green-500/40"
+                    />
+                    <button
+                      type="button"
+                      onClick={resolveIncident}
+                      disabled={!!caseAction || detailLoading || !resolutionText.trim()}
+                      className="rounded-md border border-green-500/30 bg-green-500/10 px-4 py-2 text-[10px] font-semibold text-green-400 transition hover:bg-green-500/20 hover:text-green-300 disabled:opacity-50"
+                    >
+                      {caseAction === "resolve" ? "Resolving..." : "Resolve Incident"}
+                    </button>
+                  </div>
+                )}
+
+                {String(caseData.status || "").toUpperCase() === "RESOLVED" && (
+                  <button
+                    type="button"
+                    onClick={closeIncident}
+                    disabled={!!caseAction || detailLoading}
+                    className="rounded-md border border-green-500/30 bg-green-500/10 px-4 py-2 text-[10px] font-semibold text-green-400 transition hover:bg-green-500/20 hover:text-green-300 disabled:opacity-50"
+                  >
+                    {caseAction === "close" ? "Closing..." : "Close Incident"}
+                  </button>
+                )}
+
+                {String(caseData.status || "").toUpperCase() === "CLOSED" && (
+                  <span className="rounded-md border border-green-500/30 bg-green-500/10 px-4 py-2 text-[10px] font-semibold text-green-400">
+                    Case Closed
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+
+          {caseData && (
+            <>
+            <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Assigned To
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {caseData.assigned_to || "Unassigned"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Created
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {caseData.created_at
+                    ? new Date(caseData.created_at).toLocaleString()
+                    : "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Investigation Started
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {caseData.investigation_started_at
+                    ? new Date(
+                        caseData.investigation_started_at
+                      ).toLocaleString()
+                    : "Not started"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Contained
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {caseData.contained_at
+                    ? new Date(caseData.contained_at).toLocaleString()
+                    : "Not contained"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Resolved
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {caseData.resolved_at
+                    ? new Date(caseData.resolved_at).toLocaleString()
+                    : "Not resolved"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Closed
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {caseData.closed_at
+                    ? new Date(caseData.closed_at).toLocaleString()
+                    : "Not closed"}
+                </p>
+              </div>
+
+              <div className="sm:col-span-2 lg:col-span-4">
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Resolution Summary
+                </p>
+                <p className="mt-1 break-words text-xs text-gray-300">
+                  {caseData.resolution || "Not resolved"}
+                </p>
+              </div>
+            </div>
+
+            {String(caseData.status || "OPEN").toUpperCase() !== "CLOSED" && (
+              <div className="mt-5 border-t border-white/10 pt-5">
+                <div className="flex flex-col gap-3 md:flex-row md:items-end">
+                  <div className="flex-1">
+                    <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                      Analyst Assignment
+                    </p>
+                    <input
+                      value={assignmentText}
+                      onChange={(event) => setAssignmentText(event.target.value)}
+                      placeholder="Enter analyst identifier"
+                      className="mt-2 w-full rounded-md border border-white/10 bg-black/30 px-3 py-2 text-xs text-gray-200 outline-none transition placeholder:text-gray-600 focus:border-blue-500/40"
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={assignIncident}
+                    disabled={!!caseAction || detailLoading || !assignmentText.trim()}
+                    className="rounded-md border border-blue-500/30 bg-blue-500/10 px-4 py-2 text-[10px] font-semibold text-blue-400 transition hover:bg-blue-500/20 hover:text-blue-300 disabled:opacity-50"
+                  >
+                    {caseAction === "assign" ? "Assigning..." : "Assign Analyst"}
+                  </button>
+                </div>
+
+                <p className="mt-2 text-[9px] text-gray-600">
+                  Use the SOC analyst identifier assigned to investigate this case.
+                </p>
+
+                <div className="mt-5 border-t border-white/10 pt-5">
+                  <div className="flex flex-col gap-3">
+                    <div>
+                      <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                        Investigation Notes
+                      </p>
+                      <textarea
+                        value={investigationNotes}
+                        onChange={(event) =>
+                          setInvestigationNotes(event.target.value)
+                        }
+                        placeholder="Record investigation findings, evidence reviewed, analyst observations, or actions taken..."
+                        rows={5}
+                        className="mt-2 w-full rounded-md border border-white/10 bg-black/30 px-3 py-3 text-xs leading-5 text-gray-200 outline-none transition placeholder:text-gray-600 focus:border-blue-500/40"
+                      />
+                    </div>
+
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={saveInvestigationNotes}
+                        disabled={
+                          !!caseAction ||
+                          detailLoading ||
+                          !investigationNotes.trim()
+                        }
+                        className="rounded-md border border-blue-500/30 bg-blue-500/10 px-4 py-2 text-[10px] font-semibold text-blue-400 transition hover:bg-blue-500/20 hover:text-blue-300 disabled:opacity-50"
+                      >
+                        {caseAction === "notes"
+                          ? "Saving..."
+                          : "Save Investigation Notes"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <p className="mt-2 text-[9px] text-gray-600">
+                    Notes are persisted with the incident case and remain available during later investigation.
+                  </p>
+                </div>
+              </div>
+            )}
+            </>
+          )}
+        </section>
+
+        <div className="grid gap-4 xl:grid-cols-3">
+          <section className="rounded-lg border border-white/10 bg-[#0b1014] p-5 xl:col-span-2">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="min-w-0">
+                <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500">
+                  Detection
+                </p>
+                <h2 className="mt-3 text-lg font-semibold text-white">
+                  {selectedIncident.title || "Security Detection"}
+                </h2>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <span
+                  className={`inline-flex rounded-md border px-3 py-1.5 text-[10px] font-semibold ${severityClass(
+                    selectedIncident.severity
+                  )}`}
+                >
+                  {selectedIncident.severity || "UNKNOWN"}
+                </span>
+
+                <span
+                  className={`inline-flex rounded-md border px-3 py-1.5 text-[10px] font-semibold ${statusClass(
+                    selectedIncident.status
+                  )}`}
+                >
+                  {selectedIncident.status || "OPEN"}
+                </span>
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Source
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {selectedIncident.source || "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Event Type
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {selectedIncident.event_type || "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Target
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {selectedIncident.target || "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Timestamp
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {selectedIncident.timestamp
+                    ? new Date(selectedIncident.timestamp).toLocaleString()
+                    : "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Acknowledged
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {selectedIncident.acknowledged_at
+                    ? new Date(selectedIncident.acknowledged_at).toLocaleString()
+                    : "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Resolved
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {selectedIncident.resolved_at
+                    ? new Date(selectedIncident.resolved_at).toLocaleString()
+                    : "—"}
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <section className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+            <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500">
+              MITRE ATT&CK
+            </p>
+
+            <p className="mt-4 text-sm font-semibold text-red-400">
+              {selectedIncident.mitre?.technique_id || "—"}
+            </p>
+
+            <p className="mt-1 text-sm text-white">
+              {selectedIncident.mitre?.technique_name || "—"}
+            </p>
+
+            <div className="mt-5 space-y-3">
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Tactic
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {selectedIncident.mitre?.tactic || "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Confidence
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {selectedIncident.mitre?.confidence || "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Mapping Source
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {selectedIncident.mitre?.mapping_source || "—"}
+                </p>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div className="mt-4 grid gap-4 xl:grid-cols-2">
+          <section className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+            <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500">
+              Detection Evidence
+            </p>
+            <pre className="mt-4 max-h-56 overflow-auto whitespace-pre-wrap rounded-md border border-white/10 bg-black/30 p-4 text-[11px] leading-5 text-gray-300">
+              {selectedIncident.mitre?.evidence || "No evidence available."}
+            </pre>
+          </section>
+
+          <section className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+            <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500">
+              Detection Summary
+            </p>
+
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Detection Type
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {detection?.detection_type || "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Failure Count
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {detection?.failure_count ?? "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Unique Users
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {detection?.unique_user_count ?? "—"}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                  Users
+                </p>
+                <p className="mt-1 break-words text-xs text-gray-300">
+                  {Array.isArray(detection?.usernames) && detection.usernames.length
+                    ? detection.usernames.join(", ")
+                    : "—"}
+                </p>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <section className="mt-4 rounded-lg border border-white/10 bg-[#0b1014] p-5">
+          <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500">
+            Detection Timeline
+          </p>
+
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full text-left">
+              <thead>
+                <tr className="border-b border-white/10 text-[9px] uppercase tracking-wider text-gray-600">
+                  <th className="px-3 py-3">Time</th>
+                  <th className="px-3 py-3">Event</th>
+                  <th className="px-3 py-3">Source</th>
+                  <th className="px-3 py-3">Message</th>
+                </tr>
+              </thead>
+              <tbody>
+                {correlationEvents.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan="4"
+                      className="px-3 py-8 text-center text-xs text-gray-600"
+                    >
+                      No correlated events available.
+                    </td>
+                  </tr>
+                ) : (
+                  correlationEvents.map((event, index) => (
+                    <tr
+                      key={event.event_id || `${event.timestamp}-${index}`}
+                      className="border-b border-white/5"
+                    >
+                      <td className="whitespace-nowrap px-3 py-3 text-[9px] text-gray-500">
+                        {event.timestamp
+                          ? new Date(event.timestamp).toLocaleString()
+                          : "—"}
+                      </td>
+                      <td className="px-3 py-3 text-[10px] text-gray-300">
+                        {event.event_type || "—"}
+                      </td>
+                      <td className="px-3 py-3 text-[10px] text-gray-400">
+                        {event.source || "—"}
+                      </td>
+                      <td className="max-w-[520px] px-3 py-3 text-[10px] text-gray-400">
+                        {event.message || "—"}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <div className="mt-4 grid gap-4 xl:grid-cols-2">
+          <section className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+            <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500">
+              Trigger Event
+            </p>
+            <pre className="mt-4 max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-white/10 bg-black/30 p-4 text-[10px] leading-5 text-gray-400">
+              {renderJson(triggerEvent)}
+            </pre>
+          </section>
+
+          <section className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+            <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500">
+              Raw Security Event
+            </p>
+            <pre className="mt-4 max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-white/10 bg-black/30 p-4 text-[10px] leading-5 text-gray-400">
+              {renderJson(selectedIncident.raw_event)}
+            </pre>
+          </section>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="mb-6 flex flex-col justify-between gap-4 md:flex-row md:items-end">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.25em] text-red-500">
+            Security Operations
+          </p>
+          <h1 className="mt-2 text-2xl font-bold text-white">
+            Incident Management
+          </h1>
+          <p className="mt-2 max-w-3xl text-xs leading-5 text-gray-500">
+            Investigate security detections generated from the SOC security event pipeline.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={loadIncidents}
+          disabled={loading}
+          className="rounded-md border border-white/10 px-4 py-2 text-[10px] text-gray-300 transition hover:border-red-500/40 hover:text-white disabled:opacity-50"
+        >
+          {loading ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="mb-5 rounded-md border border-red-500/25 bg-red-500/10 px-4 py-3 text-xs text-red-400">
+          {error}
+        </div>
+      )}
+
+      <section className="overflow-hidden rounded-lg border border-white/10 bg-[#0b1014]">
+        <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+          <div>
+            <h2 className="text-sm font-semibold text-white">
+              Incident Investigation Queue
+            </h2>
+            <p className="mt-1 text-[9px] text-gray-600">
+              {incidents.length} incident records
+            </p>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="px-4 py-12 text-center text-xs text-gray-500">
+            Loading incidents...
+          </div>
+        ) : incidents.length === 0 ? (
+          <div className="px-4 py-12 text-center text-xs text-gray-600">
+            No incidents available.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left">
+              <thead>
+                <tr className="border-b border-white/10 text-[9px] uppercase tracking-wider text-gray-600">
+                  <th className="px-4 py-3">Incident</th>
+                  <th className="px-4 py-3">Severity</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Detection</th>
+                  <th className="px-4 py-3">MITRE</th>
+                  <th className="px-4 py-3">Source</th>
+                  <th className="px-4 py-3">Time</th>
+                  <th className="px-4 py-3"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {incidents.map((incident) => (
+                  <tr
+                    key={incident.incident_id}
+                    className="border-b border-white/5 transition hover:bg-white/[0.02]"
+                  >
+                    <td className="px-4 py-4">
+                      <p className="text-[10px] font-semibold text-white">
+                        {incident.incident_id}
+                      </p>
+                      <p className="mt-1 max-w-[180px] truncate text-[9px] text-gray-600">
+                        {incident.event_type || "—"}
+                      </p>
+                    </td>
+
+                    <td className="px-4 py-4">
+                      <span
+                        className={`inline-flex rounded-md border px-2 py-1 text-[9px] font-semibold ${severityClass(
+                          incident.severity
+                        )}`}
+                      >
+                        {incident.severity || "UNKNOWN"}
+                      </span>
+                    </td>
+
+                    <td className="px-4 py-4">
+                      <span
+                        className={`inline-flex rounded-md border px-2 py-1 text-[9px] font-semibold ${statusClass(
+                          incident.status
+                        )}`}
+                      >
+                        {incident.status || "OPEN"}
+                      </span>
+                    </td>
+
+                    <td className="max-w-[240px] px-4 py-4">
+                      <p className="truncate text-[10px] text-gray-300">
+                        {incident.title || "Security Detection"}
+                      </p>
+                    </td>
+
+                    <td className="px-4 py-4">
+                      <p className="text-[10px] font-semibold text-red-400">
+                        {incident.mitre?.technique_id || "—"}
+                      </p>
+                      <p className="mt-1 text-[9px] text-gray-500">
+                        {incident.mitre?.technique_name || "—"}
+                      </p>
+                    </td>
+
+                    <td className="px-4 py-4 text-[10px] text-gray-400">
+                      {incident.source || "—"}
+                    </td>
+
+                    <td className="whitespace-nowrap px-4 py-4 text-[9px] text-gray-500">
+                      {incident.timestamp
+                        ? new Date(incident.timestamp).toLocaleString()
+                        : "—"}
+                    </td>
+
+                    <td className="px-4 py-4">
+                      <button
+                        type="button"
+                        onClick={() => loadIncidentDetails(incident.incident_id)}
+                        disabled={detailLoading}
+                        className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-[9px] font-semibold text-red-400 transition hover:bg-red-500/20 hover:text-red-300 disabled:opacity-50"
+                      >
+                        {detailLoading ? "Loading..." : "Investigate"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+
+// ==================================================
+// CODE SECURITY
+// ==================================================
+function CodeSecurity() {
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [job, setJob] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [error, setError] = useState("");
+
+  const getConfig = () => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      throw new Error("Your session has expired. Please login again.");
+    }
+
+    return {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    };
+  };
+
+  const startScan = async () => {
+    if (!selectedFile) {
+      setError("Please select a source file or ZIP project.");
+      return;
+    }
+
+    try {
+      setError("");
+      setScanning(true);
+      setJob(null);
+
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+
+      const response = await axios.post(
+        `${API_URL}/code-security/scan`,
+        formData,
+        {
+          headers: {
+            ...getConfig().headers,
+            "Content-Type": "multipart/form-data",
+          },
+        }
+      );
+
+      setJob(response.data);
+    } catch (err) {
+      console.error("Code security scan error:", err);
+
+      if (err.response?.status === 401) {
+        setError("Your session has expired. Please login again.");
+      } else if (err.response?.data?.detail) {
+        setError(err.response.data.detail);
+      } else {
+        setError("Unable to start code security scan.");
+      }
+
+      setScanning(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!job?.job_id || !scanning) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const response = await axios.get(
+          `${API_URL}/code-security/progress/${job.job_id}`,
+          getConfig()
+        );
+
+        if (cancelled) {
+          return;
+        }
+
+        setJob(response.data);
+
+        if (
+          response.data.status === "completed" ||
+          response.data.status === "failed"
+        ) {
+          setScanning(false);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error("Code security progress error:", err);
+          setError(
+            err.response?.data?.detail ||
+              "Unable to retrieve scan progress."
+          );
+          setScanning(false);
+        }
+      }
+    };
+
+    poll();
+    const interval = window.setInterval(poll, 1000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [job?.job_id, scanning]);
+
+  const result = job?.result;
+  const findings = Array.isArray(result?.findings)
+    ? result.findings
+    : [];
+
+  const severityClass = (severity) => {
+    const value = String(severity || "").toUpperCase();
+
+    if (value === "CRITICAL") {
+      return "bg-red-600/20 text-red-400 border-red-600/30";
+    }
+
+    if (value === "HIGH") {
+      return "bg-orange-600/20 text-orange-400 border-orange-600/30";
+    }
+
+    if (value === "MEDIUM") {
+      return "bg-yellow-600/20 text-yellow-400 border-yellow-600/30";
+    }
+
+    return "bg-blue-600/20 text-blue-400 border-blue-600/30";
+  };
+
+  const resetScan = () => {
+    setSelectedFile(null);
+    setJob(null);
+    setScanning(false);
+    setError("");
+
+    const input = document.getElementById("code-security-upload");
+    if (input) {
+      input.value = "";
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <p className="text-xs uppercase tracking-[0.3em] text-red-500">
+          Security Testing
+        </p>
+
+        <h1 className="mt-2 text-3xl font-bold text-white">
+          Code Security
+        </h1>
+
+        <p className="mt-2 text-sm text-gray-500">
+          Static analysis and secret detection for source files and ZIP projects.
+          Uploaded code is analyzed as data and is not executed.
+        </p>
+      </div>
+
+      {error && (
+        <div className="border border-red-600/30 bg-red-600/10 px-5 py-4 text-sm text-red-400">
+          {error}
+        </div>
+      )}
+
+      <div className="rounded-lg border border-white/10 bg-white/[0.03] p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-white">
+              Source Code Scan
+            </h2>
+            <p className="mt-1 text-sm text-gray-500">
+              Upload one supported source file or a ZIP project up to 50 MB.
+            </p>
+          </div>
+
+          {job && (
+            <span
+              className={`rounded-full border px-3 py-1 text-xs ${
+                job.status === "completed"
+                  ? "border-green-600/30 bg-green-600/10 text-green-400"
+                  : job.status === "failed"
+                  ? "border-red-600/30 bg-red-600/10 text-red-400"
+                  : "border-yellow-600/30 bg-yellow-600/10 text-yellow-400"
+              }`}
+            >
+              {String(job.status || "queued").toUpperCase()}
+            </span>
+          )}
+        </div>
+
+        <div className="mt-6">
+          <input
+            id="code-security-upload"
+            type="file"
+            accept=".py,.java,.js,.jsx,.ts,.tsx,.c,.cpp,.cc,.cxx,.cs,.php,.go,.rb,.kt,.swift,.rs,.html,.htm,.css,.sql,.sh,.bash,.yaml,.yml,.json,.xml,.zip"
+            disabled={scanning}
+            onChange={(event) => {
+              setSelectedFile(event.target.files?.[0] || null);
+              setError("");
+            }}
+            className="block w-full rounded-md border border-white/10 bg-black/30 px-4 py-3 text-sm text-gray-300 file:mr-4 file:rounded-md file:border-0 file:bg-red-600 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-red-700 disabled:opacity-50"
+          />
+        </div>
+
+        {selectedFile && (
+          <div className="mt-4 rounded-md border border-white/10 bg-black/20 px-4 py-3">
+            <div className="text-xs uppercase tracking-wider text-gray-500">
+              Selected File
+            </div>
+            <div className="mt-1 break-all font-mono text-sm text-gray-300">
+              {selectedFile.name}
+            </div>
+            <div className="mt-1 text-xs text-gray-600">
+              {(selectedFile.size / 1024 / 1024).toFixed(2)} MB
+            </div>
+          </div>
+        )}
+
+        <div className="mt-5 flex flex-wrap gap-3">
+          <button
+            onClick={startScan}
+            disabled={!selectedFile || scanning}
+            className="rounded-md bg-red-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {scanning ? "Scanning..." : "Start Code Scan"}
+          </button>
+
+          {(job || selectedFile) && (
+            <button
+              onClick={resetScan}
+              disabled={scanning}
+              className="rounded-md border border-white/10 px-5 py-2.5 text-sm text-gray-300 hover:bg-white/5 disabled:opacity-50"
+            >
+              Reset
+            </button>
+          )}
+        </div>
+      </div>
+
+      {job && (
+        <div className="rounded-lg border border-white/10 bg-white/[0.03] p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-semibold text-white">
+                Scan Progress
+              </h2>
+              <p className="mt-1 text-sm text-gray-500">
+                {job.message || "Processing code security scan"}
+              </p>
+            </div>
+
+            <span className="text-2xl font-bold text-white">
+              {job.progress ?? 0}%
+            </span>
+          </div>
+
+          <div className="mt-5 h-2 overflow-hidden rounded-full bg-white/10">
+            <div
+              className="h-full rounded-full bg-red-600 transition-all duration-500"
+              style={{ width: `${job.progress ?? 0}%` }}
+            />
+          </div>
+
+          <div className="mt-4 grid gap-3 sm:grid-cols-3">
+            <div className="rounded-md border border-white/10 bg-black/20 p-3">
+              <div className="text-xs uppercase text-gray-600">Stage</div>
+              <div className="mt-1 text-sm font-medium text-gray-300">
+                {job.stage || "Queued"}
+              </div>
+            </div>
+
+            <div className="rounded-md border border-white/10 bg-black/20 p-3">
+              <div className="text-xs uppercase text-gray-600">Status</div>
+              <div className="mt-1 text-sm font-medium text-gray-300">
+                {job.status || "queued"}
+              </div>
+            </div>
+
+            <div className="rounded-md border border-white/10 bg-black/20 p-3">
+              <div className="text-xs uppercase text-gray-600">Job ID</div>
+              <div className="mt-1 break-all font-mono text-xs text-gray-400">
+                {job.job_id}
+              </div>
+            </div>
+          </div>
+
+          {job.error && (
+            <div className="mt-4 border border-red-600/30 bg-red-600/10 px-4 py-3 text-sm text-red-400">
+              {job.error}
+            </div>
+          )}
+        </div>
+      )}
+
+      {result && job.status === "completed" && (
+        <>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+              <div className="text-xs uppercase text-gray-500">Project</div>
+              <div className="mt-2 break-all text-sm font-semibold text-white">
+                {result.filename || "—"}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+              <div className="text-xs uppercase text-gray-500">Assessment</div>
+              <div className="mt-2 text-lg font-semibold text-white">
+                #{result.assessment_id ?? "—"}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+              <div className="text-xs uppercase text-gray-500">Findings</div>
+              <div className="mt-2 text-lg font-semibold text-white">
+                {result.finding_count ?? 0}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+              <div className="text-xs uppercase text-gray-500">
+                Persisted
+              </div>
+              <div className="mt-2 text-lg font-semibold text-white">
+                {result.persisted_findings_count ?? 0}
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-white/10 bg-white/[0.03] p-5">
+            <h2 className="text-lg font-semibold text-white">
+              Detected Languages
+            </h2>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              {Object.entries(result.languages || {}).length === 0 ? (
+                <span className="text-sm text-gray-500">
+                  No supported languages detected.
+                </span>
+              ) : (
+                Object.entries(result.languages).map(([language, count]) => (
+                  <span
+                    key={language}
+                    className="rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-xs text-gray-300"
+                  >
+                    {language} · {count} file{count === 1 ? "" : "s"}
+                  </span>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-white/10 bg-white/[0.03] overflow-hidden">
+            <div className="border-b border-white/10 px-5 py-4">
+              <h2 className="text-lg font-semibold text-white">
+                Security Findings
+              </h2>
+              <p className="mt-1 text-sm text-gray-500">
+                Findings normalized into the SOC Platform security findings model.
+              </p>
+            </div>
+
+            {findings.length === 0 ? (
+              <div className="p-8 text-center text-sm text-gray-500">
+                No security findings were detected.
+              </div>
+            ) : (
+              <div className="divide-y divide-white/5">
+                {findings.map((finding, index) => (
+                  <div
+                    key={
+                      finding.finding_id ||
+                      `${finding.title || "finding"}-${index}`
+                    }
+                    className="px-5 py-5"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div className="min-w-0">
+                        <h3 className="font-medium text-white">
+                          {finding.title || "Security Finding"}
+                        </h3>
+
+                        <p className="mt-1 text-sm text-gray-400">
+                          {finding.vulnerability ||
+                            finding.description ||
+                            "No description available."}
+                        </p>
+                      </div>
+
+                      <span
+                        className={`rounded-full border px-2.5 py-1 text-xs ${severityClass(
+                          finding.severity
+                        )}`}
+                      >
+                        {finding.severity || "LOW"}
+                      </span>
+                    </div>
+
+                    <div className="mt-4 grid gap-3 md:grid-cols-2">
+                      <div>
+                        <div className="text-xs uppercase text-gray-600">
+                          Tool
+                        </div>
+                        <div className="mt-1 text-sm text-gray-300">
+                          {finding.tool_name || "—"}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="text-xs uppercase text-gray-600">
+                          Risk Level
+                        </div>
+                        <div className="mt-1 text-sm text-gray-300">
+                          {finding.risk_level || "—"}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="text-xs uppercase text-gray-600">
+                          File
+                        </div>
+                        <div className="mt-1 break-all font-mono text-sm text-gray-300">
+                          {finding.affected_asset || "—"}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="text-xs uppercase text-gray-600">
+                          Location
+                        </div>
+                        <div className="mt-1 break-all font-mono text-sm text-gray-300">
+                          {finding.endpoint || "—"}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+// ==================================================
+// USER NOTIFICATION CENTER
+// ==================================================
+function UserNotificationCenter() {
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [wsConnected, setWsConnected] = useState(false);
+
+  const loadNotifications = async () => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      setError("User session expired. Please login again.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `${API_URL}/notifications?limit=100`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error("Unable to load notifications.");
+      }
+
+      const data = await response.json();
+      setNotifications(data.notifications || []);
+      setUnreadCount(
+        (data.notifications || []).filter((item) => !item.is_read).length
+      );
+    } catch (err) {
+      console.error("Unable to load user notifications:", err);
+      setError(err.message || "Unable to load notifications.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadUnreadCount = async () => {
+    const token = localStorage.getItem("token");
+    if (!token) return;
+
+    try {
+      const response = await fetch(
+        `${API_URL}/notifications/unread-count`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) return;
+
+      const data = await response.json();
+      setUnreadCount(Number(data.unread_count || 0));
+    } catch (err) {
+      console.error("Unable to load notification count:", err);
+    }
+  };
+
+  useEffect(() => {
+    loadNotifications();
+    loadUnreadCount();
+
+    const token = localStorage.getItem("token");
+    if (!token) return undefined;
+
+    let socket = null;
+    let reconnectTimer = null;
+    let stopped = false;
+
+    const connect = () => {
+      if (stopped) return;
+
+      const protocol =
+        window.location.protocol === "https:" ? "wss:" : "ws:";
+      const host = API_URL.replace(/^https?:\/\//, "").replace(/\/$/, "");
+
+      socket = new WebSocket(
+        `${protocol}//${host}/ws/notifications?token=${encodeURIComponent(token)}`
+      );
+
+      socket.onopen = () => {
+        setWsConnected(true);
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const incoming = JSON.parse(event.data);
+
+          if (incoming.type !== "notification") return;
+
+          setNotifications((current) => {
+            const exists = current.some(
+              (item) =>
+                item.notification_id === incoming.notification_id
+            );
+
+            if (exists) {
+              return current.map((item) =>
+                item.notification_id === incoming.notification_id
+                  ? incoming
+                  : item
+              );
+            }
+
+            return [incoming, ...current];
+          });
+
+          if (!incoming.is_read) {
+            setUnreadCount((current) => current + 1);
+          }
+        } catch (err) {
+          console.error(
+            "Invalid user notification WebSocket payload:",
+            err
+          );
+        }
+      };
+
+      socket.onerror = (event) => {
+        if (stopped) return;
+        console.error("User notification WebSocket error:", event);
+        setWsConnected(false);
+      };
+
+      socket.onclose = () => {
+        setWsConnected(false);
+
+        if (!stopped) {
+          reconnectTimer = setTimeout(connect, 3000);
+        }
+      };
+    };
+
+    connect();
+
+    return () => {
+      stopped = true;
+
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+      }
+
+      if (socket) {
+        socket.close();
+      }
+    };
+  }, []);
+
+  const markRead = async (notification) => {
+    const token = localStorage.getItem("token");
+    if (!token) return;
+
+    try {
+      const response = await fetch(
+        `${API_URL}/notifications/${notification.notification_id}/read`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) throw new Error("Unable to mark notification as read.");
+
+      setNotifications((current) =>
+        current.map((item) =>
+          item.notification_id === notification.notification_id
+            ? { ...item, is_read: true }
+            : item
+        )
+      );
+
+      setUnreadCount((current) =>
+        notification.is_read ? current : Math.max(0, current - 1)
+      );
+    } catch (err) {
+      console.error("Unable to mark notification as read:", err);
+    }
+  };
+
+  const markUnread = async (notification) => {
+    const token = localStorage.getItem("token");
+    if (!token) return;
+
+    try {
+      const response = await fetch(
+        `${API_URL}/notifications/${notification.notification_id}/unread`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) throw new Error("Unable to mark notification as unread.");
+
+      setNotifications((current) =>
+        current.map((item) =>
+          item.notification_id === notification.notification_id
+            ? { ...item, is_read: false }
+            : item
+        )
+      );
+
+      setUnreadCount((current) =>
+        notification.is_read ? current + 1 : current
+      );
+    } catch (err) {
+      console.error("Unable to mark notification as unread:", err);
+    }
+  };
+
+  const markAllRead = async () => {
+    const token = localStorage.getItem("token");
+    if (!token) return;
+
+    try {
+      const response = await fetch(
+        `${API_URL}/notifications/read-all`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) throw new Error("Unable to mark all notifications as read.");
+
+      setNotifications((current) =>
+        current.map((item) => ({ ...item, is_read: true }))
+      );
+      setUnreadCount(0);
+    } catch (err) {
+      console.error("Unable to mark all notifications as read:", err);
+    }
+  };
+
+  const deleteNotification = async (notification) => {
+    const token = localStorage.getItem("token");
+    if (!token) return;
+
+    try {
+      const response = await fetch(
+        `${API_URL}/notifications/${notification.notification_id}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) throw new Error("Unable to delete notification.");
+
+      setNotifications((current) =>
+        current.filter(
+          (item) =>
+            item.notification_id !== notification.notification_id
+        )
+      );
+
+      if (!notification.is_read) {
+        setUnreadCount((current) => Math.max(0, current - 1));
+      }
+    } catch (err) {
+      console.error("Unable to delete notification:", err);
+    }
+  };
+
+  const severityClass = (severity) => {
+    const value = String(severity || "INFO").toUpperCase();
+
+    if (value === "CRITICAL") {
+      return "border-red-500/40 bg-red-500/10 text-red-400";
+    }
+
+    if (value === "HIGH") {
+      return "border-orange-500/40 bg-orange-500/10 text-orange-400";
+    }
+
+    if (value === "MEDIUM") {
+      return "border-yellow-500/40 bg-yellow-500/10 text-yellow-400";
+    }
+
+    if (value === "LOW") {
+      return "border-blue-500/40 bg-blue-500/10 text-blue-400";
+    }
+
+    return "border-gray-500/30 bg-gray-500/10 text-gray-400";
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-red-500">
+            Security Workspace
+          </p>
+          <h1 className="mt-2 text-3xl font-bold text-white">
+            Notification Center
+          </h1>
+          <p className="mt-2 text-sm text-gray-500">
+            Real-time security notifications for your account.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <span className="border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-gray-400">
+            {unreadCount} unread
+          </span>
+
+          <span
+            className={`border px-3 py-2 text-xs ${
+              wsConnected
+                ? "border-green-500/30 bg-green-500/10 text-green-400"
+                : "border-yellow-500/30 bg-yellow-500/10 text-yellow-400"
+            }`}
+          >
+            {wsConnected ? "● REAL-TIME CONNECTED" : "● RECONNECTING"}
+          </span>
+
+          {unreadCount > 0 && (
+            <button
+              type="button"
+              onClick={markAllRead}
+              className="border border-white/10 px-3 py-2 text-xs text-gray-400 hover:border-red-500/40 hover:text-white"
+            >
+              Mark all read
+            </button>
+          )}
+        </div>
+      </div>
+
+      {error && (
+        <div className="border border-red-600/30 bg-red-600/10 px-4 py-3 text-sm text-red-400">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="border border-white/10 bg-white/[0.03] p-10 text-center text-sm text-gray-500">
+          Loading notifications...
+        </div>
+      ) : notifications.length === 0 ? (
+        <div className="border border-white/10 bg-white/[0.03] p-10 text-center">
+          <div className="text-3xl">🔔</div>
+          <h2 className="mt-4 text-lg font-semibold text-white">
+            No notifications
+          </h2>
+          <p className="mt-2 text-sm text-gray-600">
+            New security events will appear here in real time.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {notifications.map((notification) => (
+            <div
+              key={notification.notification_id}
+              className={`border p-5 transition ${
+                notification.is_read
+                  ? "border-white/10 bg-white/[0.02]"
+                  : "border-red-500/20 bg-red-500/[0.03]"
+              }`}
+            >
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className={`border px-2 py-1 text-[9px] font-semibold uppercase ${severityClass(
+                        notification.severity
+                      )}`}
+                    >
+                      {notification.severity || "INFO"}
+                    </span>
+
+                    {!notification.is_read && (
+                      <span className="border border-red-500/30 bg-red-500/10 px-2 py-1 text-[9px] text-red-400">
+                        UNREAD
+                      </span>
+                    )}
+                  </div>
+
+                  <h2 className="mt-3 text-base font-semibold text-white">
+                    {notification.title || "Security Notification"}
+                  </h2>
+
+                  <p className="mt-2 text-sm leading-6 text-gray-400">
+                    {notification.message || "Security event received."}
+                  </p>
+
+                  <div className="mt-4 grid grid-cols-1 gap-3 text-xs md:grid-cols-3">
+                    <div>
+                      <span className="text-gray-600">Source</span>
+                      <div className="mt-1 text-gray-400">
+                        {notification.source || "—"}
+                      </div>
+                    </div>
+
+                    <div>
+                      <span className="text-gray-600">Event</span>
+                      <div className="mt-1 text-gray-400">
+                        {notification.event_type || "—"}
+                      </div>
+                    </div>
+
+                    <div>
+                      <span className="text-gray-600">Target</span>
+                      <div className="mt-1 break-all text-gray-400">
+                        {notification.target || "—"}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 text-[10px] text-gray-600">
+                    {notification.created_at
+                      ? new Date(notification.created_at).toLocaleString()
+                      : "—"}
+                    {" · "}
+                    {notification.notification_id}
+                  </div>
+                </div>
+
+                <div className="flex shrink-0 flex-wrap gap-2">
+                  {notification.is_read ? (
+                    <button
+                      type="button"
+                      onClick={() => markUnread(notification)}
+                      className="border border-white/10 px-3 py-2 text-[10px] text-gray-400 hover:border-red-500/40 hover:text-white"
+                    >
+                      Mark unread
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => markRead(notification)}
+                      className="border border-green-500/20 px-3 py-2 text-[10px] text-green-400 hover:bg-green-500/10"
+                    >
+                      Mark read
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => deleteNotification(notification)}
+                    className="border border-red-500/20 px-3 py-2 text-[10px] text-red-400 hover:bg-red-500/10"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ==================================================
 // USER MODULE PLACEHOLDER
 // ==================================================
 function UserModulePlaceholder({ menu }) {
@@ -13118,3 +28082,1668 @@ function LoginPage({
 
 
 export default App;
+
+function MasscanResultsPage({ scanResult, onBack }) {
+  const masscan = scanResult?.masscan || scanResult || {};
+  const results = masscan?.results || {};
+  const hosts = Array.isArray(results?.hosts) ? results.hosts : [];
+
+  const openPorts = hosts.flatMap((host) =>
+    Array.isArray(host?.ports)
+      ? host.ports
+          .filter(
+            (port) =>
+              String(port?.state || "").toLowerCase() === "open"
+          )
+          .map((port) => ({
+            ...port,
+            host: host?.host || host?.ip || "—",
+          }))
+      : []
+  );
+
+  const downloadBlob = (content, filename, type) => {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const safeTarget = String(scanResult?.target || masscan?.target || "target")
+    .replace(/^https?:\/\//i, "")
+    .replace(/[^a-z0-9.-]+/gi, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 50) || "target";
+
+  const handleDownloadJSON = () => {
+    downloadBlob(
+      JSON.stringify(scanResult, null, 2),
+      `SOC-Masscan-${safeTarget}.json`,
+      "application/json;charset=utf-8"
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-[#050505] px-6 py-8 text-white">
+      <div className="mx-auto max-w-7xl">
+        <div className="mb-6 flex items-center justify-between">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.3em] text-red-500">
+              VAPT / Scanning Results
+            </p>
+            <h1 className="mt-2 text-3xl font-bold">
+              Masscan Results
+            </h1>
+            <p className="mt-2 text-sm text-gray-500">
+              Target: {scanResult?.target || masscan?.target || "—"}
+            </p>
+          </div>
+
+          <button
+            onClick={onBack}
+            className="border border-white/10 px-4 py-2 text-xs uppercase tracking-wider text-gray-400 transition hover:border-red-600 hover:text-white"
+          >
+            Back to VAPT
+          </button>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-4">
+          <div className="border border-white/10 bg-[#0a0a0a] p-5">
+            <p className="text-[10px] uppercase tracking-widest text-gray-500">
+              Status
+            </p>
+            <p className="mt-2 text-xl font-semibold">
+              {masscan?.status || "Completed"}
+            </p>
+          </div>
+
+          <div className="border border-white/10 bg-[#0a0a0a] p-5">
+            <p className="text-[10px] uppercase tracking-widest text-gray-500">
+              Hosts
+            </p>
+            <p className="mt-2 text-xl font-semibold">
+              {results?.host_count ?? hosts.length}
+            </p>
+          </div>
+
+          <div className="border border-white/10 bg-[#0a0a0a] p-5">
+            <p className="text-[10px] uppercase tracking-widest text-gray-500">
+              Open Ports
+            </p>
+            <p className="mt-2 text-xl font-semibold">
+              {Array.isArray(results?.open_ports)
+                ? results.open_ports.length
+                : Number(results?.open_ports ?? openPorts.length)}
+            </p>
+          </div>
+
+          <div className="border border-white/10 bg-[#0a0a0a] p-5">
+            <p className="text-[10px] uppercase tracking-widest text-gray-500">
+              Elapsed
+            </p>
+            <p className="mt-2 text-xl font-semibold">
+              {masscan?.elapsed_seconds != null
+                ? `${Number(masscan.elapsed_seconds).toFixed(2)}s`
+                : "—"}
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-6 flex gap-3">
+          <button
+            onClick={handleDownloadJSON}
+            className="border border-red-600/40 bg-red-600/10 px-4 py-2 text-xs uppercase tracking-wider text-red-400 transition hover:bg-red-600/20"
+          >
+            Download JSON
+          </button>
+        </div>
+
+        <div className="mt-6 border border-white/10 bg-[#0a0a0a]">
+          <div className="border-b border-white/10 px-5 py-4">
+            <h2 className="text-sm font-semibold uppercase tracking-wider">
+              Open Ports
+            </h2>
+          </div>
+
+          {openPorts.length === 0 ? (
+            <div className="px-5 py-8 text-sm text-gray-500">
+              No open ports were reported by Masscan.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-white/10 text-[10px] uppercase tracking-wider text-gray-500">
+                  <tr>
+                    <th className="px-5 py-3">Host</th>
+                    <th className="px-5 py-3">Port</th>
+                    <th className="px-5 py-3">Protocol</th>
+                    <th className="px-5 py-3">State</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {openPorts.map((port, index) => (
+                    <tr
+                      key={`${port.host}-${port.port}-${port.protocol}-${index}`}
+                      className="border-b border-white/5"
+                    >
+                      <td className="px-5 py-3 font-mono text-gray-300">
+                        {port.host}
+                      </td>
+                      <td className="px-5 py-3 font-mono text-red-400">
+                        {port.port ?? "—"}
+                      </td>
+                      <td className="px-5 py-3 uppercase text-gray-400">
+                        {port.protocol || "—"}
+                      </td>
+                      <td className="px-5 py-3 text-gray-300">
+                        {port.state || "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {masscan?.errors?.length > 0 && (
+          <div className="mt-6 border border-yellow-600/30 bg-yellow-600/5 p-5">
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-yellow-500">
+              Warnings
+            </h2>
+            <pre className="mt-3 whitespace-pre-wrap text-xs text-gray-400">
+              {masscan.errors.join("\n")}
+            </pre>
+          </div>
+        )}
+
+        {masscan?.raw_output && (
+          <div className="mt-6 border border-white/10 bg-[#0a0a0a]">
+            <div className="border-b border-white/10 px-5 py-4">
+              <h2 className="text-sm font-semibold uppercase tracking-wider">
+                Raw Masscan Output
+              </h2>
+            </div>
+            <pre className="max-h-96 overflow-auto whitespace-pre-wrap p-5 text-xs text-gray-500">
+              {masscan.raw_output}
+            </pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function NativeToolResultsPage({ scanResult, toolName, onBack }) {
+  const result = scanResult || {};
+
+  const target = result.target || "—";
+  const status =
+    result.status === "completed_with_errors"
+      ? "Completed with warnings"
+      : result.status || "—";
+
+  const statusClass =
+    String(status).toLowerCase().includes("failed")
+      ? "text-red-400"
+      : String(status).toLowerCase().includes("warning")
+        ? "text-yellow-400"
+        : "text-green-400";
+
+  const command = Array.isArray(result.command)
+    ? result.command.join(" ")
+    : result.command || "—";
+
+  const stdout =
+    result.stdout ??
+    result.raw_output ??
+    result.output ??
+    "";
+
+  const stderr = result.stderr ?? "";
+
+  return (
+    <div>
+      <div className="mb-8 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-red-500">
+            Security Workspace
+          </p>
+          <h1 className="mt-2 text-3xl font-bold text-white">
+            {toolName.toUpperCase()} RESULTS
+          </h1>
+          <p className="mt-2 text-sm text-gray-500">
+            Native {toolName} execution results from the authorized assessment.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={onBack}
+          className="border border-white/10 bg-[#0d0d0d] px-5 py-3 text-sm font-medium text-white transition hover:border-red-500/50"
+        >
+          ← Back to VAPT
+        </button>
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d] p-6">
+        <div className="grid gap-5 md:grid-cols-3">
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Target
+            </p>
+            <p className="mt-2 break-all text-sm text-white">
+              {target}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Status
+            </p>
+            <p className={`mt-2 text-sm font-semibold ${statusClass}`}>
+              {status}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Return Code
+            </p>
+            <p className="mt-2 text-sm text-white">
+              {result.return_code ?? "—"}
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-6 border border-white/10 bg-black/30 p-4">
+          <p className="text-[10px] uppercase tracking-wider text-gray-600">
+            Command Executed
+          </p>
+          <pre className="mt-3 overflow-auto whitespace-pre-wrap text-xs leading-5 text-gray-400">
+            {command}
+          </pre>
+        </div>
+
+        <div className="mt-6 border border-white/10 bg-[#080808] p-5">
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+            Native Output / Evidence
+          </p>
+
+          <pre className="mt-3 max-h-[520px] overflow-auto whitespace-pre-wrap text-[10px] leading-5 text-gray-500">
+            {stdout || "No stdout returned."}
+          </pre>
+        </div>
+
+        {stderr && (
+          <div className="mt-4 border border-yellow-600/20 bg-yellow-600/5 p-5">
+            <p className="text-xs font-semibold uppercase tracking-wider text-yellow-500">
+              STDERR / Warnings
+            </p>
+
+            <pre className="mt-3 max-h-[300px] overflow-auto whitespace-pre-wrap text-[10px] leading-5 text-gray-500">
+              {stderr}
+            </pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TsharkResultsPage({ result, onBack }) {
+  const rows = Array.isArray(result?.output) ? result.output : [];
+
+  return (
+    <div className="min-h-screen p-6">
+      <div className="max-w-6xl mx-auto">
+        <button
+          onClick={onBack}
+          className="mb-6 px-4 py-2 rounded-lg border border-slate-600"
+        >
+          ← Back to VAPT
+        </button>
+
+        <div className="rounded-xl border border-slate-700 p-6">
+          <h1 className="text-2xl font-bold mb-2">TShark Results</h1>
+          <p className="text-slate-400 mb-6">
+            Real-time packet analysis completed using TShark.
+          </p>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            <div className="rounded-lg border border-slate-700 p-4">
+              <div className="text-sm text-slate-400">Status</div>
+              <div className="font-semibold">{result?.status || "—"}</div>
+            </div>
+
+            <div className="rounded-lg border border-slate-700 p-4">
+              <div className="text-sm text-slate-400">Interface</div>
+              <div className="font-semibold">{result?.interface || "eth0"}</div>
+            </div>
+
+            <div className="rounded-lg border border-slate-700 p-4">
+              <div className="text-sm text-slate-400">Packets</div>
+              <div className="font-semibold">{result?.packet_count ?? 0}</div>
+            </div>
+
+            <div className="rounded-lg border border-slate-700 p-4">
+              <div className="text-sm text-slate-400">Duration</div>
+              <div className="font-semibold">{result?.duration ?? 0}s</div>
+            </div>
+          </div>
+
+          <h2 className="text-lg font-semibold mb-3">Captured Packets</h2>
+
+          <div className="rounded-lg border border-slate-700 overflow-auto max-h-[500px]">
+            {rows.length === 0 ? (
+              <div className="p-6 text-slate-400">
+                No packet rows were captured during this test.
+              </div>
+            ) : (
+              <pre className="p-4 text-xs whitespace-pre-wrap">
+                {rows.join("\n")}
+              </pre>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function SnortResultsPage({ result, onBack }) {
+  const rows = Array.isArray(result?.output) ? result.output : [];
+
+  return (
+    <div className="min-h-screen p-6">
+      <div className="max-w-6xl mx-auto">
+        <button
+          onClick={onBack}
+          className="mb-6 px-4 py-2 rounded-lg border border-slate-600"
+        >
+          ← Back to VAPT
+        </button>
+
+        <div className="rounded-xl border border-slate-700 p-6">
+          <h1 className="text-2xl font-bold mb-2">Snort Results</h1>
+          <p className="text-slate-400 mb-6">
+            Real-time network intrusion detection monitoring completed using Snort 3.
+          </p>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            <div className="rounded-lg border border-slate-700 p-4">
+              <div className="text-sm text-slate-400">Status</div>
+              <div className="font-semibold">{result?.status || "—"}</div>
+            </div>
+
+            <div className="rounded-lg border border-slate-700 p-4">
+              <div className="text-sm text-slate-400">Interface</div>
+              <div className="font-semibold">{result?.interface || "eth0"}</div>
+            </div>
+
+            <div className="rounded-lg border border-slate-700 p-4">
+              <div className="text-sm text-slate-400">Alerts</div>
+              <div className="font-semibold">{result?.alert_count ?? 0}</div>
+            </div>
+
+            <div className="rounded-lg border border-slate-700 p-4">
+              <div className="text-sm text-slate-400">Duration</div>
+              <div className="font-semibold">{result?.duration ?? 0}s</div>
+            </div>
+          </div>
+
+          <h2 className="text-lg font-semibold mb-3">Snort Output</h2>
+
+          <div className="rounded-lg border border-slate-700 overflow-auto max-h-[500px]">
+            {rows.length === 0 ? (
+              <div className="p-6 text-slate-400">
+                No Snort alerts or output were generated during this test.
+              </div>
+            ) : (
+              <pre className="p-4 text-xs whitespace-pre-wrap">
+                {rows.join("\n")}
+              </pre>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ============================================================
+// STAGE 07 — ACCESS / IMPACT VALIDATION RESULTS
+// ============================================================
+function AccessValidationResults({ onBack }) {
+  const [findings, setFindings] = useState([]);
+  const [selectedFindingId, setSelectedFindingId] = useState("");
+  const [loadingFindings, setLoadingFindings] = useState(true);
+  const [starting, setStarting] = useState(false);
+  const [jobId, setJobId] = useState("");
+  const [progress, setProgress] = useState(0);
+  const [stage, setStage] = useState("");
+  const [validation, setValidation] = useState(null);
+  const [error, setError] = useState("");
+
+  const getConfig = () => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      throw new Error("Your session has expired. Please login again.");
+    }
+
+    return {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    };
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadFindings = async () => {
+      try {
+        setLoadingFindings(true);
+        setError("");
+
+        const response = await axios.get(
+          `${API_URL}/security-findings`,
+          getConfig()
+        );
+
+        if (!cancelled) {
+          const rows = Array.isArray(response.data)
+            ? response.data
+            : [];
+
+          setFindings(rows);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            err.response?.data?.detail ||
+              err.message ||
+              "Unable to load security findings."
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingFindings(false);
+        }
+      }
+    };
+
+    loadFindings();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const selectedFinding = findings.find(
+    (finding) =>
+      String(finding.finding_id) === String(selectedFindingId)
+  );
+
+  const runValidation = async () => {
+    if (!selectedFinding) {
+      setError("Select a security finding before starting validation.");
+      return;
+    }
+
+    try {
+      setStarting(true);
+      setError("");
+      setValidation(null);
+      setProgress(0);
+      setStage("Starting access / impact validation");
+
+      const response = await axios.post(
+        `${API_URL}/vapt/access-validation/run`,
+        {
+          assessment_id: Number(selectedFinding.assessment_id),
+          finding_id: selectedFinding.finding_id,
+        },
+        getConfig()
+      );
+
+      const newJobId = response.data?.job_id;
+
+      if (!newJobId) {
+        throw new Error(
+          "The backend did not return an access-validation job ID."
+        );
+      }
+
+      setJobId(String(newJobId));
+    } catch (err) {
+      setError(
+        err.response?.data?.detail ||
+          err.message ||
+          "Unable to start access / impact validation."
+      );
+      setStage("Failed to start");
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!jobId) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    let timer = null;
+
+    const poll = async () => {
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/access-validation/${encodeURIComponent(
+            jobId
+          )}/progress`,
+          getConfig()
+        );
+
+        if (cancelled) {
+          return;
+        }
+
+        const data = response.data || {};
+
+        setProgress(Number(data.progress ?? 0));
+        setStage(data.stage || data.status || "Processing");
+
+        if (
+          ["COMPLETED", "FAILED", "CANCELLED"].includes(
+            String(data.status || "").toUpperCase()
+          )
+        ) {
+          if (
+            String(data.status || "").toUpperCase() === "COMPLETED"
+          ) {
+            const resultResponse = await axios.get(
+              `${API_URL}/vapt/access-validation/${encodeURIComponent(
+                jobId
+              )}/results`,
+              getConfig()
+            );
+
+            if (!cancelled) {
+              setValidation(resultResponse.data?.validation || resultResponse.data?.job?.result || null);
+              setProgress(100);
+            }
+          }
+
+          return;
+        }
+
+        timer = window.setTimeout(poll, 1000);
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            err.response?.data?.detail ||
+              err.message ||
+              "Unable to retrieve validation progress."
+          );
+        }
+      }
+    };
+
+    poll();
+
+    return () => {
+      cancelled = true;
+
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [jobId]);
+
+  const cancelValidation = async () => {
+    if (!jobId) return;
+
+    try {
+      await axios.post(
+        `${API_URL}/vapt/access-validation/${encodeURIComponent(
+          jobId
+        )}/cancel`,
+        {},
+        getConfig()
+      );
+
+      setStage("Cancellation requested");
+    } catch (err) {
+      setError(
+        err.response?.data?.detail ||
+          err.message ||
+          "Unable to cancel validation."
+      );
+    }
+  };
+
+  return (
+    <div className="min-h-screen p-6">
+      <div className="mx-auto max-w-6xl">
+        <button
+          type="button"
+          onClick={onBack}
+          className="mb-6 border border-white/10 px-4 py-2 text-xs text-gray-400 transition hover:border-red-600 hover:text-white"
+        >
+          ← Back to VAPT
+        </button>
+
+        <div className="mb-6">
+          <p className="text-xs uppercase tracking-[0.3em] text-red-500">
+            Stage 07 · Post-Exploitation
+          </p>
+
+          <h1 className="mt-2 text-3xl font-bold text-white">
+            Access / Impact Validation
+          </h1>
+
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-500">
+            Validate an existing security finding using the authenticated
+            assessment and finding records stored by the SOC platform.
+          </p>
+        </div>
+
+        {error && (
+          <div className="mb-5 border border-red-600/30 bg-red-600/10 px-5 py-4 text-sm text-red-400">
+            {error}
+          </div>
+        )}
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <div className="mb-4">
+            <p className="text-sm font-semibold text-white">
+              Select Security Finding
+            </p>
+            <p className="mt-1 text-xs text-gray-600">
+              Only findings belonging to the authenticated user are loaded.
+            </p>
+          </div>
+
+          {loadingFindings ? (
+            <div className="py-8 text-sm text-gray-500">
+              Loading security findings...
+            </div>
+          ) : findings.length === 0 ? (
+            <div className="border border-white/10 bg-black/20 p-6 text-sm text-gray-500">
+              No security findings are available for validation.
+            </div>
+          ) : (
+            <>
+              <select
+                value={selectedFindingId}
+                onChange={(event) =>
+                  setSelectedFindingId(event.target.value)
+                }
+                disabled={Boolean(jobId) || starting}
+                className="w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none focus:border-red-600"
+              >
+                <option value="">
+                  Select a finding...
+                </option>
+
+                {findings.map((finding) => (
+                  <option
+                    key={finding.finding_id}
+                    value={finding.finding_id}
+                  >
+                    {finding.finding_id} · Assessment #
+                    {finding.assessment_id} · {finding.severity} ·{" "}
+                    {finding.title}
+                  </option>
+                ))}
+              </select>
+
+              {selectedFinding && (
+                <div className="mt-5 grid gap-4 md:grid-cols-2">
+                  <div className="border border-white/10 bg-black/20 p-4">
+                    <p className="text-[10px] uppercase tracking-wider text-gray-600">
+                      Finding
+                    </p>
+                    <p className="mt-2 text-sm font-semibold text-white">
+                      {selectedFinding.finding_id}
+                    </p>
+                    <p className="mt-2 text-xs text-gray-400">
+                      {selectedFinding.title}
+                    </p>
+                  </div>
+
+                  <div className="border border-white/10 bg-black/20 p-4">
+                    <p className="text-[10px] uppercase tracking-wider text-gray-600">
+                      Target
+                    </p>
+                    <p className="mt-2 break-all text-xs text-gray-300">
+                      {selectedFinding.affected_url ||
+                        selectedFinding.endpoint ||
+                        selectedFinding.affected_asset ||
+                        "—"}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-5 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={runValidation}
+                  disabled={
+                    starting ||
+                    Boolean(jobId) ||
+                    !selectedFinding
+                  }
+                  className="bg-red-600 px-5 py-3 text-xs font-semibold uppercase tracking-wider text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {starting
+                    ? "Starting..."
+                    : "Run Validation"}
+                </button>
+
+                {jobId &&
+                  !validation && (
+                    <button
+                      type="button"
+                      onClick={cancelValidation}
+                      className="border border-white/10 px-5 py-3 text-xs font-semibold uppercase tracking-wider text-gray-400 transition hover:border-red-600 hover:text-white"
+                    >
+                      Cancel
+                    </button>
+                  )}
+              </div>
+            </>
+          )}
+        </div>
+
+        {(jobId || validation) && (
+          <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-xs uppercase tracking-wider text-red-400">
+                  Validation Progress
+                </p>
+                <p className="mt-1 text-sm font-semibold text-white">
+                  {stage || "Processing"}
+                </p>
+              </div>
+
+              <p className="text-2xl font-bold text-red-500">
+                {Math.round(progress)}%
+              </p>
+            </div>
+
+            <div className="mt-4 h-2 overflow-hidden bg-white/5">
+              <div
+                className="h-full bg-red-600 transition-all duration-500"
+                style={{
+                  width: `${Math.max(
+                    0,
+                    Math.min(100, progress)
+                  )}%`,
+                }}
+              />
+            </div>
+
+            <p className="mt-3 text-[10px] text-gray-600">
+              Job: {jobId}
+            </p>
+          </div>
+        )}
+
+        {validation && (
+          <div className="mt-5 border border-white/10 bg-[#0d0d0d] p-5">
+            <div className="mb-5">
+              <p className="text-xs uppercase tracking-wider text-red-400">
+                Validation Result
+              </p>
+
+              <h2 className="mt-1 text-xl font-semibold text-white">
+                {validation.validation_result || "—"}
+              </h2>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+              {[
+                ["Finding", validation.finding_id],
+                ["Assessment", validation.assessment_id],
+                [
+                  "Access Validated",
+                  validation.access_validated ? "YES" : "NO",
+                ],
+                [
+                  "Impact Validated",
+                  validation.impact_validated ? "YES" : "NO",
+                ],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="border border-white/10 bg-black/20 p-4"
+                >
+                  <p className="text-[10px] uppercase tracking-wider text-gray-600">
+                    {label}
+                  </p>
+                  <p className="mt-2 text-sm font-semibold text-white">
+                    {String(value ?? "—")}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-5 grid gap-5 lg:grid-cols-2">
+              <div className="border border-white/10 bg-black/20 p-4">
+                <p className="text-xs font-semibold text-white">
+                  Evidence
+                </p>
+                <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-gray-400">
+                  {validation.evidence || "No evidence recorded."}
+                </pre>
+              </div>
+
+              <div className="border border-white/10 bg-black/20 p-4">
+                <p className="text-xs font-semibold text-white">
+                  Impact Details
+                </p>
+                <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-gray-400">
+                  {validation.impact_details ||
+                    "No impact details recorded."}
+                </pre>
+              </div>
+            </div>
+
+            {validation.validation_notes && (
+              <div className="mt-5 border border-white/10 bg-black/20 p-4">
+                <p className="text-xs font-semibold text-white">
+                  Validation Notes
+                </p>
+                <p className="mt-3 whitespace-pre-wrap text-xs leading-5 text-gray-400">
+                  {validation.validation_notes}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RiskAssessmentResults({ onBack }) {
+  const [assessments, setAssessments] = useState([]);
+  const [assessmentId, setAssessmentId] = useState("");
+  const [jobId, setJobId] = useState(null);
+  const [result, setResult] = useState(null);
+  const [progress, setProgress] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const loadAssessmentsFromFindings = async () => {
+      try {
+        const token = localStorage.getItem("token");
+
+        if (!token) {
+          setError("Your session has expired. Please login again.");
+          return;
+        }
+
+        const response = await axios.get(
+          `${API_URL}/security-findings`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
+        );
+
+        const findings = Array.isArray(response.data)
+          ? response.data
+          : [];
+
+        const uniqueAssessments = Array.from(
+          new Map(
+            findings
+              .filter((finding) => finding?.assessment_id)
+              .map((finding) => [
+                String(finding.assessment_id),
+                {
+                  id: Number(finding.assessment_id),
+                  target:
+                    finding.affected_asset ||
+                    finding.affected_url ||
+                    "VAPT Assessment",
+                },
+              ])
+          ).values()
+        );
+
+        setAssessments(uniqueAssessments);
+
+        if (uniqueAssessments.length > 0) {
+          setAssessmentId(String(uniqueAssessments[0].id));
+          setError("");
+        } else {
+          setError(
+            "No VAPT assessments with security findings are available."
+          );
+        }
+      } catch (err) {
+        setError(
+          err?.response?.data?.detail ||
+            err?.message ||
+            "Unable to load VAPT assessments."
+        );
+      }
+    };
+
+    loadAssessmentsFromFindings();
+  }, []);
+
+  const runAssessment = async () => {
+    if (!assessmentId) return;
+
+    setLoading(true);
+    setError("");
+    setResult(null);
+    setProgress(null);
+
+    try {
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Your session has expired. Please login again.");
+      }
+
+      const response = await axios.post(
+        `${API_URL}/vapt/risk-assessment/run`,
+        {
+          assessment_id: Number(assessmentId),
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setJobId(response.data.job_id);
+    } catch (err) {
+      setError(
+        err?.response?.data?.detail ||
+          err?.message ||
+          "Risk assessment failed."
+      );
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!jobId) return;
+
+    let active = true;
+
+    const poll = async () => {
+      try {
+        const token = localStorage.getItem("token");
+
+        if (!token) {
+          throw new Error("Your session has expired. Please login again.");
+        }
+
+        const authConfig = {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        };
+
+        const response = await axios.get(
+          `${API_URL}/vapt/risk-assessment/${jobId}/progress`,
+          authConfig
+        );
+
+        const data = response.data;
+        const status = String(data.status || "").toLowerCase();
+
+        if (!active) return;
+        setProgress(data);
+
+        if (status === "completed") {
+          const resultResponse = await axios.get(
+            `${API_URL}/vapt/risk-assessment/${jobId}/results`,
+            authConfig
+          );
+
+          if (active) {
+            setResult(resultResponse.data);
+            setLoading(false);
+          }
+          return;
+        }
+
+        if (status === "failed" || status === "cancelled") {
+          setError(
+            data.error || `Assessment ${status}.`
+          );
+          setLoading(false);
+          return;
+        }
+      } catch (err) {
+        if (active) {
+          setError(
+            err?.response?.data?.detail ||
+              err?.message ||
+              "Unable to monitor risk assessment."
+          );
+          setLoading(false);
+        }
+      }
+    };
+
+    poll();
+    const timer = setInterval(poll, 1000);
+
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [jobId]);
+
+  const summary = result?.run || result?.assessment || result || {};
+  const severity = summary.severity || {};
+  const riskLevels = summary.risk_levels || {};
+  const validation = summary.validation || {};
+  const findings = summary.findings || [];
+
+  return (
+    <div className="min-h-full bg-black p-6 text-white">
+      <div className="mx-auto max-w-7xl">
+        <button
+          type="button"
+          onClick={onBack}
+          className="mb-6 border border-white/10 px-4 py-2 text-xs font-semibold text-gray-400 hover:border-red-600/50 hover:text-white"
+        >
+          ← Back to VAPT
+        </button>
+
+        <div className="mb-6 border-b border-white/10 pb-5">
+          <p className="text-xs font-bold uppercase tracking-widest text-red-500">
+            Stage 08
+          </p>
+          <h1 className="mt-2 text-2xl font-bold">
+            Risk Assessment Results
+          </h1>
+          <p className="mt-2 text-sm text-gray-500">
+            Real-time risk assessment using actual security findings and
+            validation data.
+          </p>
+        </div>
+
+        <div className="mb-6 flex flex-wrap items-end gap-3 border border-white/10 bg-black/20 p-5">
+          <div>
+            <label className="mb-2 block text-xs font-semibold text-gray-400">
+              Assessment
+            </label>
+            <select
+              value={assessmentId}
+              onChange={(e) => setAssessmentId(e.target.value)}
+              disabled={loading}
+              className="min-w-72 border border-white/10 bg-black px-3 py-2 text-xs text-white"
+            >
+              <option value="">Select assessment</option>
+              {assessments.map((assessment) => (
+                <option key={assessment.id} value={assessment.id}>
+                  #{assessment.id} — {assessment.target || "Assessment"}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <button
+            type="button"
+            onClick={runAssessment}
+            disabled={loading || !assessmentId}
+            className="border border-red-600 px-5 py-2 text-xs font-semibold text-red-400 hover:bg-red-600/10 disabled:opacity-40"
+          >
+            {loading ? "Assessing..." : "Run Risk Assessment"}
+          </button>
+        </div>
+
+        {loading && progress && (
+          <div className="mb-6 border border-white/10 p-5">
+            <div className="flex justify-between text-xs">
+              <span className="text-gray-400">
+                {progress.stage || "Processing"}
+              </span>
+              <span className="text-red-400">
+                {progress.progress ?? 0}%
+              </span>
+            </div>
+            <div className="mt-3 h-2 bg-white/5">
+              <div
+                className="h-2 bg-red-600 transition-all"
+                style={{ width: `${progress.progress ?? 0}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="mb-6 border border-red-600/40 bg-red-600/5 p-4 text-xs text-red-400">
+            {error}
+          </div>
+        )}
+
+        {result && (
+          <>
+            <div className="grid gap-4 md:grid-cols-4">
+              {[
+                ["Total Findings", summary.total_findings ?? 0],
+                ["Average CVSS", Number(summary.average_cvss ?? 0).toFixed(2)],
+                ["Highest CVSS", Number(summary.highest_cvss ?? 0).toFixed(2)],
+                ["Overall Risk", summary.overall_risk || "N/A"],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="border border-white/10 bg-black/20 p-5"
+                >
+                  <p className="text-xs text-gray-500">{label}</p>
+                  <p className="mt-2 text-xl font-bold text-white">{value}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-6 grid gap-5 lg:grid-cols-3">
+              <RiskSummaryCard
+                title="Severity"
+                data={severity}
+              />
+              <RiskSummaryCard
+                title="Risk Levels"
+                data={riskLevels}
+              />
+              <RiskSummaryCard
+                title="Validation"
+                data={validation}
+              />
+            </div>
+
+            <div className="mt-6 border border-white/10">
+              <div className="border-b border-white/10 p-4">
+                <h2 className="text-sm font-semibold">
+                  Finding Risk Assessment
+                </h2>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-white/10 text-gray-500">
+                    <tr>
+                      <th className="p-3">Finding</th>
+                      <th className="p-3">Severity</th>
+                      <th className="p-3">CVSS</th>
+                      <th className="p-3">Risk</th>
+                      <th className="p-3">Validation</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {findings.map((finding) => (
+                      <tr
+                        key={finding.finding_id}
+                        className="border-b border-white/5"
+                      >
+                        <td className="p-3 text-white">
+                          {finding.title || finding.finding_id}
+                        </td>
+                        <td className="p-3">{finding.severity || "N/A"}</td>
+                        <td className="p-3">{finding.cvss_score ?? "N/A"}</td>
+                        <td className="p-3">{finding.risk_level || "N/A"}</td>
+                        <td className="p-3">
+                          {finding.validation_result || "NOT_RUN"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function VAPTReportResults({ onBack }) {
+  const authConfig = {
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem("token")}`,
+    },
+  };
+  const [assessments, setAssessments] = useState([]);
+  const [assessmentId, setAssessmentId] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState(null);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState("");
+
+  const loadAssessments = async () => {
+    try {
+      setError("");
+      const response = await axios.get(
+        `${API_URL}/security-findings`,
+        authConfig
+      );
+
+      const findings = Array.isArray(response.data)
+        ? response.data
+        : response.data?.findings || response.data?.items || [];
+
+      const map = new Map();
+
+      findings.forEach((finding) => {
+        const id = finding.assessment_id;
+        if (id === null || id === undefined) return;
+
+        if (!map.has(id)) {
+          map.set(id, {
+            id,
+            target:
+              finding.affected_asset ||
+              finding.affected_url ||
+              `Assessment ${id}`,
+          });
+        }
+      });
+
+      const rows = Array.from(map.values()).sort((a, b) => b.id - a.id);
+      setAssessments(rows);
+
+      if (!assessmentId && rows.length) {
+        setAssessmentId(String(rows[0].id));
+      }
+    } catch (err) {
+      setError(
+        err?.response?.data?.detail ||
+          err?.message ||
+          "Unable to load assessments."
+      );
+    }
+  };
+
+  useEffect(() => {
+    loadAssessments();
+  }, []);
+
+  const downloadReport = async (format) => {
+    if (!progress?.job_id) return;
+
+    try {
+      const response = await axios.get(
+        `${API_URL}/vapt/reporting/${progress.job_id}/download/${format}`,
+        {
+          ...authConfig,
+          responseType: "blob",
+        }
+      );
+
+      const blob = new Blob([response.data]);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+
+      link.href = url;
+      link.download = `VAPT-Report-${assessmentId}.${format}`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(
+        err?.response?.data?.detail ||
+          err?.message ||
+          `Unable to download ${format.toUpperCase()} report.`
+      );
+    }
+  };
+
+  const runReport = async () => {
+    if (!assessmentId) return;
+
+    try {
+      setLoading(true);
+      setError("");
+      setResult(null);
+      setProgress(null);
+
+      const response = await axios.post(
+        `${API_URL}/vapt/reporting/run`,
+        {
+          assessment_id: Number(assessmentId),
+          report_type: "COMPLETE",
+        },
+        authConfig
+      );
+
+      setProgress(response.data);
+    } catch (err) {
+      setLoading(false);
+      setError(
+        err?.response?.data?.detail ||
+          err?.message ||
+          "Unable to start VAPT report generation."
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (!progress?.job_id) return;
+
+    let active = true;
+
+    const poll = async () => {
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/reporting/${progress.job_id}/progress`,
+          authConfig
+        );
+
+        const data = response.data;
+
+        if (!active) return;
+
+        setProgress(data);
+
+        const status = String(data.status || "").toLowerCase();
+
+        if (status === "completed") {
+          const resultResponse = await axios.get(
+            `${API_URL}/vapt/reporting/${progress.job_id}/results`,
+            authConfig
+          );
+
+          if (active) {
+            setResult(resultResponse.data);
+            setLoading(false);
+          }
+          return;
+        }
+
+        if (status === "failed" || status === "cancelled") {
+          setError(
+            data.error || `Report generation ${status}.`
+          );
+          setLoading(false);
+        }
+      } catch (err) {
+        if (active) {
+          setError(
+            err?.response?.data?.detail ||
+              err?.message ||
+              "Unable to monitor report generation."
+          );
+          setLoading(false);
+        }
+      }
+    };
+
+    poll();
+    const timer = setInterval(poll, 1000);
+
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [progress?.job_id]);
+
+  const canonical =
+    result?.canonical_data ||
+    result?.report ||
+    result?.data ||
+    {};
+
+  const metadata = canonical.report_metadata || {};
+  const risk = canonical.risk_assessment || {};
+  const severity = risk.severity || {};
+  const riskLevels = risk.risk_levels || {};
+  const validation = risk.validation || {};
+  const findings = canonical.findings || [];
+
+  const chartData = [
+    ["CRITICAL", severity.CRITICAL || 0],
+    ["HIGH", severity.HIGH || 0],
+    ["MEDIUM", severity.MEDIUM || 0],
+    ["LOW", severity.LOW || 0],
+    ["NONE", severity.NONE || 0],
+  ].filter(([, value]) => Number(value) > 0);
+
+  return (
+    <div className="min-h-full bg-black p-6 text-white">
+      <div className="mx-auto max-w-7xl">
+        <button
+          type="button"
+          onClick={onBack}
+          className="mb-6 border border-white/10 px-4 py-2 text-xs font-semibold text-gray-400 hover:border-red-600/50 hover:text-white"
+        >
+          ← Back to VAPT
+        </button>
+
+        <div className="mb-6 border-b border-white/10 pb-5">
+          <p className="text-xs font-bold uppercase tracking-widest text-red-500">
+            Stage 09
+          </p>
+          <h1 className="mt-2 text-2xl font-bold">
+            VAPT Report Results
+          </h1>
+          <p className="mt-2 text-sm text-gray-500">
+            Generate a real-time report from the completed risk assessment
+            and actual security findings.
+          </p>
+        </div>
+
+        <div className="mb-6 flex flex-wrap items-end gap-3 border border-white/10 bg-black/20 p-5">
+          <div>
+            <label className="mb-2 block text-xs font-semibold text-gray-400">
+              Assessment
+            </label>
+            <select
+              value={assessmentId}
+              onChange={(e) => setAssessmentId(e.target.value)}
+              disabled={loading}
+              className="min-w-72 border border-white/10 bg-black px-3 py-2 text-xs text-white"
+            >
+              <option value="">Select assessment</option>
+              {assessments.map((assessment) => (
+                <option key={assessment.id} value={assessment.id}>
+                  #{assessment.id} — {assessment.target}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <button
+            type="button"
+            onClick={runReport}
+            disabled={loading || !assessmentId}
+            className="border border-red-600 px-5 py-2 text-xs font-semibold text-red-400 hover:bg-red-600/10 disabled:opacity-40"
+          >
+            {loading ? "Generating..." : "Generate VAPT Report"}
+          </button>
+        </div>
+
+        {loading && progress && (
+          <div className="mb-6 border border-white/10 p-5">
+            <div className="flex justify-between text-xs">
+              <span className="text-gray-400">
+                {progress.stage || "Generating report"}
+              </span>
+              <span className="text-red-400">
+                {progress.progress ?? 0}%
+              </span>
+            </div>
+
+            <div className="mt-3 h-2 bg-white/5">
+              <div
+                className="h-2 bg-red-600 transition-all"
+                style={{ width: `${progress.progress ?? 0}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="mb-6 border border-red-600/40 bg-red-600/5 p-4 text-xs text-red-400">
+            {error}
+          </div>
+        )}
+
+        {result && (
+          <>
+            <div className="mb-6 flex flex-wrap gap-3">
+              {["json", "xml", "pdf"].map((format) => (
+                <button
+                  key={format}
+                  type="button"
+                  onClick={() => downloadReport(format)}
+                  className="border border-white/10 px-5 py-2 text-xs font-semibold uppercase text-gray-300 hover:border-red-600/60 hover:text-white"
+                >
+                  Download {format}
+                </button>
+              ))}
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-4">
+              {[
+                ["Assessment", metadata.assessment_id ?? assessmentId],
+                ["Total Findings", risk.total_findings ?? findings.length],
+                ["Average CVSS", Number(risk.average_cvss ?? 0).toFixed(2)],
+                ["Overall Risk", risk.overall_risk || "N/A"],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="border border-white/10 bg-black/20 p-5"
+                >
+                  <p className="text-xs text-gray-500">{label}</p>
+                  <p className="mt-2 text-xl font-bold text-white">
+                    {value}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-6 grid gap-5 lg:grid-cols-3">
+              <RiskSummaryCard title="Severity" data={severity} />
+              <RiskSummaryCard title="Risk Levels" data={riskLevels} />
+              <RiskSummaryCard title="Validation" data={validation} />
+            </div>
+
+            <div className="mt-6 border border-white/10 p-5">
+              <h2 className="text-sm font-semibold">
+                Severity Distribution
+              </h2>
+
+              <div className="mt-5 space-y-4">
+                {chartData.map(([label, value]) => {
+                  const total = Math.max(
+                    Number(risk.total_findings || findings.length || 1),
+                    1
+                  );
+                  const width = Math.round((Number(value) / total) * 100);
+
+                  return (
+                    <div key={label}>
+                      <div className="mb-1 flex justify-between text-xs">
+                        <span className="text-gray-400">{label}</span>
+                        <span className="text-white">{value}</span>
+                      </div>
+                      <div className="h-3 bg-white/5">
+                        <div
+                          className="h-3 bg-red-600 transition-all"
+                          style={{ width: `${width}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="mt-6 border border-white/10">
+              <div className="border-b border-white/10 p-4">
+                <h2 className="text-sm font-semibold">
+                  Canonical VAPT Findings
+                </h2>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-white/10 text-gray-500">
+                    <tr>
+                      <th className="p-3">Finding</th>
+                      <th className="p-3">Tool</th>
+                      <th className="p-3">Severity</th>
+                      <th className="p-3">Risk</th>
+                      <th className="p-3">CVSS</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {findings.map((finding) => (
+                      <tr
+                        key={finding.finding_id}
+                        className="border-b border-white/5"
+                      >
+                        <td className="p-3 text-white">
+                          {finding.title || finding.finding_id}
+                        </td>
+                        <td className="p-3">
+                          {finding.tool_name || "N/A"}
+                        </td>
+                        <td className="p-3">
+                          {finding.severity || "N/A"}
+                        </td>
+                        <td className="p-3">
+                          {finding.risk_level || "N/A"}
+                        </td>
+                        <td className="p-3">
+                          {finding.cvss_score ?? "N/A"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RiskSummaryCard({ title, data }) {
+  return (
+    <div className="border border-white/10 bg-black/20 p-5">
+      <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+        {title}
+      </h3>
+      <div className="mt-4 space-y-3">
+        {Object.entries(data || {}).map(([key, value]) => (
+          <div key={key} className="flex justify-between text-xs">
+            <span className="text-gray-500">{key}</span>
+            <span className="font-semibold text-white">{value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

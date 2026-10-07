@@ -1,0 +1,14 @@
+{
+  "id": "owasp-zap",
+  "name": "OWASP ZAP",
+  "stage": "03 Vulnerability Discovery",
+  "category": "Vulnerability Discovery",
+  "execution_type": "scanner",
+  "executable": "zap.sh",
+  "target_types": [
+    "url"
+  ],
+  "enabled": true,
+  "integrated": false,
+  "description": "Web application security assessment"
+}

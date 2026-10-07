@@ -1,0 +1,15 @@
+{
+  "id": "whois",
+  "name": "WHOIS",
+  "stage": "01 Reconnaissance",
+  "category": "Reconnaissance",
+  "execution_type": "scanner",
+  "executable": "whois",
+  "target_types": [
+    "domain",
+    "ip"
+  ],
+  "enabled": true,
+  "integrated": true,
+  "description": "Domain and registration information lookup"
+}

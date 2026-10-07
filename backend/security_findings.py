@@ -105,6 +105,36 @@ SECURITY_TOOLS = [
         "tool_type": "scanner",
     },
     {
+        "name": "DNS Recon",
+        "category": "Network Security",
+        "description": "DNS reconnaissance and enumeration tool for discovering DNS records, name servers and related domain information.",
+        "tool_type": "discovery",
+    },
+    {
+        "name": "dig",
+        "category": "Network Security",
+        "description": "DNS query utility for retrieving DNS records and resolving domain information.",
+        "tool_type": "discovery",
+    },
+    {
+        "name": "nslookup",
+        "category": "Network Security",
+        "description": "DNS lookup utility for querying DNS servers and resolving domain and host information.",
+        "tool_type": "discovery",
+    },
+    {
+        "name": "Ping",
+        "category": "Network Security",
+        "description": "Network connectivity and host reachability testing utility using ICMP echo requests.",
+        "tool_type": "discovery",
+    },
+    {
+        "name": "WHOIS",
+        "category": "Network Security",
+        "description": "Domain and IP registration information lookup utility.",
+        "tool_type": "discovery",
+    },
+    {
         "name": "Masscan",
         "category": "Network Security",
         "description": "High-speed TCP port scanner for large-scale network discovery.",
@@ -127,6 +157,18 @@ SECURITY_TOOLS = [
         "category": "Network Security",
         "description": "Network packet crafting and protocol testing utility.",
         "tool_type": "testing",
+    },
+    {
+        "name": "TShark",
+        "category": "Network Security",
+        "description": "Command-line packet capture and network protocol analysis utility.",
+        "tool_type": "analysis",
+    },
+    {
+        "name": "Snort",
+        "category": "Network Security",
+        "description": "Network intrusion detection and traffic analysis system.",
+        "tool_type": "sensor",
     },
 
     # --------------------------------------------------------
@@ -229,6 +271,36 @@ SECURITY_TOOLS = [
         "category": "Software Supply Chain Security",
         "description": "Identifies known vulnerabilities in project dependencies.",
         "tool_type": "sca",
+    },
+
+    # --------------------------------------------------------
+    # POST-EXPLOITATION / VALIDATION
+    # --------------------------------------------------------
+    {
+        "name": "Access / Impact Validation",
+        "category": "Post-Exploitation",
+        "description": "Controlled validation workflow for verifying affected-resource access and assessing recorded security impact.",
+        "tool_type": "validation",
+    },
+
+    # --------------------------------------------------------
+    # RISK ASSESSMENT
+    # --------------------------------------------------------
+    {
+        "name": "Risk Assessment Engine",
+        "category": "Risk Assessment",
+        "description": "Risk assessment workflow using actual security findings, CVSS severity, risk levels and validation results.",
+        "tool_type": "assessment",
+    },
+
+    # --------------------------------------------------------
+    # REPORTING
+    # --------------------------------------------------------
+    {
+        "name": "VAPT Report Generator",
+        "category": "Reporting",
+        "description": "Generate evidence-based VAPT reports from actual assessment, finding and risk data.",
+        "tool_type": "reporting",
     },
 ]
 

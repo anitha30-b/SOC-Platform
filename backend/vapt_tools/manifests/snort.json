@@ -1,0 +1,15 @@
+{
+  "id": "snort",
+  "name": "Snort",
+  "stage": "04 Network Security Testing",
+  "category": "Network Security Testing",
+  "execution_type": "sensor",
+  "executable": "snort",
+  "target_types": [
+    "interface",
+    "pcap"
+  ],
+  "enabled": true,
+  "integrated": false,
+  "description": "Network intrusion detection and traffic analysis"
+}

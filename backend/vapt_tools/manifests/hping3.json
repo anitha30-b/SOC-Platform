@@ -1,0 +1,15 @@
+{
+  "id": "hping3",
+  "name": "hping3",
+  "stage": "04 Network Security Testing",
+  "category": "Network Security Testing",
+  "execution_type": "scanner",
+  "executable": "hping3",
+  "target_types": [
+    "host",
+    "ip"
+  ],
+  "enabled": true,
+  "integrated": false,
+  "description": "Packet and network testing utility"
+}

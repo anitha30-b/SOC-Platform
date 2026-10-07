@@ -1,0 +1,16 @@
+{
+  "id": "report-generator",
+  "name": "VAPT Report Generator",
+  "stage": "09 Reporting",
+  "category": "Reporting",
+  "execution_type": "workflow",
+  "executable": null,
+  "target_types": [
+    "finding",
+    "case",
+    "assessment"
+  ],
+  "enabled": true,
+  "integrated": true,
+  "description": "Evidence, findings, remediation and reporting workflow"
+}

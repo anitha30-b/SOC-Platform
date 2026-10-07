@@ -7,10 +7,15 @@ from models import (
     Role,
     Client,
     Assessment,
+    SecurityTool,
+    UserToolPermission,
 )
 from schemas import (
     UserCreate,
     UserClientAssign,
+    SecurityToolResponse,
+    UserToolPermissionDetail,
+    UserToolPermissionsUpdate,
 )
 from security import hash_password
 from rbac import require_role
@@ -426,4 +431,146 @@ def get_assessment_details(
 
         "created_at": assessment.created_at,
         "updated_at": assessment.updated_at,
+    }
+
+# ==================================================
+# TOOL PERMISSIONS
+# ==================================================
+#
+# Admin controls which individual security tools each
+# User/Client is allowed to use.
+#
+# No permission record = DENIED.
+# ==================================================
+
+@router.get(
+    "/tool-permissions/tools",
+    response_model=list[SecurityToolResponse],
+)
+def get_security_tools_for_permissions(
+    current_user: User = Depends(require_role(3)),
+    db: Session = Depends(get_db),
+):
+    """Return all enabled security tools available for Admin assignment."""
+    return (
+        db.query(SecurityTool)
+        .filter(SecurityTool.enabled.is_(True))
+        .order_by(SecurityTool.category.asc(), SecurityTool.name.asc())
+        .all()
+    )
+
+
+@router.get(
+    "/users/{user_id}/tool-permissions",
+    response_model=list[UserToolPermissionDetail],
+)
+def get_user_tool_permissions(
+    user_id: int,
+    current_user: User = Depends(require_role(3)),
+    db: Session = Depends(get_db),
+):
+    """Return every enabled tool with the selected user's allow/deny state."""
+
+    user = db.query(User).filter(User.id == user_id).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
+
+    tools = (
+        db.query(SecurityTool)
+        .filter(SecurityTool.enabled.is_(True))
+        .order_by(SecurityTool.category.asc(), SecurityTool.name.asc())
+        .all()
+    )
+
+    permission_map = {
+        permission.tool_id: permission.allowed
+        for permission in db.query(UserToolPermission)
+        .filter(UserToolPermission.user_id == user_id)
+        .all()
+    }
+
+    return [
+        {
+            "user_id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "tool_id": tool.id,
+            "tool_name": tool.name,
+            "category": tool.category,
+            "description": tool.description,
+            "tool_type": tool.tool_type,
+            "tool_enabled": tool.enabled,
+            "allowed": permission_map.get(tool.id, False),
+        }
+        for tool in tools
+    ]
+
+
+@router.put(
+    "/users/{user_id}/tool-permissions",
+)
+def update_user_tool_permissions(
+    user_id: int,
+    permission_data: UserToolPermissionsUpdate,
+    current_user: User = Depends(require_role(3)),
+    db: Session = Depends(get_db),
+):
+    """Replace the selected user's tool permissions."""
+
+    user = db.query(User).filter(User.id == user_id).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
+
+    tools = db.query(SecurityTool).filter(SecurityTool.enabled.is_(True)).all()
+    valid_tool_ids = {tool.id for tool in tools}
+    submitted_tool_ids = {item.tool_id for item in permission_data.permissions}
+
+    invalid_tool_ids = submitted_tool_ids - valid_tool_ids
+
+    if invalid_tool_ids:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "One or more tools are invalid or disabled",
+                "tool_ids": sorted(invalid_tool_ids),
+            },
+        )
+
+    # Replace the user's permission set.
+    db.query(UserToolPermission).filter(
+        UserToolPermission.user_id == user_id
+    ).delete(synchronize_session=False)
+
+    for item in permission_data.permissions:
+        db.add(
+            UserToolPermission(
+                user_id=user_id,
+                tool_id=item.tool_id,
+                allowed=item.allowed,
+            )
+        )
+
+    db.commit()
+
+    return {
+        "message": "Tool permissions updated successfully",
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+        },
+        "allowed_tool_ids": sorted(
+            item.tool_id
+            for item in permission_data.permissions
+            if item.allowed
+        ),
+        "total_permissions": len(permission_data.permissions),
     }

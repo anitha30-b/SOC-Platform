@@ -41,3 +41,11 @@ Thumbs.db
 # Temporary files
 tmp/
 temp/
+
+# Project backup / runtime / test artifacts
+*.bak
+*.backup
+*.before-*
+backend/runtime_state/
+backend/data/
+*.zip

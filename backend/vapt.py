@@ -1,9 +1,13 @@
 import asyncio
 import json
+import re
+import xml.etree.ElementTree as ET
 import os
 import shutil
 import socket
 import time
+import tempfile
+from pathlib import Path
 from ipaddress import ip_address
 from urllib.parse import urlparse
 from typing import Literal, Optional
@@ -12,17 +16,23 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, HttpUrl
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from database import get_db
+from database import get_db, SessionLocal
 from cve import fetch_cve_information
 from models import (
     Assessment,
     SecurityFinding,
     SecurityTool,
+    SecurityEvent,
     User,
+    UserToolPermission,
 )
 from rbac import require_role
+from security_event_store import store_security_event
+from security_events import generate_event_id
+from realtime_journal_listener import notify_security_event
 
 
 # ==================================================
@@ -39,13 +49,56 @@ ALLOW_LOCAL_TARGETS = (
     in {"true", "1", "yes"}
 )
 
-NUCLEI_PATH = os.getenv("NUCLEI_PATH", "") or shutil.which("nuclei") or "/usr/bin/nuclei"
+# ==================================================
+# NMAP CONFIGURATION
+# ==================================================
 
-NUCLEI_TIMEOUT_SECONDS = int(
-    os.getenv("NUCLEI_TIMEOUT_SECONDS", "120")
+NMAP_PATH = (
+    os.getenv("NMAP_PATH", "")
+    or shutil.which("nmap")
+    or "/usr/bin/nmap"
 )
 
-NUCLEI_RATE_LIMIT = os.getenv("NUCLEI_RATE_LIMIT", "50")
+
+# ==================================================
+# NIKTO CONFIGURATION
+# ==================================================
+
+NIKTO_PATH = (
+    os.getenv("NIKTO_PATH", "")
+    or shutil.which("nikto")
+    or shutil.which("nikto.pl")
+    or "/usr/bin/nikto"
+)
+NIKTO_TIMEOUT_SECONDS = int(os.getenv("NIKTO_TIMEOUT_SECONDS", "600"))
+NIKTO_MAXTIME_QUICK = os.getenv("NIKTO_MAXTIME_QUICK", "5m")
+NIKTO_MAXTIME_DETAILED = os.getenv("NIKTO_MAXTIME_DETAILED", "10m")
+NIKTO_JOBS: dict[str, dict] = {}
+
+NMAP_TIMEOUT_SECONDS = int(
+    os.getenv("NMAP_TIMEOUT_SECONDS", "120")
+)
+
+# Detailed scans can legitimately take several minutes, especially when
+# scanning all TCP ports and running NSE vulnerability scripts.
+NMAP_DETAILED_TIMEOUT_SECONDS = int(
+    os.getenv("NMAP_DETAILED_TIMEOUT_SECONDS", "240")
+)
+
+NMAP_API_TIMEOUT_SECONDS = int(
+    os.getenv("NMAP_API_TIMEOUT_SECONDS", "300")
+)
+
+# In-memory job store for the development/single-process FastAPI server.
+# For production, replace this with Redis/Celery or a database-backed queue.
+NMAP_JOBS: dict[str, dict] = {}
+
+# Private/local targets are disabled by default.
+# Enable only for authorized lab testing.
+NMAP_ALLOW_PRIVATE_TARGETS = (
+    os.getenv("NMAP_ALLOW_PRIVATE_TARGETS", "false").lower()
+    in {"true", "1", "yes"}
+)
 
 
 # ==================================================
@@ -59,12 +112,63 @@ router = APIRouter(
 
 
 # ==================================================
+# SECURITY TOOL PERMISSION ENFORCEMENT
+# ==================================================
+
+def require_user_tool_permission(
+    db: Session,
+    current_user: User,
+    tool_name: str,
+) -> SecurityTool:
+    """Require an explicitly granted, enabled tool permission."""
+    tool = (
+        db.query(SecurityTool)
+        .filter(func.lower(SecurityTool.name) == tool_name.lower())
+        .first()
+    )
+
+    if tool is None:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Security tool '{tool_name}' is not available.",
+        )
+
+    if not tool.enabled:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Security tool '{tool.name}' is currently disabled.",
+        )
+
+    permission = (
+        db.query(UserToolPermission)
+        .filter(
+            UserToolPermission.user_id == current_user.id,
+            UserToolPermission.tool_id == tool.id,
+        )
+        .first()
+    )
+
+    if permission is None or not permission.allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"You do not have permission to use the security tool '{tool.name}'.",
+        )
+
+    return tool
+
+
+# ==================================================
 # REQUEST SCHEMA
 # ==================================================
 
 class VAPTScanRequest(BaseModel):
     target_url: HttpUrl
     scan_type: Literal["quick", "detailed"] = "quick"
+
+
+class NmapToolRequest(BaseModel):
+    target: str
+    scan_type: Literal["comprehensive", "quick", "service", "detailed", "api"] = "comprehensive"
 
 
 # ==================================================
@@ -264,7 +368,7 @@ def sync_vapt_security_findings(
     HTTP security-header checks.
 
     They do not represent a full external scanner such as
-    Nmap, Nuclei, ZAP, Nessus or Trivy.
+    Nmap or other approved security tools.
 
     CVE is intentionally left empty because a missing
     security header normally does not have a specific CVE.
@@ -575,93 +679,1579 @@ def generate_finding_id(
 
 
 # ==================================================
-# NUCLEI SCAN
+# NMAP TARGET VALIDATION
 # ==================================================
 
-async def run_all_security_scanners(target_url: str, scan_type: str = "quick") -> dict:
-    """Run the integrated scanners according to the selected scan mode.
+def validate_nmap_target(target: str) -> str:
+    """Validate a hostname/IP before passing it to Nmap."""
 
-    Quick mode intentionally skips Nuclei so the user gets a lightweight
-    assessment based on the native HTTP/security-header checks. Detailed mode
-    runs Nuclei for deeper CVE/misconfiguration coverage.
-    """
-    if scan_type == "quick":
-        return {
-            "scan_type": "quick",
-            "scanners": {
-                "nuclei": {
-                    "available": bool(NUCLEI_PATH and os.path.exists(NUCLEI_PATH)),
-                    "status": "skipped",
-                    "message": "Nuclei is skipped in Quick Scan for faster results.",
-                    "results": [],
-                    "errors": [],
-                    "scan_type": "quick",
-                },
-            },
-            "executed_tools": ["SOC Platform HTTP Checks"],
-            "skipped_tools": ["Nuclei"],
-            "not_yet_integrated": [
-                "Security tools in the catalog without an executable backend integration"
-            ],
-        }
+    target = target.strip()
 
-    nuclei_result = await run_nuclei_scan(
-        target_url=target_url,
-        scan_type="detailed",
+    if not target:
+        raise HTTPException(status_code=400, detail="Nmap target cannot be empty.")
+
+    if len(target) > 253:
+        raise HTTPException(status_code=400, detail="Nmap target is too long.")
+
+    # The API accepts a target only; arbitrary shell/Nmap arguments are rejected.
+    if any(character in target for character in [
+        ";", "&", "|", "`", "$", "(", ")", "<", ">", "\n", "\r", "\x00"
+    ]):
+        raise HTTPException(status_code=400, detail="Invalid characters in Nmap target.")
+
+    hostname_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-:]*$")
+    if not hostname_pattern.fullmatch(target):
+        raise HTTPException(status_code=400, detail="Invalid hostname or IP address.")
+
+    try:
+        ip = ip_address(target)
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+        ) and not NMAP_ALLOW_PRIVATE_TARGETS:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Private/local Nmap targets are disabled. Set "
+                    "NMAP_ALLOW_PRIVATE_TARGETS=true only for authorized lab testing."
+                ),
+            )
+    except ValueError:
+        try:
+            resolved = socket.getaddrinfo(target, None, type=socket.SOCK_STREAM)
+            for address in resolved:
+                resolved_ip = address[4][0]
+                try:
+                    resolved_obj = ip_address(resolved_ip)
+                    if (
+                        resolved_obj.is_private
+                        or resolved_obj.is_loopback
+                        or resolved_obj.is_link_local
+                        or resolved_obj.is_reserved
+                        or resolved_obj.is_multicast
+                    ) and not NMAP_ALLOW_PRIVATE_TARGETS:
+                        raise HTTPException(
+                            status_code=403,
+                            detail=(
+                                "The target resolves to a private/local address. "
+                                "Private Nmap targets are disabled."
+                            ),
+                        )
+                except ValueError:
+                    continue
+        except socket.gaierror:
+            raise HTTPException(
+                status_code=400,
+                detail="Unable to resolve Nmap target.",
+            )
+
+    return target
+
+
+# ==================================================
+# NMAP XML PARSER
+# ==================================================
+
+def _parse_nmap_script(script_element: ET.Element) -> dict:
+    """Parse one NSE <script> element into frontend-friendly JSON."""
+
+    script = {
+        "id": script_element.get("id"),
+        "output": script_element.get("output", ""),
+        "elements": {},
+    }
+
+    for elem in script_element.findall("elem"):
+        key = elem.get("key") or "value"
+        script["elements"][key] = elem.text or ""
+
+    for table in script_element.findall("table"):
+        key = table.get("key") or "table"
+        values = {}
+        for elem in table.findall("elem"):
+            values[elem.get("key") or "value"] = elem.text or ""
+        script["elements"][key] = values
+
+    return script
+
+
+def parse_nmap_xml(xml_output: str) -> dict:
+    """Convert Nmap XML output to structured JSON, including NSE and OS data."""
+
+    hosts = []
+
+    try:
+        root = ET.fromstring(xml_output)
+    except ET.ParseError as exc:
+        return {"hosts": [], "host_count": 0, "parse_error": str(exc)}
+
+    for host in root.findall("host"):
+        status_element = host.find("status")
+        status = status_element.get("state") if status_element is not None else "unknown"
+
+        addresses = []
+        for address in host.findall("address"):
+            address_value = address.get("addr")
+            if address_value:
+                addresses.append({
+                    "address": address_value,
+                    "type": address.get("addrtype"),
+                })
+
+        hostnames = []
+        hostnames_element = host.find("hostnames")
+        if hostnames_element is not None:
+            for hostname in hostnames_element.findall("hostname"):
+                name = hostname.get("name")
+                if name:
+                    hostnames.append(name)
+
+        ports = []
+        ports_element = host.find("ports")
+        if ports_element is not None:
+            for port in ports_element.findall("port"):
+                state_element = port.find("state")
+                service_element = port.find("service")
+                service = {}
+                if service_element is not None:
+                    service = {
+                        "name": service_element.get("name"),
+                        "product": service_element.get("product"),
+                        "version": service_element.get("version"),
+                        "extrainfo": service_element.get("extrainfo"),
+                        "tunnel": service_element.get("tunnel"),
+                        "method": service_element.get("method"),
+                    }
+
+                try:
+                    port_number = int(port.get("portid", "0"))
+                except ValueError:
+                    port_number = 0
+
+                scripts = [
+                    _parse_nmap_script(script)
+                    for script in port.findall("script")
+                ]
+
+                ports.append({
+                    "protocol": port.get("protocol", "unknown"),
+                    "port": port_number,
+                    "state": (
+                        state_element.get("state")
+                        if state_element is not None
+                        else "unknown"
+                    ),
+                    "reason": (
+                        state_element.get("reason")
+                        if state_element is not None
+                        else None
+                    ),
+                    "service": service,
+                    "scripts": scripts,
+                })
+
+        host_scripts = [
+            _parse_nmap_script(script)
+            for script in host.findall("hostscript/script")
+        ]
+
+        os_matches = []
+        os_element = host.find("os")
+        if os_element is not None:
+            for match in os_element.findall("osmatch"):
+                os_matches.append({
+                    "name": match.get("name"),
+                    "accuracy": match.get("accuracy"),
+                    "line": match.get("line"),
+                })
+
+        uptime_element = host.find("uptime")
+        uptime = None
+        if uptime_element is not None:
+            uptime = {
+                "seconds": uptime_element.get("seconds"),
+                "lastboot": uptime_element.get("lastboot"),
+            }
+
+        hosts.append({
+            "status": status,
+            "addresses": addresses,
+            "hostnames": hostnames,
+            "ports": ports,
+            "scripts": host_scripts,
+            "os_matches": os_matches,
+            "uptime": uptime,
+        })
+
+    return {"hosts": hosts, "host_count": len(hosts)}
+
+
+# ==================================================
+# NMAP WORKFLOW / PERFORMANCE OPTIMIZATION
+# ==================================================
+
+# The platform keeps Nmap functionality available, but each profile now
+# performs only the work promised by the UI. The old implementation forced
+# every request into the heaviest comprehensive workflow, which made even
+# "Quick" scans perform a 65,535-port scan plus vulnerability NSE.
+#
+# Full functionality is still available through the "detailed" and
+# "comprehensive" profiles. The detailed/comprehensive profiles reduce
+# wall-clock time by:
+#   1. using -T4 and one-retry behavior for controlled scans,
+#   2. discovering ports once and reusing the resulting open-port list,
+#   3. running independent service/vulnerability/HTTP checks concurrently,
+#   4. avoiding traceroute in quick/service profiles,
+#   5. limiting HTTP NSE to confirmed web ports.
+
+NMAP_VULN_SCRIPTS = "vuln"
+NMAP_HTTP_SCRIPTS = (
+    "http-title,http-headers,http-methods,http-security-headers,"
+    "http-enum,http-auth-finder,http-cors,ssl-cert"
+)
+
+NMAP_QUICK_TIMEOUT = int(
+    os.getenv("NMAP_QUICK_TIMEOUT_SECONDS", "300")
+)
+NMAP_SERVICE_TIMEOUT = int(
+    os.getenv("NMAP_SERVICE_TIMEOUT_SECONDS", "180")
+)
+NMAP_DETAILED_TIMEOUT = int(
+    os.getenv("NMAP_DETAILED_TIMEOUT_SECONDS", "600")
+)
+NMAP_COMPREHENSIVE_TIMEOUT = int(
+    os.getenv("NMAP_COMPREHENSIVE_TIMEOUT_SECONDS", "900")
+)
+NMAP_PORT_SCAN_TIMEOUT = int(
+    os.getenv("NMAP_PORT_SCAN_TIMEOUT_SECONDS", "600")
+)
+
+# Nmap rate controls. These are intentionally moderate so that scan speed
+# improves without turning the application into an uncontrolled packet flood.
+NMAP_MIN_RATE = os.getenv("NMAP_MIN_RATE", "300")
+NMAP_MAX_RATE = os.getenv("NMAP_MAX_RATE", "3000")
+
+NMAP_PROFILES = {
+    "quick": {
+        "profile": "top_1000_fast",
+        "timeout": NMAP_QUICK_TIMEOUT,
+        "stage": "Quick Nmap scan",
+    },
+    "service": {
+        "profile": "top_1000_service_detection",
+        "timeout": NMAP_SERVICE_TIMEOUT,
+        "stage": "Nmap service detection",
+    },
+    "detailed": {
+        "profile": "all_tcp_service_os_nse_vuln_http",
+        "timeout": NMAP_DETAILED_TIMEOUT,
+        "stage": "Detailed Nmap assessment",
+    },
+    "api": {
+        "profile": "http_api_security",
+        "timeout": NMAP_SERVICE_TIMEOUT,
+        "stage": "Nmap HTTP/API security checks",
+    },
+    "comprehensive": {
+        "profile": "all_tcp_service_os_nse_vuln_http_traceroute",
+        "timeout": NMAP_COMPREHENSIVE_TIMEOUT,
+        "stage": "Comprehensive Nmap assessment",
+    },
+}
+
+
+async def _run_nmap_pass(
+    command,
+    timeout,
+    stderr_lines,
+    progress_callback,
+    progress_start,
+    progress_end,
+    stage,
+):
+    """Run one controlled Nmap pass and return XML + diagnostics."""
+
+    if progress_callback:
+        await progress_callback(progress_start, stage)
+
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
 
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+
+        stdout, stderr = await process.communicate()
+        stderr_text = stderr.decode("utf-8", errors="replace")
+        stderr_lines.extend(
+            [x.strip() for x in stderr_text.splitlines() if x.strip()][-30:]
+        )
+
+        if progress_callback:
+            await progress_callback(
+                progress_end,
+                f"{stage} timed out",
+            )
+
+        return {
+            "return_code": None,
+            "timed_out": True,
+            "xml": stdout.decode("utf-8", errors="replace"),
+        }
+
+    stderr_text = stderr.decode("utf-8", errors="replace")
+    stderr_lines.extend(
+        [x.strip() for x in stderr_text.splitlines() if x.strip()][-30:]
+    )
+
+    if progress_callback:
+        await progress_callback(
+            progress_end,
+            stage + " completed",
+        )
+
     return {
-        "scan_type": "detailed",
-        "scanners": {
-            "nuclei": nuclei_result,
-        },
-        "executed_tools": ["SOC Platform HTTP Checks", "Nuclei"],
-        "skipped_tools": [],
-        "not_yet_integrated": [
-            "Security tools in the catalog without an executable backend integration"
-        ],
+        "return_code": process.returncode,
+        "timed_out": False,
+        "xml": stdout.decode("utf-8", errors="replace"),
     }
 
 
-async def run_nuclei_scan(target_url: str, scan_type: str = "quick") -> dict:
-    """Run Nuclei in quick or detailed mode against an authorized target."""
+def _nmap_rate_args():
+    """Return conservative rate controls for faster authorized scanning."""
+    args = []
 
-    if not NUCLEI_PATH or not os.path.exists(NUCLEI_PATH):
+    if NMAP_MIN_RATE:
+        args.extend(["--min-rate", NMAP_MIN_RATE])
+
+    if NMAP_MAX_RATE:
+        args.extend(["--max-rate", NMAP_MAX_RATE])
+
+    return args
+
+
+def _extract_open_ports(parsed: dict) -> list[int]:
+    """Extract unique open TCP ports from parsed Nmap XML."""
+    return sorted({
+        int(port.get("port"))
+        for host in parsed.get("hosts", [])
+        for port in host.get("ports", [])
+        if (
+            port.get("state") == "open"
+            and str(port.get("port", "")).isdigit()
+        )
+    })
+
+
+async def _execute_nmap_command(
+    target: str,
+    scan_type: str,
+    progress_callback=None,
+    result_callback=None,
+) -> dict:
+    """
+    Execute an Nmap profile while preserving the full Nmap feature set.
+
+    Profiles:
+      quick         -> top 1,000 TCP ports
+      service       -> top 1,000 + service/version/default NSE
+      detailed      -> all TCP + service/version + OS + default NSE +
+                       vulnerability NSE + HTTP/TLS NSE
+      api           -> top 1,000 + HTTP/API/TLS NSE
+      comprehensive -> all TCP + service/version + OS + default NSE +
+                       vulnerability NSE + HTTP/TLS NSE + traceroute
+    """
+
+    target = validate_nmap_target(target)
+
+    if scan_type not in NMAP_PROFILES:
+        scan_type = "quick"
+
+    profile = NMAP_PROFILES[scan_type]
+
+    if not NMAP_PATH or not os.path.exists(NMAP_PATH):
         return {
+            "tool": "Nmap",
             "available": False,
             "status": "not_available",
-            "message": "Nuclei executable was not found.",
-            "results": [],
-            "errors": [],
+            "target": target,
             "scan_type": scan_type,
+            "results": {"hosts": [], "host_count": 0},
+            "errors": ["Nmap executable was not found."],
         }
 
-    if scan_type == "detailed":
-        command = [
-            NUCLEI_PATH,
-            "-u", target_url,
-            "-jsonl",
-            "-silent",
-            "-tags", "cve,misconfig,exposure",
-            "-severity", "low,medium,high,critical",
-            "-rl", NUCLEI_RATE_LIMIT,
-            "-timeout", "10",
-            "-retries", "1",
+    started = time.perf_counter()
+    stderr_lines: list[str] = []
+    passes = []
+    timed_out = False
+
+    async def publish(parsed, stage, percent, extra=None):
+        payload = {
+            "tool": "Nmap",
+            "available": True,
+            "status": "running",
+            "target": target,
+            "scan_type": scan_type,
+            "command_profile": profile["profile"],
+            "elapsed_seconds": round(
+                time.perf_counter() - started,
+                2,
+            ),
+            "results": parsed,
+            "open_ports": _extract_open_ports(parsed),
+            "errors": stderr_lines[-30:],
+            "workflow": {
+                "passes": [name for name, _ in passes],
+                "stage": stage,
+                **(extra or {}),
+            },
+        }
+
+        if result_callback:
+            await result_callback(payload)
+
+        if progress_callback:
+            await progress_callback(percent, stage)
+
+    try:
+        # --------------------------------------------------
+        # PROFILE: QUICK
+        # --------------------------------------------------
+        if scan_type == "quick":
+            command = [
+                NMAP_PATH,
+                "-Pn",
+                "-T5",
+                "-sT",
+                "--top-ports",
+                "1000",
+                "--max-retries",
+                "0",
+                "--host-timeout",
+                "30s",
+                "--min-rate",
+                "1000",
+                "--max-rate",
+                "5000",
+                "-oX",
+                "-",
+                target,
+            ]
+
+            scan_pass = await _run_nmap_pass(
+                command,
+                NMAP_QUICK_TIMEOUT,
+                stderr_lines,
+                progress_callback,
+                5,
+                95,
+                "Fast discovery of top 1,000 TCP ports",
+            )
+
+            passes.append(("top_1000_tcp", scan_pass))
+            timed_out = scan_pass["timed_out"]
+
+            parsed = parse_nmap_xml(scan_pass["xml"])
+            result = {
+                "tool": "Nmap",
+                "available": True,
+                "status": (
+                    "completed_with_errors"
+                    if timed_out
+                    else "completed"
+                ),
+                "return_code": (
+                    None if timed_out else scan_pass["return_code"]
+                ),
+                "target": target,
+                "scan_type": scan_type,
+                "command_profile": profile["profile"],
+                "command_display": (
+                    "Top 1,000 TCP ports with fast discovery"
+                ),
+                "elapsed_seconds": round(
+                    time.perf_counter() - started,
+                    2,
+                ),
+                "results": parsed,
+                "open_ports": _extract_open_ports(parsed),
+                "errors": stderr_lines[-40:],
+                "nse": {
+                    "enabled": False,
+                    "description": (
+                        "Quick profile does not run vulnerability NSE."
+                    ),
+                },
+                "workflow": {
+                    "passes": [name for name, _ in passes],
+                    "open_port_count": len(
+                        _extract_open_ports(parsed)
+                    ),
+                    "all_tcp_ports_scanned": False,
+                    "final_result_only": True,
+                },
+            }
+
+            if result_callback:
+                await result_callback(result)
+
+            if progress_callback:
+                await progress_callback(
+                    100,
+                    "Quick Nmap scan completed",
+                )
+
+            return result
+
+        # --------------------------------------------------
+        # PROFILE: SERVICE
+        # --------------------------------------------------
+        if scan_type == "service":
+            command = [
+                NMAP_PATH,
+                "-Pn",
+                "-T4",
+                "-sT",
+                "--top-ports",
+                "1000",
+                "-sV",
+                "-sC",
+                "--version-light",
+                "--max-retries",
+                "1",
+                "--host-timeout",
+                "150s",
+                *_nmap_rate_args(),
+                "-oX",
+                "-",
+                target,
+            ]
+
+            scan_pass = await _run_nmap_pass(
+                command,
+                NMAP_SERVICE_TIMEOUT,
+                stderr_lines,
+                progress_callback,
+                5,
+                95,
+                "Service/version detection on top 1,000 ports",
+            )
+
+            passes.append(("top_1000_service_default_nse", scan_pass))
+            timed_out = scan_pass["timed_out"]
+
+            parsed = parse_nmap_xml(scan_pass["xml"])
+            result = {
+                "tool": "Nmap",
+                "available": True,
+                "status": (
+                    "completed_with_errors"
+                    if timed_out
+                    else "completed"
+                ),
+                "return_code": (
+                    None if timed_out else scan_pass["return_code"]
+                ),
+                "target": target,
+                "scan_type": scan_type,
+                "command_profile": profile["profile"],
+                "command_display": (
+                    "Top 1,000 TCP ports → service/version detection → default NSE"
+                ),
+                "elapsed_seconds": round(
+                    time.perf_counter() - started,
+                    2,
+                ),
+                "results": parsed,
+                "open_ports": _extract_open_ports(parsed),
+                "errors": stderr_lines[-40:],
+                "nse": {
+                    "enabled": True,
+                    "category": "default",
+                },
+                "workflow": {
+                    "passes": [name for name, _ in passes],
+                    "open_port_count": len(
+                        _extract_open_ports(parsed)
+                    ),
+                    "all_tcp_ports_scanned": False,
+                    "final_result_only": True,
+                },
+            }
+
+            if result_callback:
+                await result_callback(result)
+
+            if progress_callback:
+                await progress_callback(
+                    100,
+                    "Nmap service scan completed",
+                )
+
+            return result
+
+        # --------------------------------------------------
+        # PROFILE: API
+        # --------------------------------------------------
+        if scan_type == "api":
+            discovery_command = [
+                NMAP_PATH,
+                "-Pn",
+                "-T4",
+                "-sT",
+                "--top-ports",
+                "1000",
+                "--max-retries",
+                "1",
+                "--host-timeout",
+                "90s",
+                *_nmap_rate_args(),
+                "-oX",
+                "-",
+                target,
+            ]
+
+            discovery_pass = await _run_nmap_pass(
+                discovery_command,
+                NMAP_QUICK_TIMEOUT,
+                stderr_lines,
+                progress_callback,
+                5,
+                35,
+                "Discovering web/API ports",
+            )
+
+            passes.append(("top_1000_api_discovery", discovery_pass))
+            timed_out = discovery_pass["timed_out"]
+
+            parsed_discovery = parse_nmap_xml(
+                discovery_pass["xml"]
+            )
+            open_ports = _extract_open_ports(parsed_discovery)
+
+            http_ports = [
+                port
+                for port in open_ports
+                if port in {
+                    80,
+                    443,
+                    8000,
+                    8080,
+                    8443,
+                    8888,
+                    3000,
+                    5000,
+                    8008,
+                    9000,
+                }
+            ]
+
+            if http_ports:
+                http_command = [
+                    NMAP_PATH,
+                    "-Pn",
+                    "-T4",
+                    "-sT",
+                    "-p",
+                    ",".join(map(str, http_ports)),
+                    "--script",
+                    NMAP_HTTP_SCRIPTS,
+                    "--max-retries",
+                    "1",
+                    *_nmap_rate_args(),
+                    "-oX",
+                    "-",
+                    target,
+                ]
+
+                http_pass = await _run_nmap_pass(
+                    http_command,
+                    min(120, NMAP_SERVICE_TIMEOUT),
+                    stderr_lines,
+                    progress_callback,
+                    40,
+                    95,
+                    "HTTP/API/TLS security checks",
+                )
+
+                passes.append(("http_api_tls_nse", http_pass))
+                timed_out = timed_out or http_pass["timed_out"]
+                parsed_http = parse_nmap_xml(
+                    http_pass["xml"]
+                )
+            else:
+                parsed_http = {
+                    "hosts": [],
+                    "host_count": 0,
+                }
+                if progress_callback:
+                    await progress_callback(
+                        95,
+                        "No common HTTP/API ports discovered",
+                    )
+
+            # Merge HTTP evidence into discovery results.
+            merged_hosts = parsed_discovery.get("hosts", [])
+
+            def host_key(host):
+                return tuple(
+                    address.get("address")
+                    for address in (
+                        host.get("addresses") or []
+                    )
+                )
+
+            by_key = {
+                host_key(host): host
+                for host in merged_hosts
+            }
+
+            for source_host in parsed_http.get("hosts", []):
+                destination = by_key.get(
+                    host_key(source_host)
+                )
+                if not destination:
+                    continue
+
+                destination.setdefault(
+                    "scripts",
+                    [],
+                ).extend(
+                    source_host.get("scripts", [])
+                )
+
+                source_ports = {
+                    port.get("port"): port
+                    for port in source_host.get("ports", [])
+                }
+
+                for destination_port in destination.get(
+                    "ports",
+                    [],
+                ):
+                    source_port = source_ports.get(
+                        destination_port.get("port")
+                    )
+                    if source_port:
+                        destination_port.setdefault(
+                            "scripts",
+                            [],
+                        ).extend(
+                            source_port.get("scripts", [])
+                        )
+
+            final_results = {
+                "hosts": merged_hosts,
+                "host_count": len(merged_hosts),
+            }
+
+            result = {
+                "tool": "Nmap",
+                "available": True,
+                "status": (
+                    "completed_with_errors"
+                    if timed_out
+                    else "completed"
+                ),
+                "return_code": None if timed_out else 0,
+                "target": target,
+                "scan_type": scan_type,
+                "command_profile": profile["profile"],
+                "command_display": (
+                    "Top 1,000 discovery → confirmed HTTP/API/TLS NSE"
+                ),
+                "elapsed_seconds": round(
+                    time.perf_counter() - started,
+                    2,
+                ),
+                "results": final_results,
+                "open_ports": open_ports,
+                "errors": stderr_lines[-40:],
+                "nse": {
+                    "enabled": True,
+                    "category": "http-security",
+                    "scripts": NMAP_HTTP_SCRIPTS,
+                },
+                "workflow": {
+                    "passes": [name for name, _ in passes],
+                    "open_port_count": len(open_ports),
+                    "http_ports": http_ports,
+                    "all_tcp_ports_scanned": False,
+                    "final_result_only": True,
+                },
+            }
+
+            if result_callback:
+                await result_callback(result)
+
+            if progress_callback:
+                await progress_callback(
+                    100,
+                    "Nmap API security scan completed",
+                )
+
+            return result
+
+        # --------------------------------------------------
+        # PROFILES: DETAILED / COMPREHENSIVE
+        # --------------------------------------------------
+
+        # Stage 1: discover top ports first. This gives quick feedback and
+        # prevents vulnerability scripts from being run against closed ports.
+        discovery_command = [
+            NMAP_PATH,
+            "-Pn",
+            "-T5",
+            "-sT",
+            "--top-ports",
+            "1000",
+            "--max-retries",
+            "0",
+            "--host-timeout",
+            "45s",
+            "--min-rate",
+            "1000",
+            "--max-rate",
+            "10000",
+            "-oX",
+            "-",
+            target,
         ]
-        timeout_seconds = max(NUCLEI_TIMEOUT_SECONDS, 180)
-    else:
-        command = [
-            NUCLEI_PATH,
-            "-u", target_url,
-            "-jsonl",
-            "-silent",
-            "-tags", "cve,misconfig",
-            "-severity", "medium,high,critical",
-            "-rl", "100",
-            "-timeout", "5",
-            "-retries", "0",
+
+        discovery_pass = await _run_nmap_pass(
+            discovery_command,
+            110,
+            stderr_lines,
+            progress_callback,
+            5,
+            18,
+            "Fast discovery of top 1,000 TCP ports",
+        )
+
+        passes.append(("top_1000_tcp_discovery", discovery_pass))
+        timed_out = discovery_pass["timed_out"]
+
+        parsed_discovery = parse_nmap_xml(
+            discovery_pass["xml"]
+        )
+
+        await publish(
+            parsed_discovery,
+            "Initial discovery completed",
+            18,
+            {
+                "preliminary": True,
+                "all_tcp_ports_scanned": False,
+            },
+        )
+
+        # Stage 2: full TCP inventory. This remains available for detailed
+        # and comprehensive scans, but it happens only once.
+        full_command = [
+            NMAP_PATH,
+            "-Pn",
+            "-T5",
+            "-sT",
+            "-p-",
+            "--max-retries",
+            "0",
+            "--host-timeout",
+            f"{NMAP_PORT_SCAN_TIMEOUT}s",
+            "--min-rate",
+            "1000",
+            "--max-rate",
+            "10000",
+            "-oX",
+            "-",
+            target,
         ]
-        timeout_seconds = min(60, max(30, NUCLEI_TIMEOUT_SECONDS))
+
+        full_pass = await _run_nmap_pass(
+            full_command,
+            NMAP_PORT_SCAN_TIMEOUT + 30,
+            stderr_lines,
+            progress_callback,
+            19,
+            43,
+            "Authoritative scan of all 65,535 TCP ports",
+        )
+
+        passes.append(("all_tcp_ports", full_pass))
+        timed_out = timed_out or full_pass["timed_out"]
+
+        parsed_ports = parse_nmap_xml(full_pass["xml"])
+
+        if parsed_ports.get("hosts"):
+            base = parsed_ports
+            await publish(
+                parsed_ports,
+                "Full TCP discovery completed",
+                43,
+                {
+                    "preliminary": False,
+                    "all_tcp_ports_scanned": not full_pass["timed_out"],
+                },
+            )
+        else:
+            base = parsed_discovery
+            await publish(
+                parsed_discovery,
+                "Full TCP pass incomplete; retaining discovery results",
+                43,
+                {
+                    "preliminary": True,
+                    "all_tcp_ports_scanned": False,
+                },
+            )
+
+        open_ports = _extract_open_ports(base)
+
+        if not open_ports:
+            result = {
+                "tool": "Nmap",
+                "available": True,
+                "status": (
+                    "completed_with_errors"
+                    if timed_out
+                    else "completed"
+                ),
+                "return_code": None if timed_out else 0,
+                "target": target,
+                "scan_type": scan_type,
+                "command_profile": profile["profile"],
+                "command_display": (
+                    "Top 1,000 discovery → all TCP ports → "
+                    "service/OS/default NSE → vulnerability NSE → "
+                    "HTTP/TLS NSE"
+                ),
+                "elapsed_seconds": round(
+                    time.perf_counter() - started,
+                    2,
+                ),
+                "results": base,
+                "open_ports": [],
+                "errors": stderr_lines[-40:],
+                "nse": {
+                    "enabled": True,
+                    "category": "default,vuln,http-security",
+                },
+                "workflow": {
+                    "passes": [name for name, _ in passes],
+                    "open_port_count": 0,
+                    "all_tcp_ports_scanned": not timed_out,
+                    "final_result_only": True,
+                },
+            }
+
+            if result_callback:
+                await result_callback(result)
+
+            if progress_callback:
+                await progress_callback(
+                    100,
+                    "Completed — no open TCP ports discovered",
+                )
+
+            return result
+
+        port_list = ",".join(map(str, open_ports))
+
+        # Independent post-discovery checks are run concurrently. This is the
+        # main wall-clock optimization: service/OS/default NSE and vulnerability
+        # NSE no longer wait for one another.
+        detail_args = [
+            NMAP_PATH,
+            "-Pn",
+            "-T5",
+            "-sT",
+            "-p",
+            port_list,
+            "-sV",
+            "-sC",
+            "-O",
+            "--version-light",
+            "--max-retries",
+            "0",
+            "--script-timeout",
+            "90s",
+            "--min-rate",
+            "500",
+            "--max-rate",
+            "10000",
+        ]
+
+        if scan_type in {"quick", "comprehensive"}:
+            detail_args.append("--traceroute")
+
+        detail_command = [
+            *detail_args,
+            "-oX",
+            "-",
+            target,
+        ]
+
+        vuln_command = [
+            NMAP_PATH,
+            "-Pn",
+            "-T5",
+            "-sT",
+            "-p",
+            port_list,
+            "--script",
+            NMAP_VULN_SCRIPTS,
+            "--script-timeout",
+            "90s",
+            "--max-retries",
+            "0",
+            "--min-rate",
+            "500",
+            "--max-rate",
+            "10000",
+            "-oX",
+            "-",
+            target,
+        ]
+
+        detail_task = _run_nmap_pass(
+            detail_command,
+            NMAP_DETAILED_TIMEOUT,
+            stderr_lines,
+            None,
+            0,
+            0,
+            "Service/version/OS/default NSE",
+        )
+
+        vuln_task = _run_nmap_pass(
+            vuln_command,
+            NMAP_DETAILED_TIMEOUT,
+            stderr_lines,
+            None,
+            0,
+            0,
+            "Vulnerability NSE",
+        )
+
+        detail_pass, vuln_pass = await asyncio.gather(
+            detail_task,
+            vuln_task,
+        )
+
+        passes.append(
+            ("service_version_os_default_nse", detail_pass)
+        )
+        passes.append(
+            ("vulnerability_nse", vuln_pass)
+        )
+
+        timed_out = (
+            timed_out
+            or detail_pass["timed_out"]
+            or vuln_pass["timed_out"]
+        )
+
+        parsed_detail = parse_nmap_xml(
+            detail_pass["xml"]
+        )
+        parsed_vuln = parse_nmap_xml(
+            vuln_pass["xml"]
+        )
+
+        current = (
+            parsed_detail
+            if parsed_detail.get("hosts")
+            else base
+        )
+
+        await publish(
+            current,
+            "Service, version, OS and vulnerability results available",
+            82,
+            {
+                "all_tcp_ports_scanned": not timed_out,
+                "vulnerability_hosts": len(
+                    parsed_vuln.get("hosts", [])
+                ),
+                "parallel_post_discovery_checks": True,
+            },
+        )
+
+        # HTTP/TLS checks are also limited to confirmed common web ports.
+        http_ports = [
+            port
+            for port in open_ports
+            if port in {
+                80,
+                443,
+                8000,
+                8080,
+                8443,
+                8888,
+                3000,
+                5000,
+                8008,
+                9000,
+            }
+        ]
+
+        parsed_http = {
+            "hosts": [],
+            "host_count": 0,
+        }
+
+        if http_ports:
+            http_command = [
+                NMAP_PATH,
+                "-Pn",
+                "-T5",
+                "-sT",
+                "-p",
+                ",".join(map(str, http_ports)),
+                "--script",
+                NMAP_HTTP_SCRIPTS,
+                "--script-timeout",
+                "60s",
+                "--max-retries",
+                "0",
+                "--min-rate",
+                "500",
+                "--max-rate",
+                "10000",
+                "-oX",
+                "-",
+                target,
+            ]
+
+            http_pass = await _run_nmap_pass(
+                http_command,
+                min(120, NMAP_DETAILED_TIMEOUT),
+                stderr_lines,
+                progress_callback,
+                83,
+                95,
+                "HTTP/API/TLS security checks",
+            )
+
+            passes.append(("http_tls_nse", http_pass))
+            timed_out = timed_out or http_pass["timed_out"]
+            parsed_http = parse_nmap_xml(
+                http_pass["xml"]
+            )
+        else:
+            if progress_callback:
+                await progress_callback(
+                    95,
+                    "No common HTTP ports open — HTTP/TLS checks skipped",
+                )
+
+        # Merge real evidence from all passes.
+        merged_hosts = (
+            current.get("hosts", [])
+            or base.get("hosts", [])
+        )
+
+        def host_key(host):
+            return tuple(
+                address.get("address")
+                for address in (
+                    host.get("addresses") or []
+                )
+            )
+
+        by_key = {
+            host_key(host): host
+            for host in merged_hosts
+        }
+
+        for source in (
+            parsed_vuln.get("hosts", []),
+            parsed_http.get("hosts", []),
+        ):
+            for source_host in source:
+                destination = by_key.get(
+                    host_key(source_host)
+                )
+
+                if not destination:
+                    continue
+
+                destination.setdefault(
+                    "scripts",
+                    [],
+                ).extend(
+                    source_host.get("scripts", [])
+                )
+
+                source_ports = {
+                    port.get("port"): port
+                    for port in source_host.get(
+                        "ports",
+                        [],
+                    )
+                }
+
+                for destination_port in destination.get(
+                    "ports",
+                    [],
+                ):
+                    source_port = source_ports.get(
+                        destination_port.get("port")
+                    )
+
+                    if source_port:
+                        destination_port.setdefault(
+                            "scripts",
+                            [],
+                        ).extend(
+                            source_port.get(
+                                "scripts",
+                                [],
+                            )
+                        )
+
+        final_results = {
+            "hosts": merged_hosts,
+            "host_count": len(merged_hosts),
+        }
+
+        result = {
+            "tool": "Nmap",
+            "available": True,
+            "status": (
+                "completed_with_errors"
+                if timed_out
+                else "completed"
+            ),
+            "return_code": None if timed_out else 0,
+            "target": target,
+            "scan_type": scan_type,
+            "command_profile": profile["profile"],
+            "command_display": (
+                "Top 1,000 discovery → all TCP ports → "
+                "service/version → default NSE/OS"
+                + (
+                    " → traceroute"
+                    if scan_type == "comprehensive"
+                    else ""
+                )
+                + " → vuln NSE → HTTP/TLS NSE"
+            ),
+            "elapsed_seconds": round(
+                time.perf_counter() - started,
+                2,
+            ),
+            "results": final_results,
+            "open_ports": open_ports,
+            "errors": stderr_lines[-40:] + (
+                [
+                    "One or more scan stages timed out; "
+                    "displayed results are the actual Nmap evidence "
+                    "obtained before timeout."
+                ]
+                if timed_out
+                else []
+            ),
+            "nse": {
+                "enabled": True,
+                "category": "default,vuln,http-security",
+                "description": (
+                    "Controlled NSE categories were executed against "
+                    "confirmed open services."
+                ),
+            },
+            "workflow": {
+                "passes": [name for name, _ in passes],
+                "open_port_count": len(open_ports),
+                "http_ports": http_ports,
+                "all_tcp_ports_scanned": not timed_out,
+                "parallel_post_discovery_checks": True,
+                "final_result_only": True,
+            },
+        }
+
+        if result_callback:
+            await result_callback(result)
+
+        if progress_callback:
+            await progress_callback(
+                100,
+                f"{scan_type.title()} Nmap assessment completed",
+            )
+
+        return result
+
+    except asyncio.CancelledError:
+        raise
+
+    except Exception as exc:
+        error_result = {
+            "tool": "Nmap",
+            "available": True,
+            "status": "failed",
+            "target": target,
+            "scan_type": scan_type,
+            "command_profile": profile["profile"],
+            "results": {
+                "hosts": [],
+                "host_count": 0,
+            },
+            "errors": (
+                [str(exc)]
+                + stderr_lines[-20:]
+            ),
+        }
+
+        if result_callback:
+            await result_callback(error_result)
+
+        return error_result
+
+
+# ==================================================
+# NMAP BACKGROUND JOBS / PROGRESS
+# ==================================================
+
+
+def _new_nmap_job(target: str, scan_type: str, user_id: int) -> str:
+    import uuid
+
+    job_id = str(uuid.uuid4())
+    NMAP_JOBS[job_id] = {
+        "job_id": job_id,
+        "target": target,
+        "scan_type": scan_type,
+        "user_id": user_id,
+        "status": "queued",
+        "progress": 0,
+        "stage": "Queued",
+        "result": None,
+        "error": None,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    return job_id
+
+
+async def _run_nmap_job(job_id: str, target: str, scan_type: str):
+    job = NMAP_JOBS.get(job_id)
+    if not job:
+        return
+
+    async def update_progress(percent, stage):
+        job["status"] = "running"
+        job["progress"] = percent
+        job["stage"] = stage
+        job["updated_at"] = time.time()
+
+    try:
+        job["status"] = "running"
+        job["progress"] = 3
+        job["stage"] = "Starting Nmap"
+        job["updated_at"] = time.time()
+
+        async def update_result(partial_result):
+            # Intermediate Nmap evidence is intentionally not stored in the job result.
+            # Only the final terminal Nmap result is exposed to the frontend.
+            return
+
+        result = await _execute_nmap_command(
+            target=target,
+            scan_type=scan_type,
+            progress_callback=update_progress,
+            result_callback=update_result,
+        )
+
+        job["result"] = result
+
+        # Store the completed Nmap assessment as a SOC SecurityEvent.
+        if result.get("status") in {
+            "completed",
+            "completed_with_errors",
+        }:
+            security_event = SecurityEvent(
+                event_id=generate_event_id(
+                    json.dumps(result, sort_keys=True, default=str)
+                ),
+                timestamp=__import__("datetime").datetime.utcnow(),
+                source="nmap",
+                event_type="vapt_scan",
+                severity=(
+                    "INFO"
+                    if result.get("status") == "completed"
+                    else "ERROR"
+                ),
+                message=(
+                    f"Nmap {scan_type} scan completed for {target}"
+                ),
+                target=target,
+                raw_event=json.dumps(result, default=str),
+                mitre_technique_id="T1046",
+                mitre_technique_name="Network Service Discovery",
+                mitre_tactic="discovery",
+                mitre_mapping_source="security_tool_context",
+                mitre_confidence="low",
+                mitre_evidence=(
+                    "Nmap scan performed network service discovery "
+                    "against the authorized assessment target."
+                ),
+            )
+
+            db = SessionLocal()
+            try:
+                db.add(security_event)
+                db.commit()
+
+                notify_security_event({
+                    "event_id": security_event.event_id,
+                    "timestamp": security_event.timestamp.isoformat(),
+                    "source": security_event.source,
+                    "event_type": security_event.event_type,
+                    "severity": security_event.severity,
+                    "message": security_event.message,
+                    "target": security_event.target,
+                    "assessment_id": security_event.assessment_id,
+                })
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+        result_status = result.get("status", "failed")
+        job["status"] = result_status
+
+        if result_status == "completed":
+            job["progress"] = 100
+            job["stage"] = "Completed"
+        elif result_status == "completed_with_errors":
+            job["progress"] = 100
+            job["stage"] = "Completed with warnings"
+        else:
+            job["stage"] = "Finished with errors"
+
+        job["updated_at"] = time.time()
+
+    except Exception as exc:
+        job["status"] = "failed"
+        job["error"] = str(exc)
+        job["stage"] = "Failed"
+        job["updated_at"] = time.time()
+
+
+
+
+# ==================================================
+# MASSCAN BACKGROUND JOBS / PROGRESS
+# ==================================================
+
+MASSCAN_PATH = (
+    os.getenv("MASSCAN_PATH", "")
+    or shutil.which("masscan")
+    or "/usr/bin/masscan"
+)
+
+MASSCAN_TIMEOUT_SECONDS = int(
+    os.getenv("MASSCAN_TIMEOUT_SECONDS", "300")
+)
+
+MASSCAN_JOBS: dict[str, dict] = {}
+
+
+def _new_masscan_job(target: str, user_id: int) -> str:
+    import uuid
+
+    job_id = str(uuid.uuid4())
+
+    MASSCAN_JOBS[job_id] = {
+        "job_id": job_id,
+        "target": target,
+        "user_id": user_id,
+        "status": "queued",
+        "progress": 0,
+        "stage": "Queued",
+        "result": None,
+        "error": None,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+
+    return job_id
+
+
+async def _execute_masscan_command(
+    target: str,
+    progress_callback=None,
+) -> dict:
+    target = str(target).strip()
+
+    if not target:
+        raise ValueError("Masscan target is required.")
+
+    # Masscan requires an IP address or CIDR, so resolve hostnames first.
+    masscan_target = target
+    try:
+        from ipaddress import ip_address, ip_network
+
+        try:
+            ip_address(target)
+        except ValueError:
+            try:
+                ip_network(target, strict=False)
+            except ValueError:
+                masscan_target = socket.gethostbyname(target)
+    except Exception as exc:
+        raise ValueError(
+            f"Unable to resolve Masscan target '{target}': {exc}"
+        )
+
+    if not MASSCAN_PATH or not os.path.exists(MASSCAN_PATH):
+        return {
+            "tool": "Masscan",
+            "available": False,
+            "status": "not_available",
+            "target": target,
+            "results": {
+                "hosts": [],
+                "host_count": 0,
+                "open_ports": [],
+            },
+            "errors": ["Masscan executable was not found."],
+        }
+
+    started = time.perf_counter()
+
+    command = [
+        MASSCAN_PATH,
+        masscan_target,
+        "-p1-1024",
+        "--rate",
+        "1000",
+        "--wait",
+        "2",
+        "--output-format",
+        "json",
+        "--output-filename",
+        "-",
+    ]
+
+    if progress_callback:
+        await progress_callback(
+            10,
+            "Starting Masscan",
+        )
 
     try:
         process = await asyncio.create_subprocess_exec(
@@ -670,441 +2260,831 @@ async def run_nuclei_scan(target_url: str, scan_type: str = "quick") -> dict:
             stderr=asyncio.subprocess.PIPE,
         )
 
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(),
+            timeout=MASSCAN_TIMEOUT_SECONDS,
+        )
+
+    except asyncio.TimeoutError:
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=timeout_seconds,
-            )
-        except asyncio.TimeoutError:
             process.kill()
-            await process.communicate()
-            return {
-                "available": True,
-                "status": "timeout",
-                "message": f"Nuclei {scan_type} scan timed out after {timeout_seconds} seconds.",
-                "results": [],
-                "errors": ["timeout"],
-                "scan_type": scan_type,
-            }
-
-        stdout_text = stdout.decode("utf-8", errors="replace")
-        stderr_text = stderr.decode("utf-8", errors="replace")
-
-        results = []
-        parse_errors = []
-        for line in stdout_text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                item = json.loads(line)
-                if isinstance(item, dict):
-                    results.append(item)
-            except json.JSONDecodeError:
-                parse_errors.append(line[:500])
-
-        errors = parse_errors
-        if stderr_text.strip():
-            errors.extend([
-                line.strip()[:500]
-                for line in stderr_text.splitlines()
-                if line.strip()
-            ][:25])
+            await process.wait()
+        except Exception:
+            pass
 
         return {
+            "tool": "Masscan",
             "available": True,
-            "status": (
-                "completed" if process.returncode == 0
-                else "completed_with_errors"
-            ),
-            "return_code": process.returncode,
-            "results": results,
-            "errors": errors,
-            "scan_type": scan_type,
-            "command_profile": (
-                "extended_cve_misconfig_exposure"
-                if scan_type == "detailed"
-                else "fast_cve_misconfig"
+            "status": "completed_with_errors",
+            "target": target,
+            "results": {
+                "hosts": [],
+                "host_count": 0,
+                "open_ports": [],
+            },
+            "errors": [
+                f"Masscan timed out after {MASSCAN_TIMEOUT_SECONDS} seconds."
+            ],
+            "command": command,
+            "elapsed_seconds": round(
+                time.perf_counter() - started,
+                2,
             ),
         }
+
+    stderr_text = stderr.decode(
+        "utf-8",
+        errors="replace",
+    ).strip()
+
+    stdout_text = stdout.decode(
+        "utf-8",
+        errors="replace",
+    ).strip()
+
+    if progress_callback:
+        await progress_callback(
+            80,
+            "Processing Masscan results",
+        )
+
+    hosts = {}
+    parse_errors = []
+
+    if stdout_text:
+        try:
+            raw_items = json.loads(stdout_text)
+
+            if isinstance(raw_items, dict):
+                raw_items = [raw_items]
+
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+
+                ip = item.get("ip")
+
+                if not ip:
+                    continue
+
+                host = hosts.setdefault(
+                    ip,
+                    {
+                        "host": ip,
+                        "ports": [],
+                    },
+                )
+
+                for port_data in item.get("ports", []):
+                    if not isinstance(port_data, dict):
+                        continue
+
+                    port = port_data.get("port")
+
+                    if port is None:
+                        continue
+
+                    port_entry = {
+                        "port": port,
+                        "protocol": port_data.get(
+                            "proto",
+                            "tcp",
+                        ),
+                        "state": port_data.get(
+                            "status",
+                            "open",
+                        ),
+                    }
+
+                    if port_entry not in host["ports"]:
+                        host["ports"].append(port_entry)
+
+        except json.JSONDecodeError as exc:
+            parse_errors.append(
+                f"Unable to parse Masscan JSON output: {exc}"
+            )
+
+    result_status = (
+        "completed"
+        if process.returncode == 0 and not parse_errors
+        else "completed_with_errors"
+    )
+
+    result = {
+        "tool": "Masscan",
+        "available": True,
+        "status": result_status,
+        "target": target,
+        "results": {
+            "hosts": list(hosts.values()),
+            "host_count": len(hosts),
+            "open_ports": [
+                {
+                    "host": host["host"],
+                    **port,
+                }
+                for host in hosts.values()
+                for port in host["ports"]
+            ],
+        },
+        "errors": (
+            ([stderr_text] if stderr_text else [])
+            + parse_errors
+        ),
+        "return_code": process.returncode,
+        "command": command,
+        "elapsed_seconds": round(
+            time.perf_counter() - started,
+            2,
+        ),
+        "raw_output": stdout_text,
+    }
+
+    if progress_callback:
+        await progress_callback(
+            95,
+            "Finalizing Masscan results",
+        )
+
+    return result
+
+
+async def _run_masscan_job(
+    job_id: str,
+    target: str,
+):
+    job = MASSCAN_JOBS.get(job_id)
+
+    if not job:
+        return
+
+    async def update_progress(percent, stage):
+        job["status"] = "running"
+        job["progress"] = percent
+        job["stage"] = stage
+        job["updated_at"] = time.time()
+
+    try:
+        await update_progress(
+            5,
+            "Starting Masscan",
+        )
+
+        result = await _execute_masscan_command(
+            target=target,
+            progress_callback=update_progress,
+        )
+
+        job["result"] = result
+
+        result_status = result.get(
+            "status",
+            "failed",
+        )
+
+        job["status"] = result_status
+
+        if result_status == "completed":
+            job["progress"] = 100
+            job["stage"] = "Completed"
+        elif result_status == "completed_with_errors":
+            job["progress"] = 100
+            job["stage"] = "Completed with warnings"
+        else:
+            job["stage"] = "Finished with errors"
+
+        job["updated_at"] = time.time()
 
     except Exception as exc:
-        return {
-            "available": True,
-            "status": "failed",
-            "message": str(exc),
-            "results": [],
-            "errors": [str(exc)],
-            "scan_type": scan_type,
+        job["status"] = "failed"
+        job["error"] = str(exc)
+        job["stage"] = "Failed"
+        job["updated_at"] = time.time()
+
+
+# ==================================================
+# MASSCAN API
+# ==================================================
+
+class MasscanRunRequest(BaseModel):
+    target: str
+
+
+@router.post("/masscan/run-async")
+async def run_masscan_async(
+    request: MasscanRunRequest,
+    current_user: User = Depends(require_role(1)),
+    db: Session = Depends(get_db),
+):
+    require_user_tool_permission(
+        db,
+        current_user,
+        "Masscan",
+    )
+
+    target = str(request.target or "").strip()
+
+    if not target:
+        raise HTTPException(
+            status_code=400,
+            detail="A Masscan target is required.",
+        )
+
+    job_id = _new_masscan_job(
+        target,
+        current_user.id,
+    )
+
+    asyncio.create_task(
+        _run_masscan_job(
+            job_id,
+            target,
+        )
+    )
+
+    return {
+        "message": "Masscan scan started",
+        "tool": "Masscan",
+        "username": current_user.username,
+        "target": target,
+        "job_id": job_id,
+        "status": "queued",
+        "progress": 0,
+    }
+
+
+@router.get("/masscan/progress/{job_id}")
+async def get_masscan_progress(
+    job_id: str,
+    current_user: User = Depends(require_role(1)),
+):
+    job = MASSCAN_JOBS.get(job_id)
+
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail="Masscan job not found or expired.",
+        )
+
+    if job.get("user_id") != current_user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have access to this Masscan job.",
+        )
+
+    return {
+        "job_id": job["job_id"],
+        "tool": "Masscan",
+        "target": job["target"],
+        "status": job["status"],
+        "progress": job["progress"],
+        "stage": job["stage"],
+        "result": job["result"],
+        "error": job["error"],
+        "updated_at": job["updated_at"],
+        "username": current_user.username,
+    }
+
+
+# ==================================================
+# VAPT TOOL EXECUTION
+# ==================================================
+
+@router.get("/tools/permissions")
+def get_my_tool_permissions(
+    current_user: User = Depends(require_role(1)),
+    db: Session = Depends(get_db),
+):
+    """Return the authenticated User/Client's current tool permissions."""
+    tools = (
+        db.query(SecurityTool)
+        .order_by(SecurityTool.category, SecurityTool.name)
+        .all()
+    )
+
+    permissions = (
+        db.query(UserToolPermission)
+        .filter(UserToolPermission.user_id == current_user.id)
+        .all()
+    )
+
+    permission_map = {p.tool_id: p.allowed for p in permissions}
+
+    return [
+        {
+            "tool_id": tool.id,
+            "tool_name": tool.name,
+            "category": tool.category,
+            "description": tool.description,
+            "tool_type": tool.tool_type,
+            "tool_enabled": tool.enabled,
+            "allowed": bool(tool.enabled and permission_map.get(tool.id, False)),
         }
-
-
-def first_value(value):
-    """Return a useful first value from a string/list-like field."""
-
-    if isinstance(value, list):
-        return value[0] if value else None
-
-    if isinstance(value, str):
-        return value.strip() or None
-
-    return value
-
-
-def extract_nuclei_cve(item: dict) -> Optional[str]:
-    """Extract the first CVE identifier from a Nuclei result."""
-
-    classification = (
-        item.get("info", {}).get("classification", {})
-    )
-
-    cve_value = classification.get("cve-id")
-
-    if isinstance(cve_value, list):
-        for value in cve_value:
-            if value:
-                return str(value).upper()
-
-    if cve_value:
-        return str(cve_value).upper()
-
-    return None
-
-
-def extract_nuclei_cwe(item: dict) -> Optional[str]:
-    """Extract CWE identifiers from a Nuclei result."""
-
-    classification = (
-        item.get("info", {}).get("classification", {})
-    )
-
-    cwe_value = classification.get("cwe-id")
-
-    if isinstance(cwe_value, list):
-        values = [
-            str(value).upper()
-            for value in cwe_value
-            if value
-        ]
-        return ", ".join(dict.fromkeys(values)) or None
-
-    if cwe_value:
-        return str(cwe_value).upper()
-
-    return None
-
-
-def extract_nuclei_cvss(item: dict) -> Optional[float]:
-    """Extract a CVSS score when the Nuclei template provides one."""
-
-    info = item.get("info", {})
-    metadata = info.get("metadata", {}) or {}
-
-    candidates = [
-        metadata.get("cvss-score"),
-        metadata.get("cvss_score"),
-        metadata.get("cvss"),
-        info.get("cvss-score"),
+        for tool in tools
     ]
 
-    for candidate in candidates:
-        if candidate is None:
-            continue
 
-        try:
-            score = float(candidate)
+@router.post("/tools/run")
+async def run_vapt_tool(
+    request: NmapToolRequest,
+    current_user: User = Depends(require_role(1)),
+    db: Session = Depends(get_db),
+):
+    """Execute an approved Nmap profile synchronously."""
 
-            if 0.0 <= score <= 10.0:
-                return score
-
-        except (TypeError, ValueError):
-            continue
-
-    return None
-
-
-def extract_nuclei_references(item: dict) -> Optional[str]:
-    """Extract references from the Nuclei template metadata."""
-
-    info = item.get("info", {})
-    references = info.get("reference")
-
-    if isinstance(references, list):
-        values = [str(value) for value in references if value]
-        return "\n".join(dict.fromkeys(values)) or None
-
-    if isinstance(references, str) and references.strip():
-        return references.strip()
-
-    return None
-
-
-async def sync_nuclei_security_findings(
-    db: Session,
-    current_user: User,
-    assessment: Assessment,
-    nuclei_results: list[dict],
-) -> list[dict]:
-    """
-    Convert meaningful Nuclei JSONL results into SecurityFinding rows.
-
-    Informational technology-discovery results and the Nuclei
-    security-header template are skipped here because the platform
-    already handles the built-in security-header assessment and
-    technology inventory is not itself a vulnerability.
-    """
-
-    # Make sure the Nuclei tool exists in the local catalog.
-    tool = (
-        db.query(SecurityTool)
-        .filter(
-            func.lower(SecurityTool.name) == "nuclei"
-        )
-        .first()
+    require_user_tool_permission(db, current_user, "Nmap")
+    target = validate_nmap_target(request.target)
+    result = await _execute_nmap_command(
+        target=target,
+        scan_type=request.scan_type,
     )
 
-    if tool is None:
-        tool = SecurityTool(
-            name="Nuclei",
-            category="Web Application Security",
-            description=(
-                "Template-based vulnerability and exposure scanner."
-            ),
-            tool_type="scanner",
-            enabled=True,
+    return {
+        "message": "VAPT tool execution completed",
+        "tool": "Nmap",
+        "username": current_user.username,
+        "target": target,
+        "result": result,
+    }
+
+
+@router.post("/tools/run-async")
+async def run_vapt_tool_async(
+    request: NmapToolRequest,
+    current_user: User = Depends(require_role(1)),
+    db: Session = Depends(get_db),
+):
+    """Start an Nmap job and return immediately so the frontend can show progress."""
+
+    require_user_tool_permission(db, current_user, "Nmap")
+    target = validate_nmap_target(request.target)
+
+    if request.scan_type not in NMAP_PROFILES:
+        raise HTTPException(status_code=400, detail="Unsupported Nmap scan request.")
+
+    job_id = _new_nmap_job(target, request.scan_type, current_user.id)
+    asyncio.create_task(_run_nmap_job(job_id, target, request.scan_type))
+
+    return {
+        "message": "Nmap scan started",
+        "tool": "Nmap",
+        "username": current_user.username,
+        "target": target,
+        "scan_type": request.scan_type,
+        "job_id": job_id,
+        "status": "queued",
+        "progress": 0,
+    }
+
+
+@router.get("/tools/progress/{job_id}")
+async def get_nmap_progress(
+    job_id: str,
+    current_user: User = Depends(require_role(1)),
+):
+    """Return live status/progress/result for an Nmap background job."""
+
+    job = NMAP_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Nmap job not found or expired.")
+
+    if job.get("user_id") != current_user.id:
+        raise HTTPException(403, "You do not have access to this Nmap job.")
+
+    return {
+        "job_id": job["job_id"],
+        "tool": "Nmap",
+        "target": job["target"],
+        "scan_type": job["scan_type"],
+        "status": job["status"],
+        "progress": job["progress"],
+        "stage": job["stage"],
+        "result": job["result"],
+        "error": job["error"],
+        "updated_at": job["updated_at"],
+        "username": current_user.username,
+    }
+
+
+
+# ==================================================
+# NIKTO WEB SERVER SCANNER
+# ==================================================
+
+class NiktoToolRequest(BaseModel):
+    target_url: HttpUrl
+    scan_type: Literal["quick", "detailed"] = "quick"
+
+
+def validate_nikto_target(target_url: str) -> str:
+    target_url = target_url.strip()
+    if not target_url or len(target_url) > 2048:
+        raise HTTPException(status_code=400, detail="Invalid Nikto target URL.")
+    parsed = urlparse(target_url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="Nikto supports only valid HTTP/HTTPS URLs.")
+    if is_private_or_reserved_host(parsed.hostname):
+        raise HTTPException(
+            status_code=400,
+            detail="Private, loopback, link-local, or reserved targets are not allowed."
         )
-        db.add(tool)
-        db.commit()
-        db.refresh(tool)
+    return target_url
 
-    imported = []
 
-    for item in nuclei_results:
-        info = item.get("info", {}) or {}
-        template_id = item.get("template-id") or "unknown-template"
-        matcher_name = item.get("matcher-name")
-        template_name = (
-            info.get("name")
-            or template_id
-        )
-        nuclei_severity = str(
-            info.get("severity") or "info"
-        ).upper()
+def _extract_nikto_findings(data: dict, raw_output: str) -> list[dict]:
+    findings = []
 
-        # Skip the exact header template because the SOC Platform
-        # already performs and persists its own header checks.
-        if template_id == "http-missing-security-headers":
-            continue
+    def add_item(item, metadata=None):
+        if isinstance(item, str):
+            if item.strip():
+                findings.append({
+                    "id": None,
+                    "message": item.strip(),
+                    "severity": "INFO",
+                    "evidence": item.strip(),
+                    **(metadata or {}),
+                })
+            return
 
-        # Skip technology-discovery results, but keep useful INFO-level
-        # security/misconfiguration findings.
-        nuclei_tags = info.get("tags") or []
+        if not isinstance(item, dict):
+            return
 
-        if isinstance(nuclei_tags, str):
-            nuclei_tags = [
-                tag.strip().lower()
-                for tag in nuclei_tags.split(",")
-                if tag.strip()
-            ]
+        vulnerabilities = item.get("vulnerabilities")
 
-        is_technology_result = (
-            template_id.startswith("tech-detect")
-            or "tech" in nuclei_tags
-            or "technology" in nuclei_tags
-        )
+        if isinstance(vulnerabilities, list):
+            item_metadata = {
+                "host": item.get("host"),
+                "ip": item.get("ip"),
+                "port": item.get("port"),
+                "server": item.get("server"),
+                "banner": item.get("banner"),
+                "server_banner": item.get("server_banner"),
+                "ssl_info": item.get("ssl_info"),
+                "start_time": item.get("start_time"),
+                "end_time": item.get("end_time"),
+            }
 
-        if is_technology_result:
-            continue
+            for vulnerability in vulnerabilities:
+                add_item(vulnerability, item_metadata)
+            return
 
-        cve_id = extract_nuclei_cve(item)
-        cwe_id = extract_nuclei_cwe(item)
-        cvss_score = extract_nuclei_cvss(item)
-        description = info.get("description")
-        references = extract_nuclei_references(item)
-
-        # If a CVE exists, enrich from NVD. Failure to enrich must
-        # never prevent saving the scanner finding.
-        if cve_id:
-            try:
-                nvd = await asyncio.to_thread(
-                    fetch_cve_information,
-                    cve_id,
-                )
-
-                if not cwe_id:
-                    nvd_cwe = nvd.get("cwe", [])
-                    if nvd_cwe:
-                        cwe_id = ", ".join(nvd_cwe)
-
-                if not description:
-                    description = nvd.get("description")
-
-                if cvss_score is None:
-                    nvd_cvss = nvd.get("cvss", {}) or {}
-                    cvss_score = nvd_cvss.get("score")
-
-                nvd_references = nvd.get("references", []) or []
-                if nvd_references:
-                    nvd_reference_text = "\n".join(nvd_references)
-                    references = (
-                        f"{references}\n{nvd_reference_text}"
-                        if references
-                        else nvd_reference_text
-                    )
-
-            except Exception as exc:
-                print(
-                    "NVD enrichment failed for",
-                    cve_id,
-                    ":",
-                    str(exc),
-                )
-
-        # Map Nuclei severity when a CVSS score is unavailable.
-        if cvss_score is not None:
-            severity = calculate_severity(
-                float(cvss_score)
-            )
-        else:
-            severity = (
-                nuclei_severity
-                if nuclei_severity
-                in {
-                    "CRITICAL",
-                    "HIGH",
-                    "MEDIUM",
-                    "LOW",
-                }
-                else "LOW"
-            )
-
-        risk_level = calculate_risk_level(
-            severity
-        )
-
-        matched_url = item.get("matched-at") or item.get("url")
-        parsed_matched = urlparse(
-            str(matched_url)
-        ) if matched_url else None
-
-        title_parts = [template_name]
-
-        if matcher_name:
-            title_parts.append(
-                f"({matcher_name})"
-            )
-
-        if cve_id:
-            title_parts.append(
-                f"[{cve_id}]"
-            )
-
-        title = " ".join(title_parts)
-
-        # Avoid creating duplicate findings on repeated VAPT scans.
-        existing = (
-            db.query(SecurityFinding)
-            .filter(
-                SecurityFinding.user_id
-                == current_user.id,
-                SecurityFinding.assessment_id
-                == assessment.id,
-                SecurityFinding.tool_name
-                == "Nuclei",
-                SecurityFinding.title
-                == title,
-                SecurityFinding.affected_url
-                == matched_url,
-            )
-            .first()
+        message = (
+            item.get("msg")
+            or item.get("message")
+            or item.get("description")
+            or item.get("text")
+            or item.get("output")
+            or item.get("finding")
         )
 
-        evidence_parts = [
-            f"Template: {template_id}",
-        ]
+        if not message:
+            message = json.dumps(item, ensure_ascii=False)
 
-        if matcher_name:
-            evidence_parts.append(
-                f"Matcher: {matcher_name}"
-            )
-
-        if item.get("ip"):
-            evidence_parts.append(
-                f"IP: {item.get('ip')}"
-            )
-
-        finding_values = {
-            "tool_name": "Nuclei",
-            "tool_category": tool.category,
-            "title": title,
-            "vulnerability": template_name,
-            "description": description,
-            "owasp_category": None,
-            "owasp_api_category": None,
-            "cve_id": cve_id,
-            "cwe_id": cwe_id,
-            "cvss_score": cvss_score,
-            "severity": severity,
-            "risk_level": risk_level,
-            "affected_asset": item.get("host") or item.get("ip"),
-            "affected_url": matched_url,
-            "endpoint": (
-                parsed_matched.path
-                if parsed_matched
-                else item.get("path")
-            ),
-            "parameter": None,
-            "evidence": "\n".join(evidence_parts),
-            "request_data": item.get("request"),
-            "response_data": item.get("response"),
-            "impact": (
-                "Nuclei identified a security finding matching the "
-                f"{template_id} template."
-            ),
-            "remediation": info.get("remediation"),
-            "references": references,
-            "status": "OPEN",
-            "updated_at": datetime.utcnow(),
+        finding = {
+            "id": item.get("id") or item.get("osvdb") or item.get("reference"),
+            "message": str(message),
+            "severity": str(
+                item.get("severity") or item.get("risk") or "INFO"
+            ).upper(),
+            "method": item.get("method"),
+            "url": item.get("url") or item.get("uri"),
+            "evidence": item,
         }
 
-        if existing:
-            for key, value in finding_values.items():
-                setattr(existing, key, value)
+        if metadata:
+            finding.update(metadata)
 
-            finding = existing
+        findings.append(finding)
 
-        else:
-            finding = SecurityFinding(
-                finding_id=generate_finding_id(db),
-                user_id=current_user.id,
-                assessment_id=assessment.id,
-                created_at=datetime.utcnow(),
-                detected_at=datetime.utcnow(),
-                **finding_values,
+    for key in ("vulnerabilities", "findings", "items", "results", "checks"):
+        value = data.get(key)
+
+        if isinstance(value, list):
+            for item in value:
+                add_item(item)
+
+        elif isinstance(value, dict):
+            for item in value.values():
+                add_item(item)
+
+    if not findings:
+        for line in raw_output.splitlines():
+            line = line.strip()
+            if line.startswith("+ "):
+                add_item(line[2:].strip())
+
+    return findings
+
+
+async def _execute_nikto_scan(target_url: str, scan_type: str = "quick", progress_callback=None) -> dict:
+    target_url = validate_nikto_target(target_url)
+    if not NIKTO_PATH or not os.path.exists(NIKTO_PATH):
+        return {
+            "tool":"Nikto","available":False,"status":"not_available",
+            "target":target_url,"scan_type":scan_type,"findings":[],
+            "errors":["Nikto executable was not found."]
+        }
+
+    maxtime = NIKTO_MAXTIME_DETAILED if scan_type == "detailed" else NIKTO_MAXTIME_QUICK
+    started=time.perf_counter()
+    temp_json=None
+
+    if progress_callback:
+        await progress_callback(5, "Starting Nikto")
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".json", prefix="soc_nikto_", delete=False) as f:
+            temp_json=f.name
+
+        command=[
+            NIKTO_PATH, "-h", target_url, "-nointeractive",
+            "-maxtime", maxtime, "-Format", "json", "-output", temp_json
+        ]
+
+        if progress_callback:
+            await progress_callback(10, "Nikto web server checks running")
+
+        process=await asyncio.create_subprocess_exec(
+            *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+
+        try:
+            stdout,stderr=await asyncio.wait_for(
+                process.communicate(), timeout=NIKTO_TIMEOUT_SECONDS
             )
+        except asyncio.TimeoutError:
+            try: process.kill()
+            except ProcessLookupError: pass
+            stdout,stderr=await process.communicate()
+            return {
+                "tool":"Nikto","available":True,"status":"completed_with_errors",
+                "target":target_url,"scan_type":scan_type,"return_code":None,
+                "elapsed_seconds":round(time.perf_counter()-started,2),
+                "findings":[],"raw_output":stdout.decode("utf-8","replace"),
+                "errors":["Nikto execution exceeded the platform timeout."]
+            }
 
-            db.add(finding)
-            db.flush()
+        raw_output=stdout.decode("utf-8","replace")
+        raw_stderr=stderr.decode("utf-8","replace")
+        structured={}
+        try:
+            json_text=Path(temp_json).read_text(encoding="utf-8",errors="replace")
+            if json_text.strip():
+                parsed=json.loads(json_text)
+                structured=parsed if isinstance(parsed,dict) else {"items":parsed}
+        except (OSError,json.JSONDecodeError):
+            pass
 
-        imported.append({
-            "finding_id": (
-                finding.finding_id
-                if finding.finding_id
-                else None
+        findings=_extract_nikto_findings(structured, raw_output)
+        errors=[x.strip() for x in raw_stderr.splitlines() if x.strip()][-40:]
+
+        if progress_callback:
+            await progress_callback(90, "Parsing Nikto findings")
+
+        result={
+            "tool":"Nikto","available":True,
+            "status":"completed" if process.returncode == 0 else "completed_with_errors",
+            "target":target_url,"scan_type":scan_type,
+            "command_profile": "Nikto standard web server assessment" if scan_type=="quick"
+                               else "Nikto extended web server assessment",
+            "return_code":process.returncode,
+            "elapsed_seconds":round(time.perf_counter()-started,2),
+            "findings_count":len(findings),"findings":findings,
+            "results":structured,"raw_output":raw_output,"errors":errors,
+            "workflow":{"scanner":"Nikto","max_time":maxtime,"target_validated":True}
+        }
+        if progress_callback:
+            await progress_callback(100, "Nikto scan completed")
+        return result
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        return {
+            "tool":"Nikto","available":True,"status":"failed",
+            "target":target_url,"scan_type":scan_type,"findings":[],
+            "errors":[str(exc)]
+        }
+    finally:
+        if temp_json:
+            try: os.unlink(temp_json)
+            except (FileNotFoundError,OSError): pass
+
+
+def _new_nikto_job(target_url: str, scan_type: str, user_id: int) -> str:
+    import uuid
+    job_id=str(uuid.uuid4())
+    NIKTO_JOBS[job_id]={
+        "job_id":job_id,"target":target_url,"scan_type":scan_type,
+        "user_id":user_id,"status":"queued","progress":0,"stage":"Queued",
+        "result":None,"error":None,"created_at":time.time(),"updated_at":time.time()
+    }
+    return job_id
+
+
+async def _run_nikto_job(job_id: str, target_url: str, scan_type: str):
+    job = NIKTO_JOBS.get(job_id)
+    if not job:
+        return
+
+    async def update_progress(percent, stage):
+        job.update(
+            status="running",
+            progress=percent,
+            stage=stage,
+            updated_at=time.time(),
+        )
+
+    try:
+        job.update(
+            status="running",
+            progress=3,
+            stage="Starting Nikto",
+            updated_at=time.time(),
+        )
+
+        result = await _execute_nikto_scan(
+            target_url,
+            scan_type,
+            update_progress,
+        )
+
+        # Publish the real Nikto scanner result immediately.
+        # SecurityEvent persistence must never delay terminal state.
+        job["result"] = result
+
+        terminal_status = result.get("status", "failed")
+
+        job.update(
+            status=terminal_status,
+            progress=100,
+            stage=(
+                "Completed"
+                if terminal_status == "completed"
+                else (
+                    "Completed with warnings"
+                    if terminal_status == "completed_with_errors"
+                    else "Finished with errors"
+                )
             ),
-            "template_id": template_id,
-            "title": title,
-            "cve_id": cve_id,
-            "cwe_id": cwe_id,
-            "cvss_score": cvss_score,
-            "severity": severity,
-            "risk_level": risk_level,
-        })
+            updated_at=time.time(),
+        )
 
-    db.commit()
+        # Persist SecurityEvent independently so a slow/locked database
+        # cannot keep the real Nikto job stuck in running state.
+        if terminal_status in {
+            "completed",
+            "completed_with_errors",
+        }:
 
-    return imported
+            def persist_security_event():
+                security_event = SecurityEvent(
+                    event_id=generate_event_id(
+                        json.dumps(
+                            result,
+                            sort_keys=True,
+                            default=str,
+                        )
+                    ),
+                    timestamp=__import__("datetime").datetime.utcnow(),
+                    source="nikto",
+                    event_type="vapt_scan",
+                    severity=(
+                        "INFO"
+                        if terminal_status == "completed"
+                        else "ERROR"
+                    ),
+                    message=(
+                        f"Nikto {scan_type} scan completed "
+                        f"for {target_url}"
+                    ),
+                    target=target_url,
+                    raw_event=json.dumps(
+                        result,
+                        default=str,
+                    ),
+                    mitre_technique_id="T1595.002",
+                    mitre_technique_name="Vulnerability Scanning",
+                    mitre_tactic="reconnaissance",
+                    mitre_mapping_source="security_tool_context",
+                    mitre_confidence="low",
+                    mitre_evidence=(
+                        "Nikto vulnerability scanning was performed "
+                        "against the authorized assessment target."
+                    ),
+                )
 
+                db = SessionLocal()
+                try:
+                    db.add(security_event)
+                    db.commit()
+
+                    notify_security_event({
+                        "event_id": security_event.event_id,
+                        "timestamp": security_event.timestamp.isoformat(),
+                        "source": security_event.source,
+                        "event_type": security_event.event_type,
+                        "severity": security_event.severity,
+                        "message": security_event.message,
+                        "target": security_event.target,
+                        "assessment_id": security_event.assessment_id,
+                    })
+                    return True, None
+                except Exception as db_exc:
+                    db.rollback()
+                    return False, str(db_exc)
+                finally:
+                    db.close()
+
+            try:
+                persisted, db_error = await asyncio.wait_for(
+                    asyncio.to_thread(persist_security_event),
+                    timeout=5,
+                )
+
+                result["security_event_persisted"] = persisted
+
+                if db_error:
+                    result["security_event_error"] = db_error
+
+            except asyncio.TimeoutError:
+                result["security_event_persisted"] = False
+                result["security_event_error"] = (
+                    "SecurityEvent persistence exceeded 5 seconds."
+                )
+
+            except Exception as db_exc:
+                result["security_event_persisted"] = False
+                result["security_event_error"] = str(db_exc)
+
+            job["result"] = result
+            job["updated_at"] = time.time()
+
+    except asyncio.CancelledError:
+        raise
+
+    except Exception as exc:
+        job.update(
+            status="failed",
+            progress=100,
+            stage="Failed",
+            error=str(exc),
+            updated_at=time.time(),
+        )
+
+
+# ==================================================
+# NIKTO VAPT ENDPOINTS
+# ==================================================
+
+@router.post("/nikto/run")
+async def run_nikto_tool(
+    request: NiktoToolRequest,
+    current_user: User = Depends(require_role(1)),
+    db: Session = Depends(get_db),
+):
+    require_user_tool_permission(db, current_user, "Nikto")
+    target_url=validate_nikto_target(str(request.target_url))
+    result=await _execute_nikto_scan(target_url,request.scan_type)
+    return {
+        "message":"Nikto scan completed","tool":"Nikto",
+        "username":current_user.username,"target":target_url,"result":result
+    }
+
+
+@router.post("/nikto/run-async")
+async def run_nikto_tool_async(
+    request: NiktoToolRequest,
+    current_user: User = Depends(require_role(1)),
+    db: Session = Depends(get_db),
+):
+    require_user_tool_permission(db,current_user,"Nikto")
+    target_url=validate_nikto_target(str(request.target_url))
+    job_id=_new_nikto_job(target_url,request.scan_type,current_user.id)
+    asyncio.create_task(_run_nikto_job(job_id,target_url,request.scan_type))
+    return {
+        "message":"Nikto scan started","tool":"Nikto","username":current_user.username,
+        "target":target_url,"scan_type":request.scan_type,"job_id":job_id,
+        "status":"queued","progress":0
+    }
+
+
+@router.get("/nikto/progress/{job_id}")
+async def get_nikto_progress(
+    job_id: str,
+    current_user: User = Depends(require_role(1)),
+):
+    job=NIKTO_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404,detail="Nikto job not found or expired.")
+    if job.get("user_id") != current_user.id:
+        raise HTTPException(status_code=403,detail="You do not have access to this Nikto job.")
+    return {
+        "job_id":job["job_id"],"tool":"Nikto","target":job["target"],
+        "scan_type":job["scan_type"],"status":job["status"],
+        "progress":job["progress"],"stage":job["stage"],
+        "result":job["result"],"error":job["error"],
+        "updated_at":job["updated_at"],"username":current_user.username
+    }
 
 # ==================================================
 # VAPT SCAN
@@ -1356,32 +3336,6 @@ async def scan_url(
         missing_headers=missing_headers,
     )
 
-    # ==================================================
-    # ALL INTEGRATED SECURITY SCANNERS
-    # ==================================================
-    # The orchestrator runs every scanner that is actually integrated
-    # with this backend. Scanner results are consolidated into the same
-    # SecurityFinding workflow.
-
-    scanner_execution = await run_all_security_scanners(
-        target_url=target_url,
-        scan_type=scan_request.scan_type,
-    )
-
-    nuclei_result = scanner_execution["scanners"]["nuclei"]
-    nuclei_imported = []
-
-    if (
-        scan_request.scan_type == "detailed"
-        and nuclei_result.get("results")
-    ):
-        nuclei_imported = await sync_nuclei_security_findings(
-            db=db,
-            current_user=current_user,
-            assessment=assessment,
-            nuclei_results=nuclei_result["results"],
-        )
-
     # --------------------------------------------------
     # Recalculate the assessment finding count from
     # persisted SecurityFinding records.
@@ -1478,30 +3432,16 @@ async def scan_url(
         "security_findings":
             {
                 "synced": True,
-                "source": "SOC Platform Safe VAPT + Nuclei",
-                "cve_enrichment": (
-                    "Applied automatically for Nuclei results "
-                    "that contain a CVE."
-                ),
-                "nuclei_imported_count": len(
-                    nuclei_imported
-                ),
+                "source": "SOC Platform Safe VAPT",
+                "cve_enrichment": "Not performed by the Nmap workflow.",
             },
 
         "security_scanners": {
-            "scan_type": scanner_execution.get("scan_type", scan_request.scan_type),
-            "executed_tools": scanner_execution.get("executed_tools", []),
-            "skipped_tools": scanner_execution.get("skipped_tools", []),
-            "not_yet_integrated": scanner_execution.get("not_yet_integrated", []),
-        },
-        "nuclei_scan": {
-            "scan_type": nuclei_result.get("scan_type", scan_request.scan_type),
-            "status": nuclei_result.get("status"),
-            "available": nuclei_result.get("available", False),
-            "matched_results": len(
-                nuclei_result.get("results", [])
-            ),
-            "imported_findings": nuclei_imported,
-            "errors": nuclei_result.get("errors", []),
+            "scan_type": scan_request.scan_type,
+            "executed_tools": ["SOC Platform HTTP Checks"],
+            "skipped_tools": [],
+            "not_yet_integrated": [
+                "Nmap is available through the dedicated /vapt/tools/run and /vapt/tools/run-async endpoints.",
+            ],
         },
     }

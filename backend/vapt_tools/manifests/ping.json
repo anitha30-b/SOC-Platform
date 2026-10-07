@@ -1,0 +1,16 @@
+{
+  "id": "ping",
+  "name": "Ping",
+  "stage": "01 Reconnaissance",
+  "category": "Reconnaissance",
+  "execution_type": "scanner",
+  "executable": "ping",
+  "target_types": [
+    "host",
+    "ip",
+    "domain"
+  ],
+  "enabled": true,
+  "integrated": true,
+  "description": "Host reachability check"
+}

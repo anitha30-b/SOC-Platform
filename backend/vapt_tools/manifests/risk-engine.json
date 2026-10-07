@@ -1,0 +1,14 @@
+{
+  "id": "risk-engine",
+  "name": "Risk Assessment Engine",
+  "stage": "08 Risk Assessment",
+  "category": "Risk Assessment",
+  "execution_type": "workflow",
+  "executable": null,
+  "target_types": [
+    "finding"
+  ],
+  "enabled": true,
+  "integrated": true,
+  "description": "Severity, impact and risk evaluation workflow"
+}
