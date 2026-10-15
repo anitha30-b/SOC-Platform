@@ -1,0 +1,21 @@
+title: Linux Sudo Command Activity
+id: 18d92736-e9f4-4e14-8a27-5d0f3b1a1002
+status: test
+description: Detects authentication log messages containing sudo command execution details.
+author: SOC Platform
+date: 2026-10-12
+logsource:
+  product: linux
+  service: sudo
+detection:
+  selection_sudo:
+    message|contains: 'sudo:'
+  selection_command:
+    message|contains: 'COMMAND='
+  condition: selection_sudo and selection_command
+falsepositives:
+  - Routine authorized administrator activity
+level: low
+tags:
+  - attack.privilege_escalation
+  - attack.t1548.003

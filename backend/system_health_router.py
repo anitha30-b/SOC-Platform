@@ -127,3 +127,102 @@ def system_health(current_user=Depends(require_role(3))):
             "uptime_seconds": uptime_seconds,
         },
     }
+
+@router.get("/search-index-metrics")
+def search_index_metrics(current_user=Depends(require_role(3))):
+    """Read-only PostgreSQL SIEM search and index statistics for administrators."""
+    checked_at = datetime.now(timezone.utc).isoformat()
+
+    with engine.connect() as connection:
+        table_row = connection.execute(text("""
+            SELECT n_live_tup, seq_scan, seq_tup_read, idx_scan, idx_tup_fetch
+            FROM pg_stat_user_tables
+            WHERE relid = 'public.security_events'::regclass
+        """)).mappings().first()
+
+        index_rows = connection.execute(text("""
+            SELECT indexrelname, idx_scan, idx_tup_read, idx_tup_fetch,
+                   pg_size_pretty(pg_relation_size(indexrelid)) AS index_size
+            FROM pg_stat_user_indexes
+            WHERE relid = 'public.security_events'::regclass
+              AND indexrelname IN (
+                'ix_security_events_source_trgm',
+                'ix_security_events_event_type_trgm',
+                'ix_security_events_message_trgm',
+                'ix_security_events_target_trgm',
+                'ix_security_events_mitre_technique_id_trgm',
+                'ix_security_events_mitre_technique_name_trgm',
+                'ix_security_events_mitre_tactic_trgm',
+                'ix_security_events_alert_status'
+              )
+            ORDER BY indexrelname
+        """)).mappings().all()
+
+        query_stats = {
+            "available": True,
+            "query_count": 0,
+            "queries": [],
+        }
+        try:
+            query_rows = connection.execute(text("""
+                SELECT queryid::text AS queryid, calls,
+                       round(total_exec_time::numeric, 2) AS total_exec_ms,
+                       round(mean_exec_time::numeric, 3) AS mean_exec_ms,
+                       rows, shared_blks_hit, shared_blks_read,
+                       left(query, 300) AS query
+                FROM pg_stat_statements
+                WHERE dbid = (
+                    SELECT oid FROM pg_database
+                    WHERE datname = current_database()
+                )
+                  AND query ILIKE '%security_events%'
+                  AND query ILIKE '%ILIKE%'
+                  AND query NOT ILIKE '%pg_stat_statements%'
+                  AND query NOT ILIKE 'EXPLAIN %'
+                ORDER BY total_exec_time DESC
+                LIMIT 10
+            """)).mappings().all()
+
+            query_stats["query_count"] = len(query_rows)
+            query_stats["queries"] = [
+                {
+                    "queryid": row["queryid"],
+                    "calls": int(row["calls"] or 0),
+                    "total_exec_ms": float(row["total_exec_ms"] or 0),
+                    "mean_exec_ms": float(row["mean_exec_ms"] or 0),
+                    "rows": int(row["rows"] or 0),
+                    "shared_blks_hit": int(row["shared_blks_hit"] or 0),
+                    "shared_blks_read": int(row["shared_blks_read"] or 0),
+                    "query": row["query"],
+                }
+                for row in query_rows
+            ]
+        except Exception as exc:
+            connection.rollback()
+            query_stats = {
+                "available": False,
+                "message": type(exc).__name__,
+                "query_count": 0,
+                "queries": [],
+            }
+
+    return {
+        "checked_at": checked_at,
+        "table": "public.security_events",
+        "counter_scope": (
+            "Cumulative PostgreSQL statistics; counters can reset when "
+            "PostgreSQL statistics are reset."
+        ),
+        "table_activity": dict(table_row) if table_row else {},
+        "indexes": [
+            {
+                "name": row["indexrelname"],
+                "scans": int(row["idx_scan"] or 0),
+                "tuples_read": int(row["idx_tup_read"] or 0),
+                "tuples_fetched": int(row["idx_tup_fetch"] or 0),
+                "size": row["index_size"],
+            }
+            for row in index_rows
+        ],
+        "search_query_statistics": query_stats,
+    }

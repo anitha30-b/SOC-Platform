@@ -1,5 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState , useRef } from "react";
 import axios from "axios";
+import DetectionRulesPage from "./DetectionRulesPage";
+import SigmaRulesPage from "./SigmaRulesPage";
+import CorrelationRulesPage from "./CorrelationRulesPage";
+import DetectionExtendedPages from "./DetectionExtendedPages";
 import { jsPDF } from "jspdf";
 import AdminNotificationPolicies from "./components/AdminNotificationPolicies";
 import AdminNotificationChannel from "./components/AdminNotificationChannel";
@@ -699,6 +703,7 @@ const ADMIN_NAV = [
     icon: "◈",
     items: [
       ["System Health", "admin-system-health"],
+      ["Search Performance", "admin-search-performance"],
       ["API Health", "admin-api-health"],
       ["Database Health", "admin-database-health"],
       ["Log Pipeline Health", "admin-log-pipeline-health"],
@@ -1107,6 +1112,341 @@ function AdminReferenceModule({
 }
 
 
+function AdminSearchPerformance() {
+  const [metrics, setMetrics] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadMetrics = async (manual = false) => {
+      if (manual) setRefreshing(true);
+
+      try {
+        const token = localStorage.getItem("token");
+        if (!token) {
+          throw new Error("Your session has expired. Please log in again.");
+        }
+
+        const response = await axios.get(
+          `${API_URL}/system/search-index-metrics`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+
+        if (!cancelled) {
+          setMetrics(response.data);
+          setError("");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            err.response?.data?.detail ||
+            err.message ||
+            "Unable to load PostgreSQL search metrics."
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+          if (manual) setRefreshing(false);
+        }
+      }
+    };
+
+    loadMetrics(refreshKey > 0);
+    const timer = window.setInterval(() => loadMetrics(false), 30000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [refreshKey]);
+
+  const formatNumber = (value) =>
+    value == null || !Number.isFinite(Number(value))
+      ? "—"
+      : Number(value).toLocaleString("en-IN");
+
+  const formatMs = (value) =>
+    value == null || !Number.isFinite(Number(value))
+      ? "—"
+      : `${Number(value).toFixed(2)} ms`;
+
+  const table = metrics?.table_activity || {};
+  const indexes = Array.isArray(metrics?.indexes) ? metrics.indexes : [];
+  const searchStats = metrics?.search_query_statistics;
+  const queries = Array.isArray(searchStats?.queries) ? searchStats.queries : [];
+
+  const slowestQuery = queries.length
+    ? queries.reduce((current, item) =>
+        Number(item.mean_exec_ms || 0) > Number(current.mean_exec_ms || 0)
+          ? item
+          : current
+      )
+    : null;
+
+  const totalListedCalls = queries.reduce(
+    (sum, item) => sum + Number(item.calls || 0),
+    0
+  );
+  const totalListedBufferHits = queries.reduce(
+    (sum, item) => sum + Number(item.shared_blks_hit || 0),
+    0
+  );
+  const totalListedBufferReads = queries.reduce(
+    (sum, item) => sum + Number(item.shared_blks_read || 0),
+    0
+  );
+
+  const cards = [
+    {
+      label: "Estimated live events",
+      value: formatNumber(table.n_live_tup),
+      note: "PostgreSQL row estimate",
+    },
+    {
+      label: "Sequential scans",
+      value: formatNumber(table.seq_scan),
+      note: "Cumulative table counter",
+    },
+    {
+      label: "Index scans",
+      value: formatNumber(table.idx_scan),
+      note: "Cumulative table counter",
+    },
+    {
+      label: "Listed search calls",
+      value: searchStats?.available ? formatNumber(totalListedCalls) : "—",
+      note: "Calls across listed query patterns",
+    },
+    {
+      label: "Highest listed mean latency",
+      value: searchStats?.available && slowestQuery
+        ? formatMs(slowestQuery.mean_exec_ms)
+        : "—",
+      note: "Among returned search queries",
+    },
+  ];
+
+  const checkedAt = metrics?.checked_at
+    ? `${new Date(metrics.checked_at).toLocaleString("en-IN", {
+        timeZone: "Asia/Kolkata",
+      })} IST`
+    : "Not yet available";
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.25em] text-red-500">
+            Administration / System
+          </p>
+          <h1 className="mt-2 text-2xl font-bold text-white">
+            Search Performance
+          </h1>
+          <p className="mt-2 max-w-2xl text-xs leading-5 text-gray-500">
+            PostgreSQL SIEM query performance, index usage, and event-table
+            activity. Metrics refresh automatically every 30 seconds.
+          </p>
+          <p className="mt-2 text-[10px] text-gray-600">
+            Last successful fetch: {checkedAt}
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setRefreshKey((value) => value + 1)}
+          disabled={refreshing}
+          className="rounded-md border border-white/10 px-4 py-2 text-xs text-gray-300 transition hover:border-red-500/40 hover:text-white disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh metrics"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="border border-red-500/30 bg-red-500/5 p-4 text-xs text-red-300">
+          {error}
+          {metrics && " Showing the last successfully fetched snapshot."}
+        </div>
+      )}
+
+      {loading && !metrics ? (
+        <div className="border border-white/10 bg-white/[0.02] p-8 text-sm text-gray-500">
+          Loading PostgreSQL search metrics...
+        </div>
+      ) : !metrics ? (
+        <div className="border border-white/10 bg-white/[0.02] p-8 text-sm text-gray-500">
+          Metrics are unavailable. Verify administrator access and the backend,
+          then refresh.
+        </div>
+      ) : (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+            {cards.map((card) => (
+              <div
+                key={card.label}
+                className="border border-white/10 bg-white/[0.02] p-4"
+              >
+                <p className="text-[10px] uppercase tracking-wider text-gray-500">
+                  {card.label}
+                </p>
+                <p className="mt-3 break-words text-xl font-semibold tabular-nums text-white">
+                  {card.value}
+                </p>
+                <p className="mt-2 text-[10px] leading-4 text-gray-600">
+                  {card.note}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <section className="border border-white/10">
+            <div className="border-b border-white/10 px-5 py-4">
+              <h2 className="text-sm font-semibold text-white">
+                Search Index Usage
+              </h2>
+              <p className="mt-1 text-[10px] leading-4 text-gray-500">
+                Cumulative PostgreSQL counters. A scan alone does not prove a
+                query was faster because of that index.
+              </p>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px] text-left text-xs">
+                <thead className="bg-black/30 text-[9px] uppercase tracking-wider text-gray-500">
+                  <tr>
+                    {["Index", "Scans", "Tuples read", "Tuples fetched", "Size"].map((heading) => (
+                      <th key={heading} className="px-4 py-3">{heading}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {indexes.map((index) => (
+                    <tr key={index.name} className="hover:bg-white/[0.02]">
+                      <td className="px-4 py-3 font-mono text-gray-300">
+                        {index.name}
+                      </td>
+                      <td className="px-4 py-3 tabular-nums text-white">
+                        {formatNumber(index.scans)}
+                      </td>
+                      <td className="px-4 py-3 tabular-nums text-gray-400">
+                        {formatNumber(index.tuples_read)}
+                      </td>
+                      <td className="px-4 py-3 tabular-nums text-gray-400">
+                        {formatNumber(index.tuples_fetched)}
+                      </td>
+                      <td className="px-4 py-3 text-gray-400">
+                        {index.size || "—"}
+                      </td>
+                    </tr>
+                  ))}
+                  {indexes.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="px-4 py-6 text-center text-gray-500">
+                        No index counters were returned.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="border border-white/10">
+            <div className="border-b border-white/10 px-5 py-4">
+              <h2 className="text-sm font-semibold text-white">
+                Tracked SIEM Search Queries
+              </h2>
+              <p className="mt-1 text-[10px] leading-4 text-gray-500">
+                Top tracked search patterns by cumulative execution time.
+                Statistics accumulate until PostgreSQL statistics are reset.
+              </p>
+            </div>
+
+            {!searchStats?.available ? (
+              <div className="p-5 text-xs text-yellow-300">
+                Query statistics are unavailable ({searchStats?.message || "unknown error"}).
+              </div>
+            ) : queries.length === 0 ? (
+              <div className="p-5 text-xs text-gray-500">
+                No matching tracked search queries have been recorded yet.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[900px] text-left text-xs">
+                  <thead className="bg-black/30 text-[9px] uppercase tracking-wider text-gray-500">
+                    <tr>
+                      {["Mean latency", "Calls", "Total time", "Rows", "Buffer reads", "Query"].map((heading) => (
+                        <th key={heading} className="px-4 py-3">{heading}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {queries.map((query) => (
+                      <tr key={query.queryid} className="align-top hover:bg-white/[0.02]">
+                        <td className="px-4 py-3 tabular-nums text-white">
+                          {formatMs(query.mean_exec_ms)}
+                        </td>
+                        <td className="px-4 py-3 tabular-nums text-gray-300">
+                          {formatNumber(query.calls)}
+                        </td>
+                        <td className="px-4 py-3 tabular-nums text-gray-400">
+                          {formatMs(query.total_exec_ms)}
+                        </td>
+                        <td className="px-4 py-3 tabular-nums text-gray-400">
+                          {formatNumber(query.rows)}
+                        </td>
+                        <td className="px-4 py-3 tabular-nums text-gray-400">
+                          {formatNumber(query.shared_blks_read)}
+                        </td>
+                        <td
+                          title={query.query}
+                          className="max-w-sm whitespace-normal break-words px-4 py-3 font-mono text-[10px] leading-4 text-gray-500"
+                        >
+                          {query.query}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          <section className="border border-white/10 p-5">
+            <h2 className="text-sm font-semibold text-white">
+              Security Events Table Activity
+            </h2>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {[
+                ["Rows read by sequential scans", table.seq_tup_read],
+                ["Rows fetched by table index scans", table.idx_tup_fetch],
+                ["Shared buffer hits (listed queries)", totalListedBufferHits],
+                ["Shared buffer reads (listed queries)", totalListedBufferReads],
+              ].map(([label, value]) => (
+                <div key={label} className="bg-black/30 p-3">
+                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                    {label}
+                  </p>
+                  <p className="mt-2 text-lg tabular-nums text-gray-200">
+                    {formatNumber(value)}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <p className="mt-4 text-[10px] leading-4 text-gray-600">
+              Table and query counters are cumulative PostgreSQL statistics,
+              not rates measured within the latest refresh interval.
+            </p>
+          </section>
+        </>
+      )}
+    </div>
+  );
+}
 function AdminNotificationCenter() {
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
@@ -2364,6 +2704,10 @@ function AdminDashboard({ onLogout }) {
       activeMenu === "admin-audit-export"
     ) {
       return <AuditTrail />;
+    }
+
+    if (activeMenu === "admin-search-performance") {
+      return <AdminSearchPerformance />;
     }
 
     const labels = Object.fromEntries(
@@ -7024,12 +7368,32 @@ function UserRegister({ onBack, onSuccess }) {
 // ==================================================
 // USER DASHBOARD
 // ==================================================
+function formatTimestampIST(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+
+  const formatted = new Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+
+  return `${formatted} IST`;
+}
+
 function UserDashboard({ onLogout }) {
   const [user, setUser] = useState(null);
   const [dashboard, setDashboard] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [activeMenu, setActiveMenu] = useState("dashboard");
+  const [activeSIEMPage, setActiveSIEMPage] = useState("siem-dashboard");
 
   // User Dashboard SOC navigation groups.
   // Existing functional routes remain unchanged; this state only
@@ -7321,9 +7685,9 @@ function UserDashboard({ onLogout }) {
                 icon: "📊",
                 label: "SIEM",
                 items: [
-                  ["SIEM Dashboard"],
+                  ["SIEM Dashboard", "logs"],
                   ["Log Explorer", "logs"],
-                  ["Security Events"],
+                  ["Security Events", "logs"],
                   ["Authentication Logs"],
                   ["Network Logs"],
                   ["Firewall Logs"],
@@ -7340,14 +7704,14 @@ function UserDashboard({ onLogout }) {
                 icon: "🚨",
                 label: "Detection",
                 items: [
-                  ["Detection Dashboard"],
-                  ["Detection Rules"],
-                  ["Sigma Rules"],
-                  ["Correlation Rules"],
-                  ["Behavioral Detection"],
-                  ["Anomaly Detection"],
-                  ["IOC Detection"],
-                  ["Detection Coverage"],
+                  ["Detection Dashboard", "detection-dashboard"],
+                  ["Detection Rules", "detection-rules"],
+                  ["Sigma Rules", "sigma-rules"],
+                  ["Correlation Rules", "correlation-rules"],
+                  ["Behavioral Detection", "behavioral-detection"],
+                  ["Anomaly Detection", "anomaly-detection"],
+                  ["IOC Detection", "ioc-detection"],
+                  ["Detection Coverage", "detection-coverage"],
                 ],
               },
               {
@@ -7355,14 +7719,14 @@ function UserDashboard({ onLogout }) {
                 icon: "🚨",
                 label: "Alerts",
                 items: [
-                  ["Alert Dashboard"],
-                  ["All Alerts"],
-                  ["Critical Alerts"],
-                  ["Open Alerts"],
-                  ["Acknowledged"],
-                  ["Suppressed"],
-                  ["Alert Correlation"],
-                  ["Alert Tuning"],
+                  ["Alert Dashboard", "alerts"],
+                  ["All Alerts", "alerts-all"],
+                  ["Critical Alerts", "alerts-critical"],
+                  ["Open Alerts", "alerts-open"],
+                  ["Acknowledged", "alerts-acknowledged"],
+                  ["Suppressed", "alerts-suppressed"],
+                  ["Alert Correlation", "alerts-correlation"],
+                  ["Alert Tuning", "alerts-tuning"],
                 ],
               },
               {
@@ -7596,7 +7960,25 @@ function UserDashboard({ onLogout }) {
                           key={label}
                           type="button"
                           onClick={() => {
+                            if (label === "SIEM Dashboard") {
+                              setActiveSIEMPage("siem-dashboard");
+                              setActiveMenu("logs");
+                              return;
+                            }
+
+                            if (label === "Security Events") {
+                              setActiveSIEMPage("security-events");
+                              setActiveMenu("logs");
+                              return;
+                            }
+
+                            if (route && (route.startsWith("alerts") || route === "detection-dashboard" || route === "detection-rules" || route === "sigma-rules" || route === "correlation-rules" || route === "behavioral-detection" || route === "anomaly-detection" || route === "ioc-detection" || route === "detection-coverage")) {
+                              setActiveMenu(route);
+                              return;
+                            }
+
                             if (route) {
+                              setActiveSIEMPage("syslog");
                               setActiveMenu(route);
                             }
                           }}
@@ -8218,7 +8600,7 @@ function UserDashboard({ onLogout }) {
 
           {/* LIVE LOG MONITORING */}
           {activeMenu === "logs" && (
-            <LiveLogMonitoring />
+            <LiveLogMonitoring initialTab={activeSIEMPage} />
           )}
 
           {/* UPTIME MONITORING */}
@@ -8263,9 +8645,29 @@ function UserDashboard({ onLogout }) {
             <MyActivity />
           )}
 
+          {activeMenu === "detection-dashboard" && (
+            <DetectionDashboard />
+          )}
+
+          {activeMenu === "detection-rules" && (
+            <DetectionRulesPage />
+          )}
+
+          {activeMenu === "sigma-rules" && (
+            <SigmaRulesPage />
+          )}
+
+          {activeMenu === "correlation-rules" && (
+            <CorrelationRulesPage />
+          )}
+
+          {["behavioral-detection", "anomaly-detection", "ioc-detection", "detection-coverage"].includes(activeMenu) && (
+            <DetectionExtendedPages view={activeMenu} />
+          )}
+
           {/* RECOMMENDED PLACEHOLDER MODULES */}
-          {activeMenu === "alerts" && (
-            <UserModulePlaceholder menu="alerts" />
+          {activeMenu.startsWith("alerts") && (
+            <AlertsModule view={activeMenu} />
           )}
 
           {activeMenu === "incidents" && (
@@ -8293,7 +8695,12 @@ function UserDashboard({ onLogout }) {
             activeMenu !== "profile" &&
             activeMenu !== "reports" &&
             activeMenu !== "activity" &&
-            activeMenu !== "alerts" &&
+            activeMenu !== "detection-dashboard" &&
+            activeMenu !== "detection-rules" &&
+            activeMenu !== "sigma-rules" &&
+            activeMenu !== "correlation-rules" &&
+            !["behavioral-detection", "anomaly-detection", "ioc-detection", "detection-coverage"].includes(activeMenu) &&
+            !activeMenu.startsWith("alerts") &&
             activeMenu !== "code-security" &&
             activeMenu !== "incidents" &&
             activeMenu !== "notifications" && (
@@ -10105,9 +10512,15 @@ function SupportDetail({ label, value, mono = false }) {
 // ==================================================
 // LIVE LOG MONITORING
 // ==================================================
-function LiveLogMonitoring() {
-  const [activeLog, setActiveLog] = useState("syslog");
+function LiveLogMonitoring({ initialTab = "syslog" }) {
+  const [activeLog, setActiveLog] = useState(initialTab);
   const [autoRefresh, setAutoRefresh] = useState(true);
+
+  useEffect(() => {
+    // Intentionally mirror the parent's selected SIEM tab into local state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setActiveLog(initialTab);
+  }, [initialTab]);
 
   const [activeTarget, setActiveTarget] = useState(
     localStorage.getItem("active_vapt_target") || ""
@@ -10127,9 +10540,14 @@ function LiveLogMonitoring() {
 
   const [search, setSearch] = useState("");
   const [severity, setSeverity] = useState("all");
+  const securityEventFiltersRef = useRef({ search, severity });
+
+  useEffect(() => {
+    securityEventFiltersRef.current = { search, severity };
+  }, [search, severity]);
+
 
   const [logs, setLogs] = useState([]);
-  const [summaryLogs, setSummaryLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -10137,6 +10555,7 @@ function LiveLogMonitoring() {
   const [securityEvents, setSecurityEvents] = useState([]);
 
   const logTabs = [
+    { id: "siem-dashboard", label: "SIEM Dashboard" },
     { id: "syslog", label: "Sys Logs" },
     { id: "auth", label: "Auth Logs" },
     { id: "access", label: "Access Logs" },
@@ -10285,8 +10704,17 @@ function LiveLogMonitoring() {
         setLoading(true);
       }
 
+      const params = new URLSearchParams({ limit: "200" });
+      const filters = securityEventFiltersRef.current;
+      if (filters.search.trim()) {
+        params.set("search", filters.search.trim());
+      }
+      if (filters.severity !== "all") {
+        params.set("severity", filters.severity);
+      }
+
       const response = await axios.get(
-        `${API_URL}/security-events?limit=200`,
+        `${API_URL}/security-events?${params.toString()}`,
         getAuthConfig()
       );
 
@@ -10375,7 +10803,6 @@ function LiveLogMonitoring() {
 
     if (!activeTarget) {
       setLogs([]);
-      setSummaryLogs([]);
       setDataSource("—");
       setLoading(false);
       return;
@@ -10415,8 +10842,6 @@ function LiveLogMonitoring() {
 
       if (includeFilters) {
         setLogs(returnedLogs);
-      } else {
-        setSummaryLogs(returnedLogs);
       }
 
       setDataSource(
@@ -10447,8 +10872,7 @@ function LiveLogMonitoring() {
 
       if (!silent) {
         setLogs([]);
-        setSummaryLogs([]);
-      }
+        }
     } finally {
       if (!silent) {
         setLoading(false);
@@ -10462,8 +10886,7 @@ function LiveLogMonitoring() {
       if (!activeTarget) {
         setMonitoringStatus("not_started");
         setLogs([]);
-        setSummaryLogs([]);
-        setLoading(false);
+          setLoading(false);
         return;
       }
 
@@ -10484,15 +10907,23 @@ function LiveLogMonitoring() {
     };
 
     initializeMonitoring();
+    // Initialize monitoring on target changes; other effects handle refreshes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTarget]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      fetchLogs({ includeFilters: true });
-      fetchLogs({ includeFilters: false, silent: true });
+      if (activeLog === "security-events") {
+        fetchSecurityEvents({ silent: true });
+      } else {
+        fetchLogs({ includeFilters: true });
+        fetchLogs({ includeFilters: false, silent: true });
+      }
     }, 300);
 
     return () => clearTimeout(timer);
+    // Search and severity intentionally control this debounce schedule.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, severity]);
 
   useEffect(() => {
@@ -10500,17 +10931,97 @@ function LiveLogMonitoring() {
       return undefined;
     }
 
+    // Fetching here is intentional; the helper sets the loading state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchSecurityEvents();
 
-    if (!autoRefresh) {
+    const token = localStorage.getItem("token");
+    if (!token) {
       return undefined;
     }
 
-    const interval = setInterval(() => {
-      fetchSecurityEvents({ silent: true });
-    }, 5000);
+    let socket = null;
+    let reconnectTimer = null;
+    let stopped = false;
 
-    return () => clearInterval(interval);
+    const connect = () => {
+      if (stopped) return;
+
+      const protocol =
+        window.location.protocol === "https:" ? "wss:" : "ws:";
+      const host =
+        API_URL.replace(/^https?:\/\//, "").replace(/\/$/, "");
+
+      socket = new WebSocket(
+        `${protocol}//${host}/ws/security-events`
+      );
+
+      socket.onopen = () => {
+        console.log("[SIEM] Security events WebSocket connected");
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const incoming = JSON.parse(event.data);
+
+          setSecurityEvents((current) => {
+            const eventId = incoming.event_id || incoming.id;
+
+            if (
+              eventId &&
+              current.some(
+                (item) => (item.event_id || item.id) === eventId
+              )
+            ) {
+              return current;
+            }
+
+            return [incoming, ...current].slice(0, 200);
+          });
+
+          setLastUpdated(new Date());
+        } catch (err) {
+          console.error("[SIEM] Invalid WebSocket payload:", err);
+        }
+      };
+
+      socket.onerror = (error) => {
+        console.error("[SIEM] Security events WebSocket error:", error);
+      };
+
+      socket.onclose = () => {
+        if (!stopped) {
+          reconnectTimer = window.setTimeout(connect, 3000);
+        }
+      };
+    };
+
+    connect();
+
+    let interval = null;
+    if (autoRefresh) {
+      interval = setInterval(() => {
+        fetchSecurityEvents({ silent: true });
+      }, 5000);
+    }
+
+    return () => {
+      stopped = true;
+
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+      }
+
+      if (interval) {
+        clearInterval(interval);
+      }
+
+      if (socket) {
+        socket.close();
+      }
+    };
+    // WebSocket lifecycle follows the active tab and auto-refresh setting.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeLog, autoRefresh]);
 
   useEffect(() => {
@@ -10531,25 +11042,31 @@ function LiveLogMonitoring() {
     }, 5000);
 
     return () => clearInterval(interval);
+    // These state changes intentionally control the monitoring polling schedule.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoRefresh, activeTarget, activeLog, search, severity]);
 
-  const totalEvents = summaryLogs.length;
+  const siemTotalEvents = securityEvents.length;
 
-  const errorCount = summaryLogs.filter(
-    (log) => String(log.level || "").toUpperCase() === "ERROR"
+  const siemErrorCount = securityEvents.filter(
+    (event) => ["ERROR", "CRITICAL", "HIGH"].includes(
+      String(event.severity || "").toUpperCase()
+    )
   ).length;
 
-  const warningCount = summaryLogs.filter(
-    (log) => String(log.level || "").toUpperCase() === "WARN"
+  const siemWarningCount = securityEvents.filter(
+    (event) => ["WARN", "WARNING", "MEDIUM"].includes(
+      String(event.severity || "").toUpperCase()
+    )
   ).length;
 
-  const authFailures = summaryLogs.filter((log) => {
-    const event = String(log.event || "").toLowerCase();
-    const message = String(log.message || "").toLowerCase();
+  const siemAuthFailures = securityEvents.filter((event) => {
+    const type = String(event.event_type || "").toLowerCase();
+    const message = String(event.message || "").toLowerCase();
 
     return (
-      event.includes("failed") ||
-      event.includes("failure") ||
+      type.includes("authentication") ||
+      type.includes("auth") ||
       message.includes("authentication failure") ||
       message.includes("failed password") ||
       message.includes("invalid user")
@@ -10847,14 +11364,14 @@ function LiveLogMonitoring() {
 
       {/* EVENT SUMMARY */}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <LogStat label="Total Events" value={totalEvents} />
-        <LogStat label="Errors" value={errorCount} critical />
-        <LogStat label="Warnings" value={warningCount} />
+        <LogStat label="Total Events" value={siemTotalEvents} />
+        <LogStat label="Errors" value={siemErrorCount} critical />
+        <LogStat label="Warnings" value={siemWarningCount} />
 
         <LogStat
           label="Auth Failures"
-          value={authFailures}
-          critical={authFailures > 0}
+          value={siemAuthFailures}
+          critical={siemAuthFailures > 0}
         />
       </div>
 
@@ -10906,7 +11423,12 @@ function LiveLogMonitoring() {
             >
               <option value="all">All Levels</option>
               <option value="INFO">INFO</option>
+              <option value="LOW">LOW</option>
+              <option value="MEDIUM">MEDIUM</option>
+              <option value="HIGH">HIGH</option>
+              <option value="CRITICAL">CRITICAL</option>
               <option value="WARN">WARN</option>
+              <option value="WARNING">WARNING</option>
               <option value="ERROR">ERROR</option>
             </select>
           </div>
@@ -10929,6 +11451,40 @@ function LiveLogMonitoring() {
             </button>
           </div>
         </div>
+
+        {activeLog === "siem-dashboard" ? (
+          <div className="grid gap-6 lg:grid-cols-2">
+            <div className="border border-white/10 bg-[#0a0a0a] p-6">
+              <p className="text-[10px] uppercase tracking-[0.2em] text-gray-600">
+                Live SIEM Status
+              </p>
+              <div className="mt-4 flex items-center gap-3">
+                <span className="h-3 w-3 rounded-full bg-green-500" />
+                <span className="text-sm text-green-400">
+                  Real-time event stream active
+                </span>
+              </div>
+              <p className="mt-3 text-xs text-gray-600">
+                Source: {dataSource}
+              </p>
+              <p className="mt-1 text-xs text-gray-600">
+                Last event: {lastUpdated ? lastUpdated.toLocaleString() : "Waiting for events"}
+              </p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0a0a0a] p-6">
+              <p className="text-[10px] uppercase tracking-[0.2em] text-gray-600">
+                Detection Activity
+              </p>
+              <div className="mt-4 grid grid-cols-2 gap-4">
+                <LogStat label="Total" value={siemTotalEvents} />
+                <LogStat label="High Risk" value={siemErrorCount} critical />
+                <LogStat label="Warnings" value={siemWarningCount} />
+                <LogStat label="Auth Failures" value={siemAuthFailures} critical={siemAuthFailures > 0} />
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         {/* TABLE */}
         {activeLog === "security-events" ? (
@@ -10975,7 +11531,7 @@ function LiveLogMonitoring() {
                       className="transition hover:bg-white/[0.02]"
                     >
                       <td className="whitespace-nowrap px-6 py-5 font-mono text-xs text-gray-600">
-                        {event.timestamp || "—"}
+                        {formatTimestampIST(event.timestamp)}
                       </td>
 
                       <td className="px-6 py-5 text-gray-400">
@@ -11072,8 +11628,19 @@ function LiveLogMonitoring() {
                         </div>
                       </td>
 
-                      <td className="max-w-sm px-6 py-5 text-xs leading-5 text-gray-600">
-                        {event.mitre?.evidence || "—"}
+                      <td className="w-64 max-w-xs px-6 py-5 align-top text-xs leading-5 text-gray-600">
+                        {event.mitre?.evidence ? (
+                          <details className="max-w-xs">
+                            <summary className="cursor-pointer break-words text-gray-400">
+                              {event.mitre.evidence.length > 120
+                                ? `${event.mitre.evidence.slice(0, 120)}… View full evidence`
+                                : event.mitre.evidence}
+                            </summary>
+                            <p className="mt-2 whitespace-normal break-words [overflow-wrap:anywhere]">
+                              {event.mitre.evidence}
+                            </p>
+                          </details>
+                        ) : "—"}
                       </td>
                     </tr>
                   ))}
@@ -11083,7 +11650,9 @@ function LiveLogMonitoring() {
             {!loading && securityEvents.length === 0 && (
               <div className="px-6 py-12 text-center">
                 <p className="text-sm text-gray-500">
-                  No security events are currently available.
+                  {search.trim() || severity !== "all"
+                    ? "No security events match the current filters."
+                    : "No security events are currently available."}
                 </p>
               </div>
             )}
@@ -12455,6 +13024,405 @@ function MitreAttack() {
   );
 }
 
+
+function VAPTSeverityDistributionGraph({ vaptRunResults = {} }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const findings = Object.values(vaptRunResults || {}).flatMap((result) =>
+      Array.isArray(result?.findings) ? result.findings : []
+    );
+
+    const counts = new Map();
+
+    findings.forEach((finding) => {
+      const severity =
+        String(finding?.severity || "INFO").trim().toUpperCase() || "INFO";
+
+      counts.set(severity, (counts.get(severity) || 0) + 1);
+    });
+
+    const preferredOrder = [
+      "CRITICAL",
+      "HIGH",
+      "MEDIUM",
+      "LOW",
+      "INFO",
+      "NONE",
+    ];
+
+    const orderedSeverities = [
+      ...preferredOrder.filter((severity) => counts.has(severity)),
+      ...Array.from(counts.keys())
+        .filter((severity) => !preferredOrder.includes(severity))
+        .sort(),
+    ];
+
+    setData({
+      severities: orderedSeverities.map((severity) => ({
+        severity,
+        findings: counts.get(severity),
+      })),
+      total_findings: findings.length,
+    });
+
+    setError("");
+    setLoading(false);
+  }, [vaptRunResults]);
+
+  if (loading) {
+    return (
+      <div style={{
+        marginTop: "24px",
+        padding: "24px",
+        borderRadius: "14px",
+        background: "rgba(15, 23, 42, 0.72)",
+        border: "1px solid rgba(148, 163, 184, 0.18)"
+      }}>
+        Loading severity analytics...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div style={{
+        marginTop: "24px",
+        padding: "18px",
+        borderRadius: "14px",
+        background: "rgba(127, 29, 29, 0.18)",
+        border: "1px solid rgba(248, 113, 113, 0.25)",
+        color: "#fca5a5"
+      }}>
+        {error}
+      </div>
+    );
+  }
+
+  const severities = Array.isArray(data?.severities)
+    ? data.severities
+    : [];
+
+  const maxFindings = Math.max(
+    ...severities.map((item) => Number(item.findings) || 0),
+    1
+  );
+
+  return (
+    <div style={{
+      marginTop: "24px",
+      padding: "24px",
+      borderRadius: "14px",
+      background: "rgba(15, 23, 42, 0.72)",
+      border: "1px solid rgba(148, 163, 184, 0.18)",
+      boxShadow: "0 10px 30px rgba(0, 0, 0, 0.18)"
+    }}>
+      <div style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        marginBottom: "22px"
+      }}>
+        <div>
+          <div style={{
+            fontSize: "18px",
+            fontWeight: 700,
+            color: "#f8fafc"
+          }}>
+            Severity Distribution
+          </div>
+
+          <div style={{
+            marginTop: "5px",
+            fontSize: "12px",
+            color: "#94a3b8"
+          }}>
+            Real severity distribution across VAPT findings
+          </div>
+        </div>
+
+        <div style={{
+          padding: "8px 14px",
+          borderRadius: "10px",
+          background: "rgba(59, 130, 246, 0.12)",
+          color: "#93c5fd",
+          fontSize: "13px",
+          fontWeight: 700
+        }}>
+          {Number(data?.total_findings || 0)} Total Findings
+        </div>
+      </div>
+
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+        gap: "14px"
+      }}>
+        {severities.map((item) => {
+          const count = Number(item.findings) || 0;
+          const percentage = data?.total_findings
+            ? ((count / data.total_findings) * 100).toFixed(1)
+            : "0.0";
+
+          return (
+            <div
+              key={item.severity}
+              style={{
+                padding: "18px",
+                borderRadius: "12px",
+                background: "rgba(2, 6, 23, 0.55)",
+                border: "1px solid rgba(148, 163, 184, 0.12)"
+              }}
+            >
+              <div style={{
+                fontSize: "11px",
+                fontWeight: 700,
+                color: "#94a3b8",
+                letterSpacing: "0.08em"
+              }}>
+                {item.severity}
+              </div>
+
+              <div style={{
+                marginTop: "10px",
+                fontSize: "28px",
+                fontWeight: 800,
+                color: "#f8fafc"
+              }}>
+                {count}
+              </div>
+
+              <div style={{
+                marginTop: "5px",
+                fontSize: "11px",
+                color: "#64748b"
+              }}>
+                {percentage}% of findings
+              </div>
+
+              <div style={{
+                marginTop: "12px",
+                height: "6px",
+                borderRadius: "999px",
+                background: "rgba(148, 163, 184, 0.12)",
+                overflow: "hidden"
+              }}>
+                <div style={{
+                  width: `${Math.max(
+                    (count / maxFindings) * 100,
+                    count > 0 ? 4 : 0
+                  )}%`,
+                  height: "100%",
+                  borderRadius: "999px",
+                  background: "linear-gradient(90deg, #f97316, #ef4444)",
+                  transition: "width 0.5s ease"
+                }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function VAPTFindingsByToolGraph({ vaptRunResults = {} }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const toolNames = {
+      nmap: "Nmap",
+      nikto: "Nikto",
+      nuclei: "Nuclei",
+      "owasp-zap": "OWASP ZAP",
+      masscan: "Masscan",
+      hping3: "hping3",
+      tshark: "Tshark",
+      wireshark: "Wireshark",
+      snort: "Snort",
+      hydra: "Hydra",
+      john: "John the Ripper",
+      metasploit: "Metasploit",
+      "dns-recon": "DNS Recon",
+      dig: "dig",
+      nslookup: "nslookup",
+      ping: "Ping",
+      whois: "WHOIS",
+    };
+
+    const tools = Object.entries(vaptRunResults || {}).map(
+      ([toolId, result]) => ({
+        tool: toolNames[toolId] || toolId,
+        findings: Array.isArray(result?.findings)
+          ? result.findings.length
+          : 0,
+      })
+    );
+
+    setData({
+      tools,
+      total_findings: tools.reduce(
+        (total, item) => total + item.findings,
+        0
+      ),
+    });
+
+    setError("");
+    setLoading(false);
+  }, [vaptRunResults]);
+
+  if (loading) {
+    return (
+      <div style={{
+        marginTop: "24px",
+        padding: "24px",
+        borderRadius: "14px",
+        background: "rgba(15, 23, 42, 0.72)",
+        border: "1px solid rgba(148, 163, 184, 0.18)"
+      }}>
+        Loading VAPT analytics...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div style={{
+        marginTop: "24px",
+        padding: "18px",
+        borderRadius: "14px",
+        background: "rgba(127, 29, 29, 0.18)",
+        border: "1px solid rgba(248, 113, 113, 0.25)",
+        color: "#fca5a5"
+      }}>
+        {error}
+      </div>
+    );
+  }
+
+  const tools = Array.isArray(data?.tools) ? data.tools : [];
+  const maxFindings = Math.max(
+    ...tools.map((item) => Number(item.findings) || 0),
+    1
+  );
+
+  return (
+    <div style={{
+      marginTop: "24px",
+      padding: "24px",
+      borderRadius: "14px",
+      background: "rgba(15, 23, 42, 0.72)",
+      border: "1px solid rgba(148, 163, 184, 0.18)",
+      boxShadow: "0 10px 30px rgba(0, 0, 0, 0.18)"
+    }}>
+      <div style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        marginBottom: "22px"
+      }}>
+        <div>
+          <div style={{
+            fontSize: "18px",
+            fontWeight: 700,
+            color: "#f8fafc"
+          }}>
+            Findings by VAPT Tool
+          </div>
+
+          <div style={{
+            marginTop: "5px",
+            fontSize: "12px",
+            color: "#94a3b8"
+          }}>
+            Real findings recorded by the SOC Platform
+          </div>
+        </div>
+
+        <div style={{
+          padding: "8px 14px",
+          borderRadius: "10px",
+          background: "rgba(59, 130, 246, 0.12)",
+          color: "#93c5fd",
+          fontSize: "13px",
+          fontWeight: 700
+        }}>
+          {Number(data?.total_findings || 0)} Total Findings
+        </div>
+      </div>
+
+      {tools.length === 0 ? (
+        <div style={{
+          padding: "28px 10px",
+          textAlign: "center",
+          color: "#94a3b8"
+        }}>
+          No VAPT findings recorded yet.
+        </div>
+      ) : (
+        <div style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: "16px"
+        }}>
+          {tools.map((item) => {
+            const count = Number(item.findings) || 0;
+            const width = Math.max(
+              (count / maxFindings) * 100,
+              count > 0 ? 4 : 0
+            );
+
+            return (
+              <div key={item.tool}>
+                <div style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  marginBottom: "7px"
+                }}>
+                  <span style={{
+                    color: "#e2e8f0",
+                    fontSize: "13px",
+                    fontWeight: 600
+                  }}>
+                    {item.tool}
+                  </span>
+
+                  <span style={{
+                    color: "#cbd5e1",
+                    fontSize: "13px",
+                    fontWeight: 700
+                  }}>
+                    {count}
+                  </span>
+                </div>
+
+                <div style={{
+                  height: "10px",
+                  borderRadius: "999px",
+                  background: "rgba(148, 163, 184, 0.12)",
+                  overflow: "hidden"
+                }}>
+                  <div style={{
+                    width: `${width}%`,
+                    height: "100%",
+                    borderRadius: "999px",
+                    background: "linear-gradient(90deg, #06b6d4, #3b82f6)",
+                    transition: "width 0.5s ease"
+                  }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function VAPTTesting({
   onViewNmapResults,
   onViewNiktoResults,
@@ -13523,6 +14491,13 @@ function VAPTTesting({
 
           setWiresharkResult(result);
 
+          if (vaptRunTools.length > 1) {
+            setVaptRunResults((current) => ({
+              ...current,
+              wireshark: result,
+            }));
+          }
+
           const finalStatus =
             job.status === "completed"
               ? "Completed"
@@ -13612,6 +14587,13 @@ function VAPTTesting({
           };
 
           setHydraResult(result);
+
+          if (vaptRunTools.length > 1) {
+            setVaptRunResults((current) => ({
+              ...current,
+              hydra: result,
+            }));
+          }
 
           const finalStatus =
             job.status === "completed"
@@ -15193,11 +16175,21 @@ function VAPTTesting({
         const hydraResponse = await axios.post(
           `${API_URL}/vapt/credential/hydra/run`,
           {
-            target: parsedUrl.hostname,
-            service: "ssh",
+            target: /^https?:\/\//i.test(cleanTarget)
+              ? cleanTarget
+              : parsedUrl.hostname,
+            service: /^https?:\/\//i.test(cleanTarget)
+              ? "http-get"
+              : "ssh",
             username: "hydratest",
             password_list: "/tmp/hydra-passwords.txt",
-            port: 22,
+            port: /^https?:\/\//i.test(cleanTarget)
+              ? (parsedUrl.port
+                  ? Number(parsedUrl.port)
+                  : parsedUrl.protocol === "https:"
+                    ? 443
+                    : 80)
+              : 22,
           },
           {
             headers: {
@@ -16996,6 +17988,19 @@ function VAPTTesting({
           </div>
         </div>
       </div>
+
+      {/* VAPT ANALYTICS - shown after the unified multi-tool run finishes */}
+      {vaptRunRedirected && vaptRunTools.length >= 2 && (
+        <>
+          <VAPTSeverityDistributionGraph
+            vaptRunResults={vaptRunResults}
+          />
+
+          <VAPTFindingsByToolGraph
+            vaptRunResults={vaptRunResults}
+          />
+        </>
+      )}
 
       {/* TSHARK LIVE PROGRESS */}
       {(tsharkJobId || tsharkResult) && (
@@ -20471,6 +21476,14 @@ function MultiToolResultsPage({ scanResult, onBack }) {
 
     return (
       <div className="space-y-5 pt-5">
+        <VAPTSeverityDistributionGraph
+          vaptRunResults={results}
+        />
+
+        <VAPTFindingsByToolGraph
+          vaptRunResults={results}
+        />
+
         <div className="grid gap-3 sm:grid-cols-5">
           {Object.entries(severity).map(([label, value]) => (
             <div
@@ -27902,6 +28915,1039 @@ function UserNotificationCenter() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+
+// ==================================================
+// LIVE SIEM ALERTS
+// ==================================================
+
+function DetectionDashboard() {
+  const [data, setData] = useState({
+    alerts: [], rules: [], techniques: [], tactics: [],
+  });
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadData = async () => {
+      if (refreshKey === 0) setLoading(true);
+      else setRefreshing(true);
+
+      try {
+        const token = localStorage.getItem("token");
+        if (!token) {
+          throw new Error("Authentication token missing. Please log in again.");
+        }
+
+        const config = {
+          headers: { Authorization: `Bearer ${token}` },
+        };
+
+        const endpoints = [
+          {
+            key: "alerts",
+            label: "persisted detections",
+            run: () => axios.get(
+              `${API_URL}/security-events/alerts?limit=500`, config
+            ),
+            extract: (d) => Array.isArray(d?.alerts) ? d.alerts : [],
+          },
+          {
+            key: "rules",
+            label: "detection rules",
+            run: () => axios.get(`${API_URL}/security-events/rules`, config),
+            extract: (d) => Array.isArray(d?.rules) ? d.rules : [],
+          },
+          {
+            key: "techniques",
+            label: "MITRE techniques",
+            run: () => axios.get(
+              `${API_URL}/security-events/stats/techniques?limit=10`, config
+            ),
+            extract: (d) => Array.isArray(d?.techniques) ? d.techniques : [],
+          },
+          {
+            key: "tactics",
+            label: "MITRE tactics",
+            run: () => axios.get(
+              `${API_URL}/security-events/stats/tactics?limit=10`, config
+            ),
+            extract: (d) => Array.isArray(d?.tactics) ? d.tactics : [],
+          },
+        ];
+
+        const results = await Promise.allSettled(
+          endpoints.map((endpoint) => endpoint.run())
+        );
+        if (cancelled) return;
+
+        const updates = {};
+        const failed = [];
+
+        results.forEach((result, index) => {
+          const endpoint = endpoints[index];
+          if (result.status === "fulfilled") {
+            updates[endpoint.key] = endpoint.extract(result.value.data);
+          } else {
+            failed.push(endpoint.label);
+          }
+        });
+
+        if (Object.keys(updates).length) {
+          setData((previous) => ({ ...previous, ...updates }));
+          setLastUpdated(new Date());
+        }
+
+        setError(
+          failed.length
+            ? `Unable to load ${failed.join(", ")}. Other available data is still shown.`
+            : ""
+        );
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            err.response?.data?.detail ||
+            err.message ||
+            "Unable to load Detection Dashboard."
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+          setRefreshing(false);
+        }
+      }
+    };
+
+    loadData();
+    const timer = window.setInterval(loadData, 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [refreshKey]);
+
+  const fmt = (value) => Number(value || 0).toLocaleString("en-IN");
+  const fmtTime = (value) => {
+    if (!value) return "—";
+    const d = new Date(value);
+    return Number.isNaN(d.getTime())
+      ? "—"
+      : `${d.toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata", hour12: false,
+        })} IST`;
+  };
+
+  const alerts = data.alerts;
+  const activeCount = alerts.filter(
+    (a) => String(a.alert_status || "ACTIVE").toUpperCase() === "ACTIVE"
+  ).length;
+  const highRisk = alerts.filter((a) =>
+    ["CRITICAL", "HIGH"].includes(String(a.severity || "").toUpperCase())
+  ).length;
+  const mappedCount = alerts.filter(
+    (a) => a.mitre?.technique_id || a.mitre_technique_id
+  ).length;
+
+  const severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "ERROR", "INFO"];
+  const severityStyle = {
+    CRITICAL: "text-red-400 border-red-500/30",
+    HIGH: "text-orange-300 border-orange-500/30",
+    MEDIUM: "text-yellow-300 border-yellow-500/30",
+    LOW: "text-blue-300 border-blue-500/30",
+    ERROR: "text-red-300 border-red-500/30",
+    INFO: "text-gray-300 border-white/10",
+  };
+
+  const cards = [
+    ["Detections loaded", alerts.length, "Latest persisted records; up to 500"],
+    ["Active detections", activeCount, "Status ACTIVE in loaded records"],
+    ["Critical / High", highRisk, "Within loaded records"],
+    ["SIEM rules", data.rules.length, "Returned by the backend"],
+    ["MITRE mapped", mappedCount, "Loaded detections with a technique ID"],
+  ];
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.25em] text-red-500">
+            Security Operations / Detection
+          </p>
+          <h1 className="mt-2 text-2xl font-bold text-white">
+            Detection Dashboard
+          </h1>
+          <p className="mt-2 text-xs text-gray-500">
+            Persisted SIEM detections, detection rules and MITRE ATT&CK mapping.
+          </p>
+          <p className="mt-2 text-[10px] text-gray-600">
+            Last successful refresh: {fmtTime(lastUpdated)} · Auto-refresh: 30 seconds
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={refreshing}
+          onClick={() => setRefreshKey((v) => v + 1)}
+          className="border border-white/10 px-4 py-2 text-xs text-gray-300 hover:border-red-500/40 hover:text-white disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh dashboard"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="border border-yellow-500/30 bg-yellow-500/5 p-3 text-xs text-yellow-200">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="border border-white/10 p-8 text-sm text-gray-500">
+          Loading detection data...
+        </div>
+      ) : (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+            {cards.map(([label, value, note]) => (
+              <div key={label} className="border border-white/10 bg-white/[0.02] p-4">
+                <p className="text-[10px] uppercase tracking-wider text-gray-500">{label}</p>
+                <p className="mt-3 text-2xl font-semibold tabular-nums text-white">
+                  {fmt(value)}
+                </p>
+                <p className="mt-2 text-[10px] leading-4 text-gray-600">{note}</p>
+              </div>
+            ))}
+          </div>
+
+          <section className="border border-white/10">
+            <div className="border-b border-white/10 px-5 py-4">
+              <h2 className="text-sm font-semibold text-white">Severity Distribution</h2>
+              <p className="mt-1 text-[10px] text-gray-500">
+                Calculated from loaded persisted detection records.
+              </p>
+            </div>
+            <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+              {severities.map((severity) => (
+                <div key={severity} className={`border p-3 ${severityStyle[severity]}`}>
+                  <p className="text-[10px] uppercase tracking-wider">{severity}</p>
+                  <p className="mt-2 text-xl font-semibold tabular-nums">
+                    {fmt(alerts.filter(
+                      (a) => String(a.severity || "INFO").toUpperCase() === severity
+                    ).length)}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="border border-white/10">
+            <div className="border-b border-white/10 px-5 py-4">
+              <h2 className="text-sm font-semibold text-white">Recent Detections</h2>
+            </div>
+            {!alerts.length ? (
+              <p className="p-5 text-xs text-gray-500">No persisted detections returned.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[800px] text-left text-xs">
+                  <thead className="bg-black/30 text-[9px] uppercase tracking-wider text-gray-500">
+                    <tr>
+                      {["Time (IST)", "Severity", "Detection / Rule", "Status", "MITRE ID", "Source"].map((h) => (
+                        <th key={h} className="px-4 py-3">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {alerts.slice(0, 10).map((a, i) => {
+                      const severity = String(a.severity || "INFO").toUpperCase();
+                      return (
+                        <tr key={a.event_id || a.id || i} className="align-top hover:bg-white/[0.02]">
+                          <td className="whitespace-nowrap px-4 py-3 text-gray-500">{fmtTime(a.timestamp)}</td>
+                          <td className="px-4 py-3">
+                            <span className={`border px-2 py-1 text-[9px] ${severityStyle[severity] || severityStyle.INFO}`}>
+                              {severity}
+                            </span>
+                          </td>
+                          <td className="max-w-sm px-4 py-3">
+                            <p className="font-medium text-gray-200">
+                              {a.detection?.rule_name || a.message || a.event_type || "Detection"}
+                            </p>
+                            <p className="mt-1 text-[10px] text-gray-600">
+                              {a.detection?.rule_id || a.event_type || "—"}
+                            </p>
+                          </td>
+                          <td className="px-4 py-3 text-gray-400">{a.alert_status || "ACTIVE"}</td>
+                          <td className="px-4 py-3 text-gray-400">
+                            {a.mitre?.technique_id || a.mitre_technique_id || "—"}
+                          </td>
+                          <td className="px-4 py-3 text-gray-400">{a.source || "—"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          <div className="grid gap-4 xl:grid-cols-2">
+            <section className="border border-white/10">
+              <div className="border-b border-white/10 px-5 py-4">
+                <h2 className="text-sm font-semibold text-white">Detection Rule Inventory</h2>
+              </div>
+              {!data.rules.length ? (
+                <p className="p-5 text-xs text-gray-500">No rules returned.</p>
+              ) : data.rules.slice(0, 11).map((rule) => (
+                <div key={rule.rule_id} className="border-b border-white/5 px-5 py-3">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <p className="text-xs font-medium text-gray-200">{rule.name || rule.rule_id}</p>
+                      <p className="mt-1 text-[10px] text-gray-500">
+                        {rule.rule_id} · {rule.group_by || "Grouping unspecified"}
+                      </p>
+                    </div>
+                    <span className={`border px-2 py-1 text-[9px] ${severityStyle[String(rule.severity || "INFO").toUpperCase()] || severityStyle.INFO}`}>
+                      {rule.severity || "INFO"}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-[10px] text-gray-500">
+                    Threshold: {rule.threshold ?? "—"} · Window: {rule.window_seconds ?? "—"}s
+                    {" · "}{rule.is_configured ? "Custom configuration" : "Default configuration"}
+                  </p>
+                </div>
+              ))}
+            </section>
+
+            <section className="border border-white/10">
+              <div className="border-b border-white/10 px-5 py-4">
+                <h2 className="text-sm font-semibold text-white">MITRE ATT&CK Coverage</h2>
+              </div>
+              <div className="px-5 py-3">
+                <p className="text-[10px] uppercase tracking-wider text-gray-500">Top mapped techniques</p>
+              </div>
+              {!data.techniques.length ? (
+                <p className="px-5 pb-5 text-xs text-gray-500">No mapped techniques returned.</p>
+              ) : data.techniques.map((t) => (
+                <div key={`${t.technique_id}-${t.technique_name}`} className="flex items-start justify-between gap-4 border-b border-white/5 px-5 py-3">
+                  <div>
+                    <p className="font-mono text-xs text-red-300">{t.technique_id || "—"}</p>
+                    <p className="mt-1 text-xs text-gray-300">{t.technique_name || "Unknown technique"}</p>
+                  </div>
+                  <span className="text-sm tabular-nums text-white">{fmt(t.event_count)}</span>
+                </div>
+              ))}
+              <div className="border-t border-white/10 px-5 py-3">
+                <p className="mb-2 text-[10px] uppercase tracking-wider text-gray-500">Top tactics</p>
+                {!data.tactics.length ? (
+                  <p className="text-xs text-gray-500">No tactics returned.</p>
+                ) : data.tactics.map((t) => (
+                  <div key={t.tactic} className="flex justify-between gap-3 py-2">
+                    <span className="text-xs text-gray-300">{t.tactic || "Unknown tactic"}</span>
+                    <span className="text-xs tabular-nums text-white">{fmt(t.event_count)}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function AlertsModule({ view = "alerts" }) {
+  const viewConfig = {
+    alerts: { title: "Alert Dashboard" },
+    "alerts-all": { title: "All Alerts" },
+    "alerts-critical": { title: "Critical Alerts", severity: "CRITICAL" },
+    "alerts-open": { title: "Open Alerts", status: "ACTIVE" },
+    "alerts-acknowledged": {
+      title: "Acknowledged Alerts",
+      status: "ACKNOWLEDGED",
+    },
+    "alerts-suppressed": { title: "Suppressed Alerts", status: "SUPPRESSED" },
+    "alerts-correlation": { title: "Alert Correlation" },
+    "alerts-tuning": { title: "Alert Tuning" },
+  };
+
+  const config = viewConfig[view] || viewConfig.alerts;
+  const [alerts, setAlerts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [severity, setSeverity] = useState("ALL");
+  const [status, setStatus] = useState("ALL");
+  const [updatingId, setUpdatingId] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [ruleConfigs, setRuleConfigs] = useState([]);
+  const [rulesLoading, setRulesLoading] = useState(false);
+  const [rulesError, setRulesError] = useState("");
+  const [rulesReload, setRulesReload] = useState(0);
+  const [rulesLastUpdated, setRulesLastUpdated] = useState(null);
+
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadAlerts = async (silent = false) => {
+      try {
+        if (!silent && !cancelled) setLoading(true);
+
+        const token = localStorage.getItem("token");
+        if (!token) {
+          throw new Error("Your session has expired. Please log in again.");
+        }
+
+        const response = await axios.get(
+          `${API_URL}/security-events/alerts?limit=500`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+
+        if (!cancelled) {
+          setAlerts(
+            Array.isArray(response.data?.alerts)
+              ? response.data.alerts
+              : []
+          );
+          setLastUpdated(new Date());
+          setError("");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            err.response?.data?.detail ||
+              err.message ||
+              "Unable to load security alerts."
+          );
+        }
+      } finally {
+        if (!cancelled && !silent) setLoading(false);
+      }
+    };
+
+    loadAlerts();
+    const timer = window.setInterval(() => loadAlerts(true), 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+
+  useEffect(() => {
+    if (view !== "alerts-tuning") return undefined;
+
+    let cancelled = false;
+
+    const loadRuleConfigs = async () => {
+      setRulesLoading(true);
+      setRulesError("");
+
+      try {
+        const token = localStorage.getItem("token");
+        if (!token) {
+          throw new Error("Your session has expired. Please log in again.");
+        }
+
+        const response = await axios.get(
+          `${API_URL}/security-events/rules`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+
+        if (!cancelled) {
+          setRuleConfigs(
+            Array.isArray(response.data?.rules) ? response.data.rules : []
+          );
+          setRulesLastUpdated(new Date());
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setRulesError(
+            err.response?.data?.detail ||
+            err.message ||
+            "Unable to load SIEM rule configuration."
+          );
+        }
+      } finally {
+        if (!cancelled) setRulesLoading(false);
+      }
+    };
+
+    loadRuleConfigs();
+    return () => { cancelled = true; };
+  }, [view, rulesReload]);
+
+  const changeAlertStatus = async (alert, action) => {
+    if (!alert?.event_id) {
+      setError("This alert has no event ID and cannot be updated.");
+      return;
+    }
+
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setError("Your session has expired. Please log in again.");
+      return;
+    }
+
+    setUpdatingId(alert.event_id);
+    setError("");
+
+    try {
+      const response = await axios.patch(
+        `${API_URL}/security-events/${encodeURIComponent(alert.event_id)}/${action}`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      const updated = response.data?.alert;
+      if (updated) {
+        setAlerts((current) =>
+          current.map((item) =>
+            item.event_id === updated.event_id ? updated : item
+          )
+        );
+        setLastUpdated(new Date());
+      }
+    } catch (err) {
+      setError(
+        err.response?.data?.detail ||
+          `Unable to ${action} this alert.`
+      );
+    } finally {
+      setUpdatingId("");
+    }
+  };
+
+  const activeCount = alerts.filter(
+    (item) => String(item.alert_status || "ACTIVE").toUpperCase() === "ACTIVE"
+  ).length;
+  const acknowledgedCount = alerts.filter(
+    (item) => String(item.alert_status || "").toUpperCase() === "ACKNOWLEDGED"
+  ).length;
+  const resolvedCount = alerts.filter(
+    (item) => String(item.alert_status || "").toUpperCase() === "RESOLVED"
+  ).length;
+  const criticalCount = alerts.filter(
+    (item) => String(item.severity || "").toUpperCase() === "CRITICAL"
+  ).length;
+
+  const visibleAlerts = alerts.filter((item) => {
+    const itemSeverity = String(item.severity || "").toUpperCase();
+    const itemStatus = String(item.alert_status || "ACTIVE").toUpperCase();
+
+    if (config.severity && itemSeverity !== config.severity) return false;
+    if (config.status && itemStatus !== config.status) return false;
+    if (severity !== "ALL" && itemSeverity !== severity) return false;
+    if (status !== "ALL" && itemStatus !== status) return false;
+
+    const term = search.trim().toLowerCase();
+    if (!term) return true;
+
+    const searchable = [
+      item.event_id,
+      item.source,
+      item.event_type,
+      item.severity,
+      item.message,
+      item.target,
+      item.alert_status,
+      item.mitre?.technique_id,
+      item.mitre?.technique_name,
+      item.mitre?.tactic,
+      item.detection?.rule_id,
+      item.detection?.rule_name,
+      item.detection?.group_value,
+      item.detection?.evidence,
+      item.mitre?.evidence,
+    ];
+
+    return searchable.some((value) =>
+      String(value ?? "").toLowerCase().includes(term)
+    );
+  });
+
+  // Group real persisted detections by rule and group value.
+  const correlationGroups = Object.values(
+    visibleAlerts.reduce((groups, item) => {
+      const ruleId =
+        item.detection?.rule_id || item.event_type || "UNCLASSIFIED";
+      const groupValue =
+        item.detection?.group_value || item.target || "Unknown group";
+      const key = `${ruleId}::${groupValue}`;
+
+      if (!groups[key]) {
+        groups[key] = {
+          key,
+          ruleId,
+          ruleName:
+            item.detection?.rule_name || item.message || item.event_type,
+          groupBy: item.detection?.group_by || "—",
+          groupValue,
+          records: [],
+        };
+      }
+
+      groups[key].records.push(item);
+      return groups;
+    }, {})
+  );
+
+  const severityStyle = {
+    CRITICAL: "border-red-500/40 bg-red-500/10 text-red-300",
+    HIGH: "border-orange-500/40 bg-orange-500/10 text-orange-300",
+    MEDIUM: "border-yellow-500/40 bg-yellow-500/10 text-yellow-300",
+    LOW: "border-blue-500/40 bg-blue-500/10 text-blue-300",
+    ERROR: "border-red-500/40 bg-red-500/10 text-red-300",
+    INFO: "border-white/10 bg-white/5 text-gray-300",
+  };
+
+  return (
+    <div className="space-y-6 text-white">
+      <div>
+        <p className="text-[10px] uppercase tracking-[0.3em] text-red-500">
+          Security Operations Center / Detection
+        </p>
+        <h1 className="mt-2 text-3xl font-bold">{config.title}</h1>
+        <p className="mt-2 text-sm text-gray-500">
+          {view === "alerts-tuning"
+            ? "Effective SIEM rule configuration loaded from the backend. Use Refresh rules to fetch the latest settings."
+            : "Live persisted detections from the SIEM backend. Refreshes every five seconds."}
+        </p>
+        {(view === "alerts-tuning" ? rulesLastUpdated : lastUpdated) && (
+          <p className="mt-2 text-xs text-gray-600">
+            Last updated:{" "}
+            {(view === "alerts-tuning" ? rulesLastUpdated : lastUpdated).toLocaleTimeString("en-IN", {
+              timeZone: "Asia/Kolkata",
+              hour12: false,
+            })}{" "}
+            IST
+          </p>
+        )}
+      </div>
+
+      {error && (
+        <div className="border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      {view === "alerts" && (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {[
+            ["Loaded detections", alerts.length, "Records retrieved, maximum 500"],
+            ["Active", activeCount, "Awaiting acknowledgement"],
+            ["Acknowledged", acknowledgedCount, "Being investigated"],
+            ["Critical severity", criticalCount, "Across loaded detections"],
+          ].map(([label, value, description]) => (
+            <div
+              key={label}
+              className="border border-white/10 bg-[#0d0d0d] p-5"
+            >
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">
+                {label}
+              </p>
+              <p className="mt-3 text-3xl font-bold">{loading ? "—" : value}</p>
+              <p className="mt-2 text-xs text-gray-600">{description}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {view === "alerts-tuning" && (
+        <section className="space-y-4">
+          <div className="flex flex-col gap-3 border border-white/10 bg-[#0d0d0d] p-5 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-sm font-semibold">Effective SIEM rule configuration</h2>
+              <p className="mt-2 text-xs leading-5 text-gray-500">
+                Values are loaded from the authenticated backend. Global rule
+                changes require administrator access.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setRulesReload((value) => value + 1)}
+              disabled={rulesLoading}
+              className="border border-white/15 px-4 py-2 text-xs text-gray-300 hover:border-red-500 disabled:opacity-50"
+            >
+              {rulesLoading ? "Loading..." : "Refresh rules"}
+            </button>
+          </div>
+
+          {rulesError && (
+            <div className="border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300">
+              {rulesError}
+            </div>
+          )}
+
+          {rulesLoading && ruleConfigs.length === 0 ? (
+            <div className="border border-white/10 p-6 text-sm text-gray-500">
+              Loading SIEM rules...
+            </div>
+          ) : !rulesError && ruleConfigs.length === 0 ? (
+            <div className="border border-white/10 p-6 text-sm text-gray-500">
+              No rule configuration was returned by the backend.
+            </div>
+          ) : ruleConfigs.length > 0 ? (
+            <div className="overflow-x-auto border border-white/10">
+              <table className="min-w-[1100px] w-full text-left text-xs">
+                <thead className="border-b border-white/10 bg-black/40 text-[9px] uppercase tracking-wider text-gray-500">
+                  <tr>
+                    {["Rule ID", "Detection rule", "Severity", "Threshold", "Window", "Group by", "Unique field", "Response", "Configuration", "Last updated"].map((heading) => (
+                      <th key={heading} className="px-4 py-3">{heading}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {ruleConfigs.map((rule) => (
+                    <tr key={rule.rule_id} className="align-top hover:bg-white/[0.02]">
+                      <td className="px-4 py-4 font-mono text-red-300">{rule.rule_id}</td>
+                      <td className="max-w-xs px-4 py-4">
+                        <p className="font-semibold text-gray-200">{rule.name}</p>
+                        <p className="mt-2 break-words text-[10px] text-gray-500">
+                          {(rule.event_types || []).join(", ")}
+                        </p>
+                      </td>
+                      <td className="px-4 py-4">{rule.severity || "—"}</td>
+                      <td className="px-4 py-4 tabular-nums">{rule.threshold}</td>
+                      <td className="px-4 py-4 tabular-nums">{rule.window_seconds}s</td>
+                      <td className="px-4 py-4">{rule.group_by || "—"}</td>
+                      <td className="px-4 py-4">
+                        {rule.unique_field
+                          ? `${rule.unique_field} (min ${rule.unique_threshold ?? 1})`
+                          : "—"}
+                      </td>
+                      <td className="px-4 py-4">{rule.response || "None"}</td>
+                      <td className="px-4 py-4">
+                        <span className={`border px-2 py-1 text-[10px] ${
+                          rule.is_configured
+                            ? "border-green-500/30 text-green-300"
+                            : "border-white/10 text-gray-400"
+                        }`}>
+                          {rule.is_configured ? "Customized" : "Default"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-4 text-gray-500">
+                        {rule.updated_at
+                          ? `${new Date(rule.updated_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} IST`
+                          : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </section>
+      )}
+
+
+
+      {view !== "alerts-tuning" && (
+      <div className="flex flex-col gap-3 border border-white/10 bg-[#0d0d0d] p-4 lg:flex-row">
+        <input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search rule, event, target, evidence, or MITRE..."
+          className="min-w-0 flex-1 border border-white/10 bg-black px-3 py-3 text-sm outline-none focus:border-red-500"
+        />
+        <select
+          value={config.severity || severity}
+          onChange={(event) => setSeverity(event.target.value)}
+          disabled={Boolean(config.severity)}
+          className="border border-white/10 bg-black px-3 py-3 text-sm"
+        >
+          <option value="ALL">All severities</option>
+          <option value="CRITICAL">Critical</option>
+          <option value="HIGH">High</option>
+          <option value="MEDIUM">Medium</option>
+          <option value="LOW">Low</option>
+          <option value="ERROR">Error</option>
+          <option value="INFO">Info</option>
+        </select>
+        <select
+          value={config.status || status}
+          onChange={(event) => setStatus(event.target.value)}
+          disabled={Boolean(config.status)}
+          className="border border-white/10 bg-black px-3 py-3 text-sm"
+        >
+          <option value="ALL">All statuses</option>
+          <option value="ACTIVE">Active</option>
+          <option value="ACKNOWLEDGED">Acknowledged</option>
+          <option value="RESOLVED">Resolved</option>
+          <option value="SUPPRESSED">Suppressed</option>
+        </select>
+      </div>
+        )}
+
+      {view === "alerts-correlation" && (
+        <section className="space-y-4">
+          <div className="border border-white/10 bg-[#0d0d0d] p-4">
+            <h2 className="text-sm font-semibold">Correlation groups</h2>
+            <p className="mt-2 text-xs leading-5 text-gray-500">
+              Detections are grouped by their stored rule and group value.
+              Each record includes the actual threshold, time window and
+              supporting evidence saved by the SIEM.
+            </p>
+          </div>
+
+          {loading && alerts.length === 0 ? (
+            <div className="border border-white/10 p-6 text-sm text-gray-500">
+              Loading correlation data...
+            </div>
+          ) : correlationGroups.length === 0 ? (
+            <div className="border border-white/10 p-6 text-sm text-gray-500">
+              No detections match the current search and filters.
+            </div>
+          ) : (
+            correlationGroups.map((group) => (
+              <article
+                key={group.key}
+                className="border border-white/10 bg-[#0d0d0d] p-5"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <span className="border border-red-500/30 px-2 py-1 font-mono text-[10px] text-red-300">
+                      {group.ruleId}
+                    </span>
+                    <h2 className="mt-3 text-base font-semibold">
+                      {group.ruleName}
+                    </h2>
+                    <p className="mt-2 text-xs text-gray-500">
+                      Grouped by {group.groupBy}: {group.groupValue}
+                    </p>
+                  </div>
+                  <span className="border border-white/10 px-2 py-1 text-xs text-gray-400">
+                    {group.records.length} stored detection record(s)
+                  </span>
+                </div>
+
+                <div className="mt-4 space-y-3">
+                  {group.records.map((record) => (
+                    <div
+                      key={record.event_id || record.id}
+                      className="border border-white/10 bg-black/30 p-4"
+                    >
+                      <div className="flex flex-wrap gap-3 text-xs">
+                        <span>{String(record.severity || "INFO").toUpperCase()}</span>
+                        <span className="text-gray-500">
+                          {record.alert_status || "ACTIVE"}
+                        </span>
+                        <span className="text-gray-500">
+                          {record.timestamp
+                            ? `${new Date(record.timestamp).toLocaleString("en-IN", {
+                                timeZone: "Asia/Kolkata",
+                              })} IST`
+                            : "—"}
+                        </span>
+                      </div>
+
+                      <p className="mt-3 break-words text-xs leading-5 text-gray-300">
+                        {record.message || "No detection message stored."}
+                      </p>
+
+                      <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                        {[
+                          ["Matching events", record.detection?.event_count],
+                          ["Threshold", record.detection?.threshold],
+                          ["Window (seconds)", record.detection?.window_seconds],
+                        ].map(([label, value]) => (
+                          <div key={label} className="border border-white/5 p-3">
+                            <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                              {label}
+                            </p>
+                            <p className="mt-2 text-xs text-gray-300">
+                              {value ?? "—"}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+
+                      {(record.detection?.evidence || record.mitre?.evidence) && (
+                        <details className="mt-3 border border-white/10 p-3">
+                          <summary className="cursor-pointer text-xs text-gray-400">
+                            View supporting evidence
+                          </summary>
+                          <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-gray-500">
+                            {record.detection?.evidence || record.mitre?.evidence}
+                          </pre>
+                        </details>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </article>
+            ))
+          )}
+        </section>
+      )}
+
+      {view !== "alerts-correlation" && view !== "alerts-tuning" && (loading && alerts.length === 0 ? (
+        <div className="border border-white/10 p-8 text-sm text-gray-500">
+          Loading alerts from the backend...
+        </div>
+      ) : visibleAlerts.length === 0 ? (
+        <div className="border border-white/10 bg-[#0d0d0d] p-8 text-center">
+          <h2 className="text-lg font-semibold">No matching alerts</h2>
+          <p className="mt-2 text-sm text-gray-500">
+            No persisted detections matched the current search and filters.
+            Suppression is displayed as a filter; a suppression workflow has
+            not been implemented yet.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {visibleAlerts.map((item) => {
+            const currentStatus = String(
+              item.alert_status || "ACTIVE"
+            ).toUpperCase();
+            const itemSeverity = String(item.severity || "INFO").toUpperCase();
+            const detectionEvidence =
+              item.detection?.evidence || item.mitre?.evidence;
+
+            return (
+              <article
+                key={item.event_id || item.id}
+                className="border border-white/10 bg-[#0d0d0d] p-5"
+              >
+                <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`border px-2 py-1 text-[10px] font-bold ${severityStyle[itemSeverity] || severityStyle.INFO}`}
+                      >
+                        {itemSeverity}
+                      </span>
+                      <span className="border border-white/10 px-2 py-1 text-[10px] text-gray-400">
+                        {currentStatus}
+                      </span>
+                      {item.detection?.rule_id && (
+                        <span className="border border-white/10 px-2 py-1 font-mono text-[10px] text-red-300">
+                          {item.detection.rule_id}
+                        </span>
+                      )}
+                    </div>
+
+                    <h2 className="mt-3 break-words text-base font-semibold">
+                      {item.detection?.rule_name || item.message || item.event_type}
+                    </h2>
+                    <p className="mt-2 break-words text-xs leading-5 text-gray-400">
+                      {item.message || "No event message available."}
+                    </p>
+
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                      {[
+                        ["Source", item.source],
+                        ["Event type", item.event_type],
+                        ["Target", item.target],
+                        [
+                          "Timestamp (IST)",
+                          item.timestamp
+                            ? `${new Date(item.timestamp).toLocaleString("en-IN", {
+                                timeZone: "Asia/Kolkata",
+                              })} IST`
+                            : "—",
+                        ],
+                        ["MITRE technique", item.mitre?.technique_id],
+                        ["Technique name", item.mitre?.technique_name],
+                        ["Tactic", item.mitre?.tactic],
+                        ["Confidence", item.mitre?.confidence],
+                        ["Group", item.detection?.group_value],
+                        ["Threshold", item.detection?.threshold],
+                        ["Window (seconds)", item.detection?.window_seconds],
+                        ["Matching events", item.detection?.event_count],
+                      ].map(([label, value]) => (
+                        <div
+                          key={label}
+                          className="min-w-0 border border-white/5 bg-black/30 p-3"
+                        >
+                          <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                            {label}
+                          </p>
+                          <p className="mt-2 break-words text-xs text-gray-300">
+                            {value ?? "—"}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+
+                    {detectionEvidence && (
+                      <details className="mt-4 border border-white/10 bg-black/30 p-3">
+                        <summary className="cursor-pointer text-xs font-semibold text-gray-300">
+                          View detection evidence
+                        </summary>
+                        <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-gray-400">
+                          {typeof detectionEvidence === "string"
+                            ? detectionEvidence
+                            : JSON.stringify(detectionEvidence, null, 2)}
+                        </pre>
+                      </details>
+                    )}
+                  </div>
+
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                    {currentStatus === "ACTIVE" && (
+                      <button
+                        type="button"
+                        disabled={updatingId === item.event_id}
+                        onClick={() => changeAlertStatus(item, "acknowledge")}
+                        className="border border-yellow-500/30 px-3 py-2 text-xs text-yellow-300 hover:bg-yellow-500/10 disabled:opacity-50"
+                      >
+                        {updatingId === item.event_id
+                          ? "Updating..."
+                          : "Acknowledge"}
+                      </button>
+                    )}
+                    {currentStatus === "ACTIVE" && (
+                      <button
+                        type="button"
+                        disabled={updatingId === item.event_id}
+                        onClick={() => changeAlertStatus(item, "suppress")}
+                        className="border border-red-500/30 px-3 py-2 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-50"
+                      >
+                        {updatingId === item.event_id ? "Updating..." : "Suppress"}
+                      </button>
+                    )}
+                    {currentStatus === "SUPPRESSED" && (
+                      <button
+                        type="button"
+                        disabled={updatingId === item.event_id}
+                        onClick={() => changeAlertStatus(item, "unsuppress")}
+                        className="border border-blue-500/30 px-3 py-2 text-xs text-blue-300 hover:bg-blue-500/10 disabled:opacity-50"
+                      >
+                        {updatingId === item.event_id ? "Updating..." : "Reactivate"}
+                      </button>
+                    )}
+                    {currentStatus === "ACKNOWLEDGED" && (
+                      <button
+                        type="button"
+                        disabled={updatingId === item.event_id}
+                        onClick={() => changeAlertStatus(item, "resolve")}
+                        className="border border-green-500/30 px-3 py-2 text-xs text-green-300 hover:bg-green-500/10 disabled:opacity-50"
+                      >
+                        {updatingId === item.event_id
+                          ? "Updating..."
+                          : "Resolve"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ))}
+
+      <p className="text-xs text-gray-600">
+        Showing {visibleAlerts.length} of {alerts.length} detections currently
+        loaded from the backend.
+      </p>
     </div>
   );
 }

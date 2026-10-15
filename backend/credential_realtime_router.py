@@ -8,6 +8,9 @@ import shutil
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
+
+from vapt import is_private_or_reserved_host
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -83,17 +86,43 @@ class HydraRequest(BaseModel):
     extra_options: list[str] = Field(default_factory=list, max_length=10)
 
 
-def _validate_hydra_request(request: HydraRequest) -> str:
+def _validate_hydra_request(request: HydraRequest) -> tuple[str, bool]:
     target = request.target.strip()
+    use_ssl = False
 
-    if not _is_lab_target(target):
-        raise ValueError(
-            "Hydra target must be localhost or a private/link-local lab target."
-        )
+    if "://" in target:
+        parsed = urlparse(target)
+
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Enter a valid HTTP/HTTPS target URL.")
+
+        hostname = parsed.hostname
+        use_ssl = parsed.scheme.lower() == "https"
+
+        if is_private_or_reserved_host(hostname):
+            raise ValueError(
+                "Hydra target resolves to a private, local, link-local, reserved, or multicast address."
+            )
+
+        request.target = hostname
+
+        if request.port is None:
+            request.port = parsed.port or (
+                443 if parsed.scheme.lower() == "https" else 80
+            )
+    else:
+        if not target:
+            raise ValueError("Hydra target cannot be empty.")
+
+        if is_private_or_reserved_host(target):
+            raise ValueError(
+                "Hydra target resolves to a private, local, link-local, reserved, or multicast address."
+            )
+
+        request.target = target
 
     service = request.service.strip().lower()
 
-    # Explicit allowlist of common lab authentication services.
     allowed_services = {
         "ssh",
         "ftp",
@@ -113,14 +142,14 @@ def _validate_hydra_request(request: HydraRequest) -> str:
         "Password wordlist",
     )
 
-    return password_list
+    return password_list, use_ssl
 
 
 async def _run_hydra(job_id: str, request: HydraRequest):
     job = HYDRA_JOBS[job_id]
 
     try:
-        password_list = _validate_hydra_request(request)
+        password_list, use_ssl = _validate_hydra_request(request)
 
         executable = shutil.which("hydra")
         if not executable:
@@ -135,6 +164,9 @@ async def _run_hydra(job_id: str, request: HydraRequest):
             "-t",
             "4",
         ]
+
+        if use_ssl:
+            command.append("-S")
 
         if request.port:
             command.extend(["-s", str(request.port)])

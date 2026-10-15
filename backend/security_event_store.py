@@ -1,17 +1,17 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from models import SecurityEvent
 
 
 def parse_event_timestamp(timestamp):
     if not timestamp:
-        return datetime.utcnow()
+        return datetime.now(timezone.utc).replace(tzinfo=None)
 
     parsed = datetime.fromisoformat(timestamp)
 
     if parsed.tzinfo is not None:
-        parsed = parsed.replace(tzinfo=None)
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
 
     return parsed
 

@@ -1,0 +1,22 @@
+title: Linux Failed SSH Authentication
+id: 18d92736-e9f4-4e14-8a27-5d0f3b1a1001
+status: test
+description: Detects Linux authentication log messages associated with failed SSH password authentication.
+author: SOC Platform
+date: 2026-10-12
+logsource:
+  product: linux
+  service: auth
+detection:
+  selection:
+    message|contains:
+      - 'Failed password'
+      - 'authentication failure'
+  condition: selection
+falsepositives:
+  - Users entering an incorrect password
+  - Authorized security testing
+level: medium
+tags:
+  - attack.credential_access
+  - attack.t1110

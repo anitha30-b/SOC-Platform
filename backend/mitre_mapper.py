@@ -151,6 +151,56 @@ def map_security_event(
         )
     ).lower()
 
+    event_type = str(event.get("event_type", "")).lower()
+    raw_event = event.get("raw_event")
+
+    if (
+        event_type == "dns_detection"
+        and isinstance(raw_event, dict)
+        and raw_event.get("rule") == "DNS-001"
+    ):
+        mapping = build_mapping(
+            "T1071.004",
+            event,
+            confidence="low",
+        )
+        if mapping:
+            evidence_items = raw_event.get("evidence")
+            if not isinstance(evidence_items, list):
+                evidence_items = []
+
+            query_names = sorted({
+                str(item.get("dns_query_name", "")).lower().rstrip(".")
+                for item in evidence_items
+                if isinstance(item, dict) and item.get("dns_query_name")
+            })
+
+            threshold = raw_event.get("threshold", 30)
+            window_seconds = raw_event.get("window_seconds", 60)
+            mapping["mapping_source"] = "heuristic_dns_burst"
+            mapping["mapping_reason"] = (
+                "A burst of unique DNS names is a heuristic signal "
+                "requiring investigation; it does not prove command-and-control."
+            )
+
+            evidence_text = (
+                f"DNS-001 correlated {len(evidence_items)} DNS events "
+                f"within {window_seconds} seconds (threshold: {threshold})."
+            )
+            if query_names:
+                evidence_text += (
+                    " Sample query names: "
+                    + ", ".join(query_names[:3])
+                    + "."
+                )
+            evidence_text += (
+                " Low-confidence heuristic; not proof of command-and-control."
+            )
+            mapping["evidence"] = evidence_text
+            mappings.append(mapping)
+
+        return mappings
+
     if source == "systemd-journald":
 
         if "failed password" in message:

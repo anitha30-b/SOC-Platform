@@ -6,6 +6,8 @@ import shutil
 import time
 import uuid
 from urllib.parse import urlparse
+
+from vapt import is_private_or_reserved_host
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -21,19 +23,6 @@ METASPLOIT_JOBS: dict[str, dict[str, Any]] = {}
 
 def _now() -> float:
     return time.time()
-
-
-def _is_lab_target(target: str) -> bool:
-    target = target.strip()
-
-    if target in {"localhost", "127.0.0.1", "::1"}:
-        return True
-
-    try:
-        ip = ipaddress.ip_address(target)
-        return ip.is_private or ip.is_loopback or ip.is_link_local
-    except ValueError:
-        return target.endswith((".local", ".lab", ".test"))
 
 
 def _validate_module(module: str) -> str:
@@ -82,9 +71,9 @@ def _validate_request(request: MetasploitRequest):
         target_path = parsed.path or "/"
         use_ssl = parsed.scheme == "https"
 
-        if not _is_lab_target(hostname):
+        if is_private_or_reserved_host(hostname):
             raise ValueError(
-                "Metasploit target must be localhost or a private/link-local lab target."
+                "Metasploit target resolves to a private, local, link-local, reserved, or multicast address."
             )
 
         if request.port is None:
@@ -94,9 +83,9 @@ def _validate_request(request: MetasploitRequest):
         module = _validate_module(request.module)
         return hostname, module, target_path, use_ssl
     else:
-        if not _is_lab_target(target):
+        if is_private_or_reserved_host(target):
             raise ValueError(
-                "Metasploit target must be localhost or a private/link-local lab target."
+                "Metasploit target resolves to a private, local, link-local, reserved, or multicast address."
             )
 
         request.target = target
@@ -210,6 +199,9 @@ async def _run_metasploit(
                     )
 
                 continue
+
+            if not line:
+                break
 
             if line:
                 text = line.decode(

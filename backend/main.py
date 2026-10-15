@@ -44,12 +44,16 @@ from mitre_router import router as mitre_router
 
 # SOC Security Events
 from security_events_router import router as security_events_router
+from ioc_router import router as ioc_router
+from sigma_router import router as sigma_router
+from siem_correlation_engine import load_persistent_rule_configs
 
 # SOC Real-Time Events
 from realtime_router import router as realtime_router
 
 # SOC PostgreSQL Real-Time Event Listener
 from postgres_event_listener import postgres_event_listener
+from realtime_journal_listener import start_listener as start_realtime_journal_listener
 from admin_notifications_router import router as admin_notifications_router
 from user_notifications_router import router as user_notifications_router
 from user_notifications_realtime_router import router as user_notifications_realtime_router
@@ -85,7 +89,30 @@ app = FastAPI(
 
 @app.on_event("startup")
 def start_postgres_event_listener():
+    try:
+        loaded = load_persistent_rule_configs()
+        print(f"[SOC SIEM] Loaded {loaded} persistent rule configuration(s).", flush=True)
+    except Exception as exc:
+        print(f"[SOC SIEM] Rule config load failed; using in-code defaults: {exc}", flush=True)
+
+    from siem_response import ensure_firewall_chain
+
+    try:
+        firewall_status = ensure_firewall_chain()
+        if firewall_status["success"]:
+            print("[SOC SIEM] Firewall response chain ready.", flush=True)
+        else:
+            print(
+                "[SOC SIEM] Firewall response unavailable: "
+                f"{firewall_status.get('reason', 'unknown error')}",
+                flush=True,
+            )
+    except Exception as exc:
+        # Firewall setup failure must not prevent the SOC listeners from starting.
+        print(f"[SOC SIEM] Firewall setup error: {exc}", flush=True)
+
     postgres_event_listener.start()
+    start_realtime_journal_listener()
 
 
 # ============================================================
@@ -184,6 +211,8 @@ app.include_router(mitre_router)
 
 # SOC Security Events
 app.include_router(security_events_router)
+app.include_router(ioc_router)
+app.include_router(sigma_router)
 
 # SOC Real-Time Events
 app.include_router(realtime_router)

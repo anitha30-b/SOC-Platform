@@ -1266,3 +1266,161 @@ def update_security_finding_status(
     db.refresh(finding)
 
     return finding
+# ============================================================
+# VAPT ANALYTICS - FINDINGS BY SEVERITY
+# ============================================================
+
+@router.get("/stats/by-severity")
+def get_findings_by_severity(
+    assessment_id: Optional[int] = Query(default=None),
+    current_user: User = Depends(require_role(1)),
+    db: Session = Depends(get_db),
+):
+    """
+    Return real SecurityFinding counts grouped by severity
+    for VAPT tools belonging to the authenticated user.
+    """
+
+    vapt_tools = [
+        "Nmap",
+        "Nikto",
+        "Nuclei",
+        "OWASP ZAP",
+        "Masscan",
+        "hping3",
+        "Tshark",
+        "Wireshark",
+        "Snort",
+        "Hydra",
+        "John the Ripper",
+        "Metasploit",
+        "DNS Recon",
+        "dig",
+        "nslookup",
+        "Ping",
+        "WHOIS",
+    ]
+
+    query = (
+        db.query(
+            SecurityFinding.severity,
+            func.count(SecurityFinding.id).label("finding_count"),
+        )
+        .filter(
+            SecurityFinding.user_id == current_user.id,
+            SecurityFinding.tool_name.in_(vapt_tools),
+        )
+    )
+
+    if assessment_id is not None:
+        query = query.filter(
+            SecurityFinding.assessment_id == assessment_id
+        )
+
+    rows = (
+        query
+        .group_by(SecurityFinding.severity)
+        .all()
+    )
+
+    severity_order = [
+        "CRITICAL",
+        "HIGH",
+        "MEDIUM",
+        "LOW",
+        "NONE",
+    ]
+
+    counts = {
+        str(severity).upper(): int(count)
+        for severity, count in rows
+        if severity
+    }
+
+    return {
+        "assessment_id": assessment_id,
+        "severities": [
+            {
+                "severity": severity,
+                "findings": counts.get(severity, 0),
+            }
+            for severity in severity_order
+        ],
+        "total_findings": sum(counts.values()),
+    }
+
+
+# ============================================================
+# VAPT ANALYTICS - FINDINGS BY TOOL
+# ============================================================
+
+@router.get("/stats/by-tool")
+def get_findings_by_tool(
+    assessment_id: Optional[int] = Query(default=None),
+    current_user: User = Depends(require_role(1)),
+    db: Session = Depends(get_db),
+):
+    """
+    Return real SecurityFinding counts grouped by VAPT tool
+    for the authenticated user.
+    """
+
+    vapt_tools = [
+        "Nmap",
+        "Nikto",
+        "Nuclei",
+        "OWASP ZAP",
+        "Masscan",
+        "hping3",
+        "Tshark",
+        "Wireshark",
+        "Snort",
+        "Hydra",
+        "John the Ripper",
+        "Metasploit",
+        "DNS Recon",
+        "dig",
+        "nslookup",
+        "Ping",
+        "WHOIS",
+    ]
+
+    query = (
+        db.query(
+            SecurityFinding.tool_name,
+            func.count(SecurityFinding.id).label("finding_count"),
+        )
+        .filter(
+            SecurityFinding.user_id == current_user.id,
+            SecurityFinding.tool_name.in_(vapt_tools),
+        )
+    )
+
+    if assessment_id is not None:
+        query = query.filter(
+            SecurityFinding.assessment_id == assessment_id
+        )
+
+    rows = (
+        query
+        .group_by(SecurityFinding.tool_name)
+        .order_by(
+            func.count(SecurityFinding.id).desc()
+        )
+        .all()
+    )
+
+    return {
+        "assessment_id": assessment_id,
+        "tools": [
+            {
+                "tool": tool_name or "Unknown",
+                "findings": int(finding_count),
+            }
+            for tool_name, finding_count in rows
+        ],
+        "total_findings": sum(
+            int(finding_count)
+            for _, finding_count in rows
+        ),
+    }

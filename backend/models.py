@@ -1748,6 +1748,52 @@ class SecurityEvent(Base):
 
 
 # ============================================================
+# SIEM RULE CONFIGURATION
+# ============================================================
+
+class SIEMRuleConfig(Base):
+    """Persist validated tuning overrides for existing SIEM rules."""
+
+    __tablename__ = "siem_rule_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rule_id = Column(String(50), unique=True, nullable=False, index=True)
+    threshold = Column(Integer, nullable=False)
+    window_seconds = Column(Integer, nullable=False)
+    updated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+
+class IOCIndicator(Base):
+    """Persisted IOC registry used by the Detection module."""
+
+    __tablename__ = "ioc_indicators"
+    __table_args__ = (
+        UniqueConstraint(
+            "client_id", "indicator_type", "value",
+            name="uq_ioc_client_type_value",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    indicator_type = Column(String(20), nullable=False, index=True)
+    value = Column(String(2048), nullable=False)
+    description = Column(Text, nullable=True)
+    source = Column(String(255), nullable=True)
+    severity = Column(String(20), nullable=False, default="MEDIUM")
+    confidence = Column(Integer, nullable=False, default=50)
+    enabled = Column(Boolean, nullable=False, default=True, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=True, index=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+# ============================================================
 # NOTIFICATION POLICY
 # ============================================================
 
