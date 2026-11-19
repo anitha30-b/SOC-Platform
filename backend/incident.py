@@ -2,11 +2,16 @@ import json
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    Column, DateTime, ForeignKey, Integer, String, Text,
+    UniqueConstraint, text,
+)
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from database import Base, engine, get_db
-from models import SecurityEvent
+from database import Base, SessionLocal, engine, get_db
+from models import SecurityEvent, AlertResult
+from rbac import require_role
 
 
 # ==================================================
@@ -118,6 +123,40 @@ class Incident(Base):
     )
 
 
+class IncidentAlertLink(Base):
+    __tablename__ = "incident_alert_links"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "incident_id",
+            "alert_result_id",
+            name="uq_incident_alert_link",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    incident_id = Column(
+        Integer,
+        ForeignKey("incidents.id"),
+        nullable=False,
+        index=True,
+    )
+
+    alert_result_id = Column(
+        Integer,
+        ForeignKey("alert_results.id"),
+        nullable=False,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+    )
+
+
 # ==================================================
 # CREATE ONLY THE NEW INCIDENT TABLE
 # ==================================================
@@ -127,6 +166,155 @@ Incident.__table__.create(
     checkfirst=True,
 )
 
+IncidentAlertLink.__table__.create(
+    bind=engine,
+    checkfirst=True,
+)
+
+# Ensure only one persistent incident exists per security event.
+with engine.begin() as connection:
+    connection.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS
+        uq_incidents_security_event_id_not_null
+        ON incidents (security_event_id)
+        WHERE security_event_id IS NOT NULL
+    """))
+
+
+def create_incidents_for_event(event_payload):
+    """
+    Create one persistent incident for qualifying alerts
+    belonging to a committed security event.
+
+    Multiple qualifying alerts for the same event are linked
+    to the same incident.
+    """
+    event_ref = event_payload.get("event_id")
+
+    if not event_ref:
+        return {"created": 0, "linked": 0, "incident_id": None}
+
+    db = SessionLocal()
+
+    try:
+        event = (
+            db.query(SecurityEvent)
+            .filter(SecurityEvent.event_id == event_ref)
+            .with_for_update()
+            .first()
+        )
+
+        if not event:
+            return {"created": 0, "linked": 0, "incident_id": None}
+
+        qualifying_alerts = (
+            db.query(AlertResult)
+            .filter(
+                AlertResult.security_event_id == event.id,
+                AlertResult.severity.in_(
+                    ["ERROR", "HIGH", "CRITICAL"]
+                ),
+            )
+            .order_by(AlertResult.id.asc())
+            .all()
+        )
+
+        if not qualifying_alerts:
+            return {"created": 0, "linked": 0, "incident_id": None}
+
+        case = (
+            db.query(Incident)
+            .filter(Incident.security_event_id == event.id)
+            .first()
+        )
+
+        created = 0
+
+        if case is None:
+            first_alert = qualifying_alerts[0]
+
+            case = Incident(
+                incident_id=f"INC-{event.id:06d}",
+                security_event_id=event.id,
+                source_event_id=event.event_id,
+                title=f"{first_alert.alert_name}: {event.message}"[:500],
+                description=(
+                    f"Automatically created from alert "
+                    f"{first_alert.alert_name}. "
+                    f"Priority: {first_alert.priority}. "
+                    f"Original event: {event.message}"
+                ),
+                severity=first_alert.severity,
+                status="OPEN",
+            )
+
+            db.add(case)
+            db.flush()
+            created = 1
+
+        linked = 0
+
+        for alert in qualifying_alerts:
+            existing_link = (
+                db.query(IncidentAlertLink)
+                .filter(
+                    IncidentAlertLink.incident_id == case.id,
+                    IncidentAlertLink.alert_result_id == alert.id,
+                )
+                .first()
+            )
+
+            if existing_link:
+                continue
+
+            db.add(
+                IncidentAlertLink(
+                    incident_id=case.id,
+                    alert_result_id=alert.id,
+                )
+            )
+            linked += 1
+
+        db.commit()
+
+        return {
+            "created": created,
+            "linked": linked,
+            "incident_id": case.incident_id,
+        }
+
+    except IntegrityError:
+        db.rollback()
+
+        # Another worker may have created the incident concurrently.
+        existing = (
+            db.query(Incident)
+            .filter(Incident.security_event_id.isnot(None))
+            .filter(
+                Incident.security_event_id
+                == db.query(SecurityEvent.id)
+                .filter(SecurityEvent.event_id == event_ref)
+                .scalar_subquery()
+            )
+            .first()
+        )
+
+        if existing:
+            return {
+                "created": 0,
+                "linked": 0,
+                "incident_id": existing.incident_id,
+            }
+
+        raise
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        db.close()
+
 
 # ==================================================
 # ROUTER
@@ -135,6 +323,7 @@ Incident.__table__.create(
 router = APIRouter(
     prefix="/incidents",
     tags=["Incidents"],
+    dependencies=[Depends(require_role(3))],
 )
 
 
@@ -278,28 +467,61 @@ def serialize_case(case: Incident):
 def get_incidents(
     db: Session = Depends(get_db),
 ):
-    events = (
-        db.query(SecurityEvent)
-        .filter(
-            SecurityEvent.mitre_technique_id.isnot(None),
-            SecurityEvent.severity.in_(
-                [
-                    "ERROR",
-                    "HIGH",
-                    "CRITICAL",
-                ]
-            ),
+    rows = (
+        db.query(Incident, SecurityEvent)
+        .outerjoin(
+            SecurityEvent,
+            Incident.security_event_id == SecurityEvent.id,
         )
-        .order_by(
-            SecurityEvent.timestamp.desc()
-        )
+        .order_by(Incident.created_at.desc())
         .all()
     )
 
-    incidents = [
-        serialize_security_event_incident(event)
-        for event in events
-    ]
+    incidents = []
+
+    for case, event in rows:
+        if event:
+            item = serialize_security_event_incident(event)
+        else:
+            item = {
+                "source": None,
+                "event_type": None,
+                "target": None,
+                "timestamp": None,
+                "assessment_id": None,
+                "mitre": {
+                    "technique_id": None,
+                    "technique_name": None,
+                    "tactic": None,
+                    "confidence": None,
+                    "mapping_source": None,
+                    "evidence": None,
+                },
+                "correlation": None,
+                "detection": None,
+                "raw_event": None,
+            }
+
+        item.update({
+            "incident_id": case.incident_id,
+            "database_id": case.id,
+            "security_event_id": case.security_event_id,
+            "source_event_id": case.source_event_id,
+            "title": case.title,
+            "severity": case.severity,
+            "status": case.status,
+            "assigned_to": case.assigned_to,
+            "created_at": (
+                case.created_at.isoformat()
+                if case.created_at else None
+            ),
+            "case": serialize_case(case),
+        })
+
+        if not item.get("timestamp"):
+            item["timestamp"] = item["created_at"]
+
+        incidents.append(item)
 
     return {
         "count": len(incidents),
@@ -307,7 +529,6 @@ def get_incidents(
     }
 
 
-# ==================================================
 # CREATE PERSISTENT INCIDENT CASE FROM SECURITY EVENT
 # ==================================================
 
@@ -784,62 +1005,67 @@ def get_incident(
     incident_id: str,
     db: Session = Depends(get_db),
 ):
-    if not incident_id.startswith("INC-"):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid incident ID.",
-        )
-
-    try:
-        event_id = int(
-            incident_id.replace(
-                "INC-",
-                "",
-                1,
-            )
-        )
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid incident ID.",
-        )
-
-    event = (
-        db.query(SecurityEvent)
-        .filter(
-            SecurityEvent.id == event_id,
-            SecurityEvent.mitre_technique_id.isnot(None),
-            SecurityEvent.severity.in_(
-                [
-                    "ERROR",
-                    "HIGH",
-                    "CRITICAL",
-                ]
-            ),
-        )
+    case = (
+        db.query(Incident)
+        .filter(Incident.incident_id == incident_id)
         .first()
     )
 
-    if not event:
+    if not case:
         raise HTTPException(
             status_code=404,
-            detail="Incident not found.",
+            detail="Persistent incident case not found.",
         )
 
-    response = serialize_security_event_incident(event)
+    event = None
 
-    persistent_case = (
-        db.query(Incident)
-        .filter(
-            Incident.security_event_id == event.id
+    if case.security_event_id is not None:
+        event = (
+            db.query(SecurityEvent)
+            .filter(SecurityEvent.id == case.security_event_id)
+            .first()
         )
-        .first()
-    )
 
-    response["case"] = (
-        serialize_case(persistent_case)
-        if persistent_case
-        else None
-    )
+    if event:
+        response = serialize_security_event_incident(event)
+    else:
+        response = {
+            "source": None,
+            "event_type": None,
+            "target": None,
+            "timestamp": None,
+            "assessment_id": None,
+            "mitre": {
+                "technique_id": None,
+                "technique_name": None,
+                "tactic": None,
+                "confidence": None,
+                "mapping_source": None,
+                "evidence": None,
+            },
+            "correlation": None,
+            "detection": None,
+            "raw_event": None,
+        }
+
+    response.update({
+        "incident_id": case.incident_id,
+        "database_id": case.id,
+        "security_event_id": case.security_event_id,
+        "source_event_id": case.source_event_id,
+        "title": case.title,
+        "severity": case.severity,
+        "status": case.status,
+        "assigned_to": case.assigned_to,
+        "created_at": (
+            case.created_at.isoformat()
+            if case.created_at else None
+        ),
+        "case": serialize_case(case),
+    })
+
+    if not response.get("timestamp"):
+        response["timestamp"] = response["created_at"]
 
     return response
+

@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -6,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from models import SecurityEvent
-from rbac import require_role
+from rbac import get_current_user
 
 
 router = APIRouter(
@@ -15,7 +16,31 @@ router = APIRouter(
 )
 
 
+
+
+def require_security_event_access(
+    current_user=Depends(get_current_user),
+):
+    """
+    Global SOC security events are restricted to Analysts and Admins.
+    Client access must be scoped separately to client-owned data.
+    """
+    if current_user.role_id not in (2, 3):
+        raise HTTPException(
+            status_code=403,
+            detail="Analyst or Admin access required.",
+        )
+    return current_user
+
 def serialize_event(event):
+    try:
+        raw_event = json.loads(event.raw_event or "{}")
+    except (TypeError, ValueError):
+        raw_event = {}
+
+    if not isinstance(raw_event, dict):
+        raw_event = {}
+
     return {
         "id": event.id,
         "event_id": event.event_id,
@@ -70,6 +95,14 @@ def serialize_event(event):
             if event.created_at
             else None
         ),
+
+        # Snort packet evidence and scan correlation metadata
+        "raw_event": raw_event if event.source == "snort" else None,
+        "correlation": (
+            raw_event.get("correlation")
+            if event.source == "snort"
+            else None
+        ),
     }
 
 
@@ -80,7 +113,7 @@ def get_security_events(
     source: str | None = Query(None),
     mitre_technique: str | None = Query(None),
     db: Session = Depends(get_db),
-    current_user=Depends(require_role(1)),
+    current_user=Depends(require_security_event_access),
 ):
     query = db.query(SecurityEvent)
 
@@ -117,7 +150,7 @@ def get_security_events(
 def get_mitre_technique_stats(
     limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
-    current_user=Depends(require_role(1)),
+    current_user=Depends(require_security_event_access),
 ):
     rows = (
         db.query(
@@ -162,7 +195,7 @@ def get_mitre_technique_stats(
 def get_mitre_tactic_stats(
     limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
-    current_user=Depends(require_role(1)),
+    current_user=Depends(require_security_event_access),
 ):
     rows = (
         db.query(
@@ -201,7 +234,7 @@ def get_mitre_tactic_stats(
 def get_recent_mitre_events(
     limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
-    current_user=Depends(require_role(1)),
+    current_user=Depends(require_security_event_access),
 ):
     events = (
         db.query(SecurityEvent)
@@ -228,7 +261,7 @@ def get_recent_mitre_events(
 def get_active_mitre_alerts(
     limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
-    current_user=Depends(require_role(1)),
+    current_user=Depends(require_security_event_access),
 ):
     events = (
         db.query(SecurityEvent)
@@ -259,7 +292,7 @@ def get_active_mitre_alerts(
 def acknowledge_security_event(
     event_id: str,
     db: Session = Depends(get_db),
-    current_user=Depends(require_role(1)),
+    current_user=Depends(require_security_event_access),
 ):
     event = (
         db.query(SecurityEvent)
@@ -299,7 +332,7 @@ def acknowledge_security_event(
 def resolve_security_event(
     event_id: str,
     db: Session = Depends(get_db),
-    current_user=Depends(require_role(1)),
+    current_user=Depends(require_security_event_access),
 ):
     event = (
         db.query(SecurityEvent)

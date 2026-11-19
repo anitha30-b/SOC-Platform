@@ -335,6 +335,11 @@ class UserToolPermissionsUpdate(BaseModel):
         default_factory=list
     )
 
+class RoleToolPermissionsUpdate(BaseModel):
+    permissions: list[ToolPermissionItem] = Field(
+        default_factory=list
+    )
+
 
 class UserToolPermissionDetail(BaseModel):
     user_id: int
@@ -347,6 +352,7 @@ class UserToolPermissionDetail(BaseModel):
     tool_type: str
     tool_enabled: bool
     allowed: bool
+    permission_state: str
 
 
 class UserToolPermissionCheckResponse(BaseModel):

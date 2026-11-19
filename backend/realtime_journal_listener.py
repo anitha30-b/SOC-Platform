@@ -101,7 +101,7 @@ def notify_security_event(event):
     )
 
     connection = psycopg2.connect(
-        DATABASE_URL
+        DATABASE_URL.replace("postgresql+psycopg2://", "postgresql://", 1)
     )
 
     try:

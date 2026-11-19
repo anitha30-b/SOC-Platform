@@ -10,6 +10,13 @@ from typing import Dict, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from database import SessionLocal
+from models import SecurityEvent
+from mitre_mapper import map_security_event
+from security_event_store import store_security_event
+from security_events import create_security_event, generate_event_id
+
+
 router = APIRouter(prefix="/vapt/network", tags=["Real-Time Network Analysis"])
 
 TSHARK_JOBS: Dict[str, dict] = {}
@@ -146,6 +153,16 @@ async def _run_snort(job_id: str, request: SnortRequest):
     job["command"] = " ".join(cmd)
     job["status"] = "running"
     job["stage"] = "Monitoring traffic"
+    job["alert_count"] = 0
+    job["stored_events"] = 0
+    job["duplicate_events"] = 0
+    job["live_alerts"] = []
+    job["output"] = []
+
+    process = None
+    stderr_task = None
+    output_lines = []
+    cancelled = False
 
     try:
         process = await asyncio.create_subprocess_exec(
@@ -157,106 +174,219 @@ async def _run_snort(job_id: str, request: SnortRequest):
         job["pid"] = process.pid
         job["duration_completed"] = False
 
-        output_lines = []
-        job["live_alerts"] = []
+        stderr_task = asyncio.create_task(process.stderr.read())
 
         while True:
             if job.get("cancel_requested"):
+                cancelled = True
                 try:
-                    os.kill(process.pid, signal.SIGTERM)
+                    os.killpg(process.pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
-                job["status"] = "cancelled"
-                job["stage"] = "Monitoring cancelled"
+                job["stage"] = "Stopping Snort capture"
                 break
-
-            elapsed = time.time() - start
-
-            if elapsed >= request.duration:
-                job["duration_completed"] = True
-                job["stage"] = "Waiting for Snort to finish"
-                job["progress"] = 98
 
             try:
                 line = await asyncio.wait_for(
-                    process.stdout.readline(), timeout=0.5
+                    process.stdout.readline(),
+                    timeout=0.5,
                 )
             except asyncio.TimeoutError:
                 elapsed = time.time() - start
-                job["progress"] = min(95, int((elapsed / request.duration) * 95))
+                job["progress"] = min(
+                    95, int((elapsed / request.duration) * 95)
+                )
                 job["elapsed"] = round(elapsed, 1)
                 continue
 
-            if line:
-                text = line.decode(errors="replace").strip()
-                if text:
-                    output_lines.append(text)
-                    job["alert_count"] = sum(
-                        1 for x in output_lines if "[**]" in x or "[Classification:" in x
-                    )
-                    job["live_alerts"] = output_lines[-100:]
-                    job["stage"] = f"Monitoring — alerts: {job['alert_count']}"
-                    job["elapsed"] = round(time.time() - start, 1)
-
-            if process.returncode is not None:
+            if not line:
                 break
 
-            elapsed = time.time() - start
-            job["progress"] = min(95, int((elapsed / request.duration) * 95))
-            job["elapsed"] = round(elapsed, 1)
+            text = line.decode(errors="replace").strip()
+            if text:
+                output_lines.append(text)
+                is_alert = (
+                    "[**]" in text
+                    and re.search(r"\[\d+:\d+:\d+\]", text) is not None
+                )
+                alerts_so_far = [
+                    item for item in output_lines
+                    if "[**]" in item
+                    and re.search(r"\[\d+:\d+:\d+\]", item) is not None
+                ]
+                job["alert_count"] = len(alerts_so_far)
+                job["live_alerts"] = alerts_so_far[-100:]
+                job["stage"] = (
+                    f"Monitoring — alerts: {job['alert_count']}"
+                )
+                job["elapsed"] = round(time.time() - start, 1)
 
-        stdout = b""
-        stderr = b""
-
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=2
-            )
-        except asyncio.TimeoutError:
+        if cancelled:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+        else:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+
+        stderr = await stderr_task if stderr_task else b""
+        stderr_text = stderr.decode(errors="replace")
+
+        alerts = [
+            line for line in output_lines
+            if "[**]" in line
+            and re.search(r"\[\d+:\d+:\d+\]", line) is not None
+        ]
+
+        job["output"] = output_lines[-500:]
+        job["live_alerts"] = alerts[-100:]
+        job["alert_count"] = len(alerts)
+        job["stderr"] = stderr_text[-4000:]
+        job["return_code"] = process.returncode
+
+        # Store genuine Snort alerts using the existing SIEM event pipeline.
+        if alerts and not cancelled:
+            db = SessionLocal()
+            stored = 0
+            duplicates = 0
+
+            try:
+                for raw_alert in alerts:
+                    signature = re.search(
+                        r"\[\*\*\]\s*\[\d+:\d+:\d+\]\s*(.*?)\s*\[\*\*\]",
+                        raw_alert,
+                    )
+                    message = (
+                        signature.group(1).strip()
+                        if signature and signature.group(1).strip()
+                        else raw_alert
+                    )
+
+                    priority_match = re.search(
+                        r"\[Priority:\s*(\d+)\]",
+                        raw_alert,
+                        re.IGNORECASE,
+                    )
+                    priority = int(priority_match.group(1)) if priority_match else None
+
+                    severity = {
+                        1: "CRITICAL",
+                        2: "HIGH",
+                        3: "MEDIUM",
+                    }.get(priority, "LOW")
+
+                    destination_match = re.search(
+                        r"->\s*(\d{1,3}(?:\.\d{1,3}){3})",
+                        raw_alert,
+                    )
+                    target = (
+                        destination_match.group(1)
+                        if destination_match
+                        else None
+                    )
+
+                    event_id = generate_event_id(
+                        f"snort|{request.interface}|{raw_alert}"
+                    )
+
+                    event = create_security_event(
+                        source="snort",
+                        event_type="intrusion_detection",
+                        message=message,
+                        severity=severity,
+                        target=target,
+                        event_id=event_id,
+                        raw_event={
+                            "sensor": "snort",
+                            "interface": request.interface,
+                            "alert": raw_alert,
+                            "priority": priority,
+                        },
+                    )
+
+                    existing = (
+                        db.query(SecurityEvent)
+                        .filter(SecurityEvent.event_id == event_id)
+                        .first()
+                    )
+
+                    if existing:
+                        duplicates += 1
+                        continue
+
+                    mappings = map_security_event(event)
+
+                    if mappings:
+                        for mapping in mappings:
+                            store_security_event(
+                                db,
+                                event,
+                                mitre_mapping=mapping,
+                            )
+                    else:
+                        store_security_event(db, event)
+
+                    stored += 1
+
+                db.commit()
+                job["stored_events"] = stored
+                job["duplicate_events"] = duplicates
+
+            except Exception as exc:
+                db.rollback()
+                job["stored_events"] = 0
+                job["ingestion_error"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+            finally:
+                db.close()
+
+        if cancelled:
+            job["status"] = "cancelled"
+            job["stage"] = "Monitoring cancelled"
+        elif process.returncode == 0:
+            job["duration_completed"] = True
+            job["status"] = "completed"
+            job["stage"] = "Monitoring completed"
+        else:
+            job["status"] = "failed"
+            job["stage"] = "Monitoring failed"
+
+        job["progress"] = 100
+
+    except Exception as exc:
+        if process is not None and process.returncode is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=1
-                )
+                await asyncio.wait_for(process.wait(), timeout=5)
             except asyncio.TimeoutError:
-                stdout, stderr = b"", b""
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await process.wait()
 
-        combined = output_lines
-        if stdout:
-            combined.extend(stdout.decode(errors="replace").splitlines())
-        if stderr:
-            combined.extend(stderr.decode(errors="replace").splitlines())
-
-        job["output"] = combined[-500:]
-        job["live_alerts"] = combined[-100:]
-        job["stderr"] = stderr.decode(errors="replace")[-4000:]
-        job["return_code"] = process.returncode
-
-        if job["status"] != "cancelled":
-            if job.get("duration_completed"):
-                job["status"] = "completed"
-                job["stage"] = "Monitoring completed"
-            else:
-                job["status"] = "completed" if process.returncode == 0 else "failed"
-                job["stage"] = (
-                    "Monitoring completed"
-                    if process.returncode == 0
-                    else "Monitoring failed"
-                )
-            job["progress"] = 100
-
-    except Exception as exc:
         job["status"] = "failed"
         job["stage"] = "Snort execution failed"
-        job["error"] = str(exc)
+        job["error"] = f"{type(exc).__name__}: {exc}"
         job["progress"] = 100
 
-    job["duration"] = round(time.time() - start, 2)
+    finally:
+        job["duration"] = round(time.time() - start, 2)
 
 
 @router.post("/tshark/run")

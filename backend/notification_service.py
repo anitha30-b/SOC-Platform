@@ -5,6 +5,7 @@ from database import SessionLocal
 from models import Assessment, Notification, NotificationChannelConfig, NotificationPolicy
 from notification_broadcaster import notification_broadcaster
 from user_notification_broadcaster import user_notification_broadcaster
+from notification_security import decrypt_notification_secret
 
 
 POLICY_SEVERITY_ORDER = {
@@ -91,7 +92,8 @@ def send_email_notification(channel_config, notification):
 
     host = channel_config.endpoint
     username = channel_config.username
-    password = channel_config.secret
+    from notification_security import decrypt_notification_secret
+    password = decrypt_notification_secret(channel_config.secret)
 
     port = int(configuration.get("port", 587))
     from_address = configuration.get("from_address") or username
@@ -143,7 +145,10 @@ def send_slack_notification(channel_config, notification):
     """Send one security notification through a Slack Incoming Webhook."""
     import requests
 
-    webhook_url = channel_config.endpoint
+    webhook_url = (
+        decrypt_notification_secret(channel_config.secret)
+        or channel_config.endpoint
+    )
 
     if not webhook_url:
         raise ValueError("Slack webhook URL is not configured.")
@@ -266,6 +271,228 @@ def send_webhook_notification(channel_config, notification):
             f"Generic webhook failed: HTTP {response.status_code} - "
             f"{response.text[:500]}"
         )
+
+
+
+def create_alert_notification(event, alert_result):
+    """
+    Create a notification for a newly generated alert.
+
+    Uses the existing notification policy matching and real-time
+    notification broadcaster. External delivery is deliberately
+    excluded from this first integration.
+    """
+    from models import AlertResult
+
+    db = SessionLocal()
+
+    try:
+        # Confirm that this alert result is persisted.
+        persisted_alert = (
+            db.query(AlertResult)
+            .filter(AlertResult.id == alert_result.id)
+            .first()
+        )
+
+        if not persisted_alert:
+            return None
+
+        notification_event_id = (
+            f"ALERT-{persisted_alert.id}"
+        )
+
+        existing = (
+            db.query(Notification)
+            .filter(
+                Notification.event_id == notification_event_id
+            )
+            .first()
+        )
+
+        if existing:
+            return existing
+
+        severity = str(
+            persisted_alert.severity or "INFO"
+        ).upper()
+
+        event_payload = {
+            "event_id": notification_event_id,
+            "assessment_id": event.assessment_id,
+            "source": event.source,
+            "event_type": f"ALERT:{event.event_type}",
+            "severity": severity,
+            "message": (
+                f"Detection alert: {persisted_alert.alert_name}. "
+                f"Priority: {persisted_alert.priority}. "
+                f"Original event: {event.message}"
+            ),
+            "target": event.target,
+        }
+
+        matched_policies = get_matching_policies(
+            db,
+            event_payload,
+        )
+
+        notification = Notification(
+            notification_id=(
+                f"NTF-ALERT-{uuid.uuid4().hex[:12].upper()}"
+            ),
+            event_id=notification_event_id,
+            assessment_id=event.assessment_id,
+            user_id=None,
+            source=event.source,
+            event_type=event_payload["event_type"],
+            severity=severity,
+            title=f"{severity} Detection Alert: {persisted_alert.alert_name}",
+            message=event_payload["message"],
+            target=event.target,
+            is_read=False,
+            created_at=datetime.utcnow(),
+        )
+
+        db.add(notification)
+        db.commit()
+        db.refresh(notification)
+
+        policy_channels = {
+            "email": any(p.email_enabled for p in matched_policies),
+            "slack": any(p.slack_enabled for p in matched_policies),
+            "teams": any(p.teams_enabled for p in matched_policies),
+            "webhook": any(p.webhook_enabled for p in matched_policies),
+        }
+
+        slack_delivery = {
+            "attempted": False,
+            "sent": False,
+            "error": None,
+        }
+
+        if (
+            severity in {"HIGH", "CRITICAL"}
+            and policy_channels["slack"]
+        ):
+            slack_config = (
+                db.query(NotificationChannelConfig)
+                .filter(
+                    NotificationChannelConfig.channel == "slack",
+                    NotificationChannelConfig.enabled.is_(True),
+                )
+                .first()
+            )
+
+            if slack_config:
+                slack_delivery["attempted"] = True
+                try:
+                    send_slack_notification(
+                        slack_config,
+                        notification,
+                    )
+                    slack_delivery["sent"] = True
+                except Exception:
+                    slack_delivery["error"] = (
+                        "Slack delivery failed. Check the saved "
+                        "webhook configuration."
+                    )
+
+        payload = {
+            "type": "notification",
+            "notification_id": notification.notification_id,
+            "event_id": notification.event_id,
+            "assessment_id": notification.assessment_id,
+            "source": notification.source,
+            "event_type": notification.event_type,
+            "severity": notification.severity,
+            "title": notification.title,
+            "message": notification.message,
+            "target": notification.target,
+            "is_read": notification.is_read,
+            "policy_matched": bool(matched_policies),
+            "policy_channels": policy_channels,
+            "slack_delivery": slack_delivery,
+            "alert_result_id": persisted_alert.id,
+            "created_at": (
+                notification.created_at.isoformat()
+                if notification.created_at
+                else None
+            ),
+        }
+
+        notification_broadcaster.publish(payload)
+
+        return notification
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        db.close()
+
+
+def create_alert_notifications_for_event(event_payload):
+    """
+    Create notifications for all persisted alerts belonging to an event.
+    Called after PostgreSQL confirms the event transaction has committed.
+    """
+    from models import AlertResult, SecurityEvent
+
+    event_id = event_payload.get("event_id")
+    if not event_id:
+        return 0
+
+    db = SessionLocal()
+    try:
+        event = (
+            db.query(SecurityEvent)
+            .filter(SecurityEvent.event_id == event_id)
+            .first()
+        )
+
+        if event is None:
+            return 0
+
+        alert_results = (
+            db.query(AlertResult)
+            .filter(AlertResult.security_event_id == event.id)
+            .all()
+        )
+
+        # Keep only IDs; each notification helper uses its own DB session.
+        alert_result_ids = [result.id for result in alert_results]
+
+    finally:
+        db.close()
+
+    created_count = 0
+
+    for alert_result_id in alert_result_ids:
+        lookup_db = SessionLocal()
+        try:
+            alert_result = (
+                lookup_db.query(AlertResult)
+                .filter(AlertResult.id == alert_result_id)
+                .first()
+            )
+            if alert_result is None:
+                continue
+
+            # Load the event again in this session.
+            event = (
+                lookup_db.query(SecurityEvent)
+                .filter(SecurityEvent.event_id == event_id)
+                .first()
+            )
+            if event is None:
+                continue
+
+            create_alert_notification(event, alert_result)
+            created_count += 1
+        finally:
+            lookup_db.close()
+
+    return created_count
 
 
 def create_notification(event):
