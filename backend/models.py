@@ -1,12 +1,14 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     DateTime,
     Float,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -1680,6 +1682,44 @@ class SecurityEvent(Base):
         index=True,
     )
 
+    client_id = Column(
+        Integer,
+        ForeignKey("clients.id", name="fk_security_events_client_id_clients"),
+        nullable=True,
+        index=True,
+    )
+
+    owner_user_id = Column(
+        Integer,
+        ForeignKey(
+            "users.id",
+            name="fk_security_events_owner_user_id_users",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    telemetry_source_id = Column(
+        Integer,
+        ForeignKey(
+            "telemetry_sources.id",
+            name="fk_security_events_telemetry_source_id",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    endpoint_asset_id = Column(
+        Integer,
+        ForeignKey(
+            "endpoint_assets.id",
+            name="fk_security_events_endpoint_asset_id",
+        ),
+        nullable=True,
+        index=True,
+    )
+
     assessment_id = Column(
         Integer,
         nullable=True,
@@ -1791,6 +1831,122 @@ class IOCIndicator(Base):
     client_id = Column(Integer, ForeignKey("clients.id"), nullable=True, index=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+# ============================================================
+# CLIENT TELEMETRY SOURCES
+# ============================================================
+
+class TelemetrySource(Base):
+    """Registered telemetry producer; only a token hash is persisted."""
+
+    __tablename__ = "telemetry_sources"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), nullable=False)
+    client_id = Column(
+        Integer,
+        ForeignKey("clients.id", name="fk_telemetry_sources_client_id"),
+        nullable=True,
+        index=True,
+    )
+    owner_user_id = Column(
+        Integer,
+        ForeignKey("users.id", name="fk_telemetry_sources_owner_user_id"),
+        nullable=True,
+        index=True,
+    )
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    enabled = Column(Boolean, nullable=False, default=True, index=True)
+    created_by = Column(
+        Integer,
+        ForeignKey("users.id", name="fk_telemetry_sources_created_by"),
+        nullable=False,
+    )
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_seen_at = Column(DateTime, nullable=True)
+
+
+class CollectorExecutionRun(Base):
+    """Persisted execution report from a registered endpoint collector."""
+
+    __tablename__ = "collector_execution_runs"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    run_id = Column(String(100), nullable=False)
+    telemetry_source_id = Column(
+        Integer,
+        ForeignKey("telemetry_sources.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    endpoint_asset_id = Column(
+        Integer,
+        ForeignKey("endpoint_assets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    started_at = Column(DateTime, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+    status = Column(String(20), nullable=False)
+    collected_count = Column(Integer, nullable=False, default=0)
+    accepted_count = Column(Integer, nullable=False, default=0)
+    duplicate_count = Column(Integer, nullable=False, default=0)
+    error_count = Column(Integer, nullable=False, default=0)
+    error_details = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "telemetry_source_id",
+            "run_id",
+            name="uq_collector_execution_runs_source_run",
+        ),
+    )
+
+
+class SavedSearch(Base):
+    """Persisted SIEM search filters scoped to a user or client tenant."""
+
+    __tablename__ = "saved_searches"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    name = Column(String(150), nullable=False)
+
+    owner_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    client_id = Column(
+        Integer,
+        ForeignKey("clients.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    search_text = Column(Text, nullable=False, default="")
+    severity = Column(String(20), nullable=False, default="all")
+    source = Column(String(255), nullable=False, default="all")
+    event_type = Column(String(100), nullable=False, default="all")
+
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+    )
+
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+    owner = relationship("User")
+    client = relationship("Client")
 
 
 # ============================================================
@@ -1999,6 +2155,1256 @@ class NotificationChannelConfig(Base):
 
 
 # ============================================================
+# USER SERVER ASSET
+# ============================================================
+
+class ServerAsset(Base):
+    __tablename__ = "server_assets"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    assessment_id = Column(
+        Integer,
+        ForeignKey("assessments.id"),
+        nullable=False,
+        index=True,
+    )
+
+    discovery_run_id = Column(
+        Integer,
+        ForeignKey("asset_discovery_runs.id"),
+        nullable=False,
+        index=True,
+    )
+
+    hostname = Column(
+        String(500),
+        nullable=True,
+    )
+
+    ip_address = Column(
+        String(100),
+        nullable=True,
+    )
+
+    target = Column(
+        String(500),
+        nullable=False,
+    )
+
+    host_status = Column(
+        String(30),
+        nullable=True,
+    )
+
+    os_name = Column(
+        String(500),
+        nullable=True,
+    )
+
+    open_port_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    services_data = Column(
+        Text,
+        nullable=True,
+    )
+
+    last_seen = Column(
+        DateTime,
+        nullable=True,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")
+    assessment = relationship("Assessment")
+    discovery_run = relationship("AssetDiscoveryRun")
+
+
+# ============================================================
+# USER ENDPOINT ASSET
+# ============================================================
+
+class EndpointAsset(Base):
+    __tablename__ = "endpoint_assets"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "endpoint_id",
+            name="uq_endpoint_assets_owner_identifier",
+        ),
+        UniqueConstraint(
+            "telemetry_source_id", "endpoint_id",
+            name="uq_endpoint_assets_source_identifier",
+        ),
+    )
+
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    telemetry_source_id = Column(
+        Integer,
+        ForeignKey("telemetry_sources.id"),
+        nullable=True,
+        index=True,
+    )
+
+    endpoint_id = Column(
+        String(255),
+        nullable=True,
+        index=True,
+    )
+
+    agent_id = Column(
+        String(255),
+        nullable=True,
+        index=True,
+    )
+
+    hostname = Column(
+        String(500),
+        nullable=True,
+    )
+
+    ip_address = Column(
+        String(100),
+        nullable=True,
+    )
+
+    mac_address = Column(
+        String(100),
+        nullable=True,
+    )
+
+    os_name = Column(
+        String(500),
+        nullable=True,
+    )
+
+    os_version = Column(
+        String(500),
+        nullable=True,
+    )
+
+    device_type = Column(
+        String(100),
+        nullable=True,
+    )
+
+    status = Column(
+        String(30),
+        nullable=False,
+        default="UNKNOWN",
+        index=True,
+    )
+
+    last_seen = Column(
+        DateTime,
+        nullable=True,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")
+    telemetry_source = relationship("TelemetrySource")
+
+
+
+# ============================================================
+# ENDPOINT PROCESS
+# ============================================================
+
+class EndpointProcess(Base):
+    __tablename__ = "endpoint_processes"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    endpoint_asset_id = Column(
+        Integer,
+        ForeignKey("endpoint_assets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    pid = Column(
+        Integer,
+        nullable=False,
+    )
+
+    parent_pid = Column(
+        Integer,
+        nullable=True,
+    )
+
+    name = Column(
+        String(500),
+        nullable=False,
+        index=True,
+    )
+
+    executable = Column(
+        Text,
+        nullable=True,
+    )
+
+    command_line = Column(
+        Text,
+        nullable=True,
+    )
+
+    username = Column(
+        String(255),
+        nullable=True,
+        index=True,
+    )
+
+    status = Column(
+        String(50),
+        nullable=True,
+        index=True,
+    )
+
+    cpu_percent = Column(
+        Float,
+        nullable=True,
+    )
+
+    memory_percent = Column(
+        Float,
+        nullable=True,
+    )
+
+    first_seen = Column(
+        DateTime,
+        nullable=False,
+    )
+
+    last_seen = Column(
+        DateTime,
+        nullable=False,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    endpoint_asset = relationship("EndpointAsset")
+
+
+# ============================================================
+# USER NETWORK DEVICE ASSET
+# ============================================================
+
+class EndpointService(Base):
+    __tablename__ = "endpoint_services"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    endpoint_asset_id = Column(
+        Integer,
+        ForeignKey("endpoint_assets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    service_name = Column(String(500), nullable=False, index=True)
+    display_name = Column(String(500), nullable=True)
+    status = Column(String(50), nullable=True, index=True)
+    startup_type = Column(String(50), nullable=True)
+    executable = Column(Text, nullable=True)
+    command_line = Column(Text, nullable=True)
+    username = Column(String(255), nullable=True, index=True)
+    pid = Column(Integer, nullable=True)
+    first_seen = Column(DateTime, nullable=False)
+    last_seen = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    endpoint_asset = relationship("EndpointAsset")
+
+
+class EndpointFirewallRule(Base):
+    __tablename__ = "endpoint_firewall_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    endpoint_asset_id = Column(
+        Integer,
+        ForeignKey("endpoint_assets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    instance_id = Column(
+        String(500),
+        nullable=False,
+        index=True,
+    )
+
+    rule_name = Column(
+        String(500),
+        nullable=True,
+        index=True,
+    )
+
+    display_name = Column(
+        String(1000),
+        nullable=True,
+        index=True,
+    )
+
+    description = Column(
+        Text,
+        nullable=True,
+    )
+
+    enabled = Column(
+        Boolean,
+        nullable=True,
+        index=True,
+    )
+
+    direction = Column(
+        String(50),
+        nullable=True,
+        index=True,
+    )
+
+    action = Column(
+        String(50),
+        nullable=True,
+        index=True,
+    )
+
+    profile = Column(
+        String(255),
+        nullable=True,
+        index=True,
+    )
+
+    protocol = Column(
+        String(100),
+        nullable=True,
+    )
+
+    local_port = Column(
+        Text,
+        nullable=True,
+    )
+
+    remote_port = Column(
+        Text,
+        nullable=True,
+    )
+
+    local_address = Column(
+        Text,
+        nullable=True,
+    )
+
+    remote_address = Column(
+        Text,
+        nullable=True,
+    )
+
+    program = Column(
+        Text,
+        nullable=True,
+    )
+
+    service_name = Column(
+        String(500),
+        nullable=True,
+    )
+
+    policy_store_source = Column(
+        String(500),
+        nullable=True,
+    )
+
+    first_seen = Column(
+        DateTime,
+        nullable=False,
+    )
+
+    last_seen = Column(
+        DateTime,
+        nullable=False,
+        index=True,
+    )
+
+    is_present = Column(
+        Boolean,
+        nullable=False,
+        default=True,
+        index=True,
+    )
+
+    removed_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    endpoint_asset = relationship("EndpointAsset")
+
+
+class EndpointSystemHardening(Base):
+    __tablename__ = "endpoint_system_hardening"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    endpoint_asset_id = Column(
+        Integer,
+        ForeignKey("endpoint_assets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    control_id = Column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+
+    control_name = Column(
+        String(500),
+        nullable=False,
+    )
+
+    category = Column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+
+    status = Column(
+        String(30),
+        nullable=False,
+        index=True,
+    )
+
+    observed_value = Column(
+        Text,
+        nullable=True,
+    )
+
+    details = Column(
+        Text,
+        nullable=True,
+    )
+
+    first_seen = Column(
+        DateTime,
+        nullable=False,
+    )
+
+    last_seen = Column(
+        DateTime,
+        nullable=False,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    endpoint_asset = relationship("EndpointAsset")
+
+
+class EndpointServerConfiguration(Base):
+    __tablename__ = "endpoint_server_configuration"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    endpoint_asset_id = Column(
+        Integer,
+        ForeignKey("endpoint_assets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    hostname = Column(
+        String(500),
+        nullable=True,
+        index=True,
+    )
+
+    os_name = Column(
+        String(500),
+        nullable=True,
+        index=True,
+    )
+
+    os_version = Column(
+        String(500),
+        nullable=True,
+    )
+
+    architecture = Column(
+        String(100),
+        nullable=True,
+    )
+
+    processor = Column(
+        String(1000),
+        nullable=True,
+    )
+
+    memory_total_gb = Column(
+        Numeric(12, 2),
+        nullable=True,
+    )
+
+    disk_total_gb = Column(
+        Numeric(12, 2),
+        nullable=True,
+    )
+
+    disk_free_gb = Column(
+        Numeric(12, 2),
+        nullable=True,
+    )
+
+    disk_usage_percent = Column(
+        Numeric(6, 2),
+        nullable=True,
+    )
+
+    uptime_seconds = Column(
+        BigInteger,
+        nullable=True,
+    )
+
+    uptime = Column(
+        String(255),
+        nullable=True,
+    )
+
+    timezone = Column(
+        String(255),
+        nullable=True,
+    )
+
+    domain_or_workgroup = Column(
+        String(500),
+        nullable=True,
+    )
+
+    windows_edition = Column(
+        String(500),
+        nullable=True,
+    )
+
+    power_plan = Column(
+        String(500),
+        nullable=True,
+    )
+
+    first_seen = Column(
+        DateTime,
+        nullable=False,
+    )
+
+    last_seen = Column(
+        DateTime,
+        nullable=False,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    endpoint_asset = relationship("EndpointAsset")
+
+
+class NetworkDeviceAsset(Base):
+    __tablename__ = "network_device_assets"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "device_id",
+            name="uq_network_device_assets_owner_identifier",
+        ),
+        UniqueConstraint(
+            "telemetry_source_id", "device_id",
+            name="uq_network_device_assets_source_identifier",
+        ),
+    )
+
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    telemetry_source_id = Column(
+        Integer,
+        ForeignKey("telemetry_sources.id"),
+        nullable=True,
+        index=True,
+    )
+
+    device_id = Column(
+        String(255),
+        nullable=True,
+        index=True,
+    )
+
+    hostname = Column(
+        String(500),
+        nullable=True,
+    )
+
+    ip_address = Column(
+        String(100),
+        nullable=True,
+    )
+
+    mac_address = Column(
+        String(100),
+        nullable=True,
+    )
+
+    device_type = Column(
+        String(100),
+        nullable=False,
+        default="UNKNOWN",
+        index=True,
+    )
+
+    vendor = Column(
+        String(255),
+        nullable=True,
+    )
+
+    model = Column(
+        String(255),
+        nullable=True,
+    )
+
+    os_name = Column(
+        String(500),
+        nullable=True,
+    )
+
+    os_version = Column(
+        String(500),
+        nullable=True,
+    )
+
+    status = Column(
+        String(30),
+        nullable=False,
+        default="UNKNOWN",
+        index=True,
+    )
+
+    last_seen = Column(
+        DateTime,
+        nullable=True,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")
+    telemetry_source = relationship("TelemetrySource")
+
+
+# ============================================================
+# USER ASSET DISCOVERY RUN
+# ============================================================
+
+
+class DatabaseAsset(Base):
+    __tablename__ = "database_assets"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "database_id",
+            name="uq_database_assets_owner_identifier",
+        ),
+        UniqueConstraint(
+            "telemetry_source_id", "database_id",
+            name="uq_database_assets_source_identifier",
+        ),
+    )
+
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    telemetry_source_id = Column(
+        Integer,
+        ForeignKey("telemetry_sources.id"),
+        nullable=True,
+        index=True,
+    )
+
+    database_id = Column(
+        String(255),
+        nullable=True,
+        index=True,
+    )
+
+    name = Column(
+        String(255),
+        nullable=True,
+    )
+
+    hostname = Column(
+        String(500),
+        nullable=True,
+    )
+
+    ip_address = Column(
+        String(100),
+        nullable=True,
+    )
+
+    port = Column(
+        Integer,
+        nullable=True,
+    )
+
+    database_type = Column(
+        String(100),
+        nullable=False,
+        default="UNKNOWN",
+        index=True,
+    )
+
+    version = Column(
+        String(255),
+        nullable=True,
+    )
+
+    environment = Column(
+        String(100),
+        nullable=True,
+    )
+
+    status = Column(
+        String(30),
+        nullable=False,
+        default="UNKNOWN",
+        index=True,
+    )
+
+    last_seen = Column(
+        DateTime,
+        nullable=True,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")
+    telemetry_source = relationship("TelemetrySource")
+
+
+class AssetDiscoveryRun(Base):
+    __tablename__ = "asset_discovery_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(String(100), unique=True, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    assessment_id = Column(Integer, ForeignKey("assessments.id"), nullable=False, index=True)
+
+    target = Column(String(500), nullable=False)
+    scan_type = Column(String(50), nullable=False)
+    status = Column(String(30), nullable=False, default="RUNNING")
+    host_count = Column(Integer, nullable=False, default=0)
+    open_port_count = Column(Integer, nullable=False, default=0)
+    result_data = Column(Text, nullable=True)
+
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User")
+    assessment = relationship("Assessment")
+
+
+
+# ============================================================
+# USER INTERNAL ATTACK SURFACE DISCOVERY
+# ============================================================
+
+class InternalAttackSurfaceRun(Base):
+    __tablename__ = "internal_attack_surface_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(String(100), unique=True, nullable=False, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    asset_type = Column(
+        String(50),
+        nullable=False,
+        index=True,
+    )
+
+    asset_id = Column(
+        Integer,
+        nullable=False,
+        index=True,
+    )
+
+    target_ip = Column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+
+    status = Column(
+        String(30),
+        nullable=False,
+        default="QUEUED",
+        index=True,
+    )
+
+    discovered_host_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    discovered_port_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    result_data = Column(
+        Text,
+        nullable=True,
+    )
+
+    started_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    completed_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")
+
+
+# ============================================================
+# USER DOMAIN DISCOVERY
+# ============================================================
+
+class DomainDiscoveryRun(Base):
+    __tablename__ = "domain_discovery_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(String(100), unique=True, nullable=False, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    assessment_id = Column(
+        Integer,
+        ForeignKey("assessments.id"),
+        nullable=False,
+        index=True,
+    )
+
+    target_domain = Column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+
+    status = Column(
+        String(30),
+        nullable=False,
+        default="QUEUED",
+        index=True,
+    )
+
+    discovered_domain_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    discovered_host_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    discovered_ip_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    result_data = Column(
+        Text,
+        nullable=True,
+    )
+
+    started_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    completed_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")
+    assessment = relationship("Assessment")
+
+
+
+# ============================================================
+# USER SUBDOMAIN DISCOVERY
+# ============================================================
+
+class SubdomainDiscoveryRun(Base):
+    __tablename__ = "subdomain_discovery_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(String(100), unique=True, nullable=False, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    assessment_id = Column(
+        Integer,
+        ForeignKey("assessments.id"),
+        nullable=False,
+        index=True,
+    )
+
+    target_domain = Column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+
+    status = Column(
+        String(30),
+        nullable=False,
+        default="QUEUED",
+        index=True,
+    )
+
+    discovered_subdomain_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    discovered_host_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    discovered_ip_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    result_data = Column(
+        Text,
+        nullable=True,
+    )
+
+    started_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    completed_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")
+    assessment = relationship("Assessment")
+# ============================================================
+# USER EXTERNAL ATTACK SURFACE DISCOVERY
+# ============================================================
+
+class ExternalAttackSurfaceRun(Base):
+    __tablename__ = "external_attack_surface_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(String(100), unique=True, nullable=False, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    assessment_id = Column(
+        Integer,
+        ForeignKey("assessments.id"),
+        nullable=False,
+        index=True,
+    )
+
+    target_domain = Column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+
+    status = Column(
+        String(30),
+        nullable=False,
+        default="QUEUED",
+        index=True,
+    )
+
+    discovered_domain_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    discovered_host_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    discovered_ip_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    discovered_port_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    result_data = Column(
+        Text,
+        nullable=True,
+    )
+
+    started_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    completed_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")
+    assessment = relationship("Assessment")
+
+
+# ============================================================
 # USER VAPT REPORT RUN
 # ============================================================
 
@@ -2025,3 +3431,608 @@ class VAPTReportRun(Base):
     user = relationship("User")
     assessment = relationship("Assessment")
     risk_assessment_run = relationship("RiskAssessmentRun")
+
+# ============================================================
+# USER ASSET GROUPS
+# ============================================================
+
+
+class AssetGroup(Base):
+    __tablename__ = "asset_groups"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    name = Column(
+        String(255),
+        nullable=False,
+    )
+
+    description = Column(
+        Text,
+        nullable=True,
+    )
+
+    status = Column(
+        String(30),
+        nullable=False,
+        default="ACTIVE",
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")
+    members = relationship(
+        "AssetGroupMember",
+        back_populates="group",
+        cascade="all, delete-orphan",
+    )
+
+
+class AssetGroupMember(Base):
+    __tablename__ = "asset_group_members"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    group_id = Column(
+        Integer,
+        ForeignKey("asset_groups.id"),
+        nullable=False,
+        index=True,
+    )
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    asset_type = Column(
+        String(50),
+        nullable=False,
+        index=True,
+    )
+
+    asset_id = Column(
+        Integer,
+        nullable=False,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    group = relationship(
+        "AssetGroup",
+        back_populates="members",
+    )
+
+    user = relationship("User")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "group_id",
+            "asset_type",
+            "asset_id",
+            name="uq_asset_group_member",
+        ),
+    )
+
+class DNSSecurityRun(Base):
+    __tablename__ = "dns_security_runs"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    job_id = Column(
+        String(100),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    assessment_id = Column(
+        Integer,
+        ForeignKey("assessments.id"),
+        nullable=False,
+        index=True,
+    )
+
+    target_domain = Column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+
+    status = Column(
+        String(30),
+        nullable=False,
+        default="QUEUED",
+        index=True,
+    )
+
+    security_score = Column(
+        Float,
+        nullable=True,
+    )
+
+    finding_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    critical_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    high_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    medium_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    low_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    info_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    result_data = Column(
+        Text,
+        nullable=True,
+    )
+
+    started_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    completed_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")
+
+    assessment = relationship("Assessment")
+
+
+class SSLTLSRun(Base):
+    __tablename__ = "ssl_tls_runs"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    job_id = Column(
+        String(100),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    assessment_id = Column(
+        Integer,
+        ForeignKey("assessments.id"),
+        nullable=False,
+        index=True,
+    )
+
+    target_host = Column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+
+    target_port = Column(
+        Integer,
+        nullable=False,
+        default=443,
+    )
+
+    status = Column(
+        String(30),
+        nullable=False,
+        default="QUEUED",
+        index=True,
+    )
+
+    tls_protocol = Column(
+        String(30),
+        nullable=True,
+    )
+
+    cipher_name = Column(
+        String(255),
+        nullable=True,
+    )
+
+    cipher_bits = Column(
+        Integer,
+        nullable=True,
+    )
+
+    certificate_subject = Column(
+        Text,
+        nullable=True,
+    )
+
+    certificate_issuer = Column(
+        Text,
+        nullable=True,
+    )
+
+    certificate_serial = Column(
+        String(255),
+        nullable=True,
+    )
+
+    certificate_valid_from = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    certificate_valid_until = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    san_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    hostname_verified = Column(
+        Boolean,
+        nullable=True,
+    )
+
+    certificate_verified = Column(
+        Boolean,
+        nullable=True,
+    )
+
+    days_remaining = Column(
+        Integer,
+        nullable=True,
+    )
+
+    result_data = Column(
+        Text,
+        nullable=True,
+    )
+
+    started_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    completed_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")
+
+    assessment = relationship("Assessment")
+
+class SecurityHeadersRun(Base):
+    __tablename__ = "security_headers_runs"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    job_id = Column(
+        String(100),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    assessment_id = Column(
+        Integer,
+        ForeignKey("assessments.id"),
+        nullable=False,
+        index=True,
+    )
+
+    target_url = Column(
+        String(500),
+        nullable=False,
+        index=True,
+    )
+
+    final_url = Column(
+        String(500),
+        nullable=True,
+    )
+
+    status = Column(
+        String(30),
+        nullable=False,
+        default="QUEUED",
+        index=True,
+    )
+
+    http_status = Column(
+        Integer,
+        nullable=True,
+    )
+
+    header_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    present_header_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    missing_header_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    security_score = Column(
+        Numeric(5, 2),
+        nullable=True,
+    )
+
+    result_data = Column(
+        Text,
+        nullable=True,
+    )
+
+    started_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    completed_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")
+
+    assessment = relationship("Assessment")
+
+
+class IPIntelligence(Base):
+    __tablename__ = "ip_intelligence"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    ip_address = Column(
+        String(45),
+        nullable=False,
+        index=True,
+    )
+
+    address_type = Column(
+        String(30),
+        nullable=False,
+        default="UNKNOWN",
+        index=True,
+    )
+
+    ptr_hostname = Column(
+        String(255),
+        nullable=True,
+    )
+
+    asn = Column(
+        String(50),
+        nullable=True,
+    )
+
+    organization = Column(
+        String(255),
+        nullable=True,
+    )
+
+    isp = Column(
+        String(255),
+        nullable=True,
+    )
+
+    country = Column(
+        String(100),
+        nullable=True,
+    )
+
+    region = Column(
+        String(150),
+        nullable=True,
+    )
+
+    city = Column(
+        String(150),
+        nullable=True,
+    )
+
+    latitude = Column(
+        Float,
+        nullable=True,
+    )
+
+    longitude = Column(
+        Float,
+        nullable=True,
+    )
+
+    lookup_status = Column(
+        String(30),
+        nullable=False,
+        default="PENDING",
+        index=True,
+    )
+
+    provider = Column(
+        String(100),
+        nullable=True,
+    )
+
+    result_data = Column(
+        Text,
+        nullable=True,
+    )
+
+    first_lookup_at = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    last_lookup_at = Column(
+        DateTime,
+        nullable=True,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "ip_address",
+            name="uq_ip_intelligence_user_ip",
+        ),
+    )

@@ -440,6 +440,149 @@ async def _run_risk_assessment(
             db.close()
 
 
+@router.get("/overview")
+def risk_assessment_overview(
+    current_user: User = Depends(require_role(1)),
+    db: Session = Depends(get_db),
+):
+    """Read-only, ownership-scoped summary for the SOC Risk Overview page."""
+
+    scoped_users = db.query(User.id)
+    if current_user.client_id is not None:
+        scoped_users = scoped_users.filter(
+            User.client_id == current_user.client_id
+        )
+        scope_label = "Client"
+    else:
+        scoped_users = scoped_users.filter(User.id == current_user.id)
+        scope_label = "Personal"
+
+    assessments = (
+        db.query(Assessment)
+        .filter(Assessment.user_id.in_(scoped_users))
+        .all()
+    )
+    findings = (
+        db.query(SecurityFinding)
+        .filter(SecurityFinding.user_id.in_(scoped_users))
+        .all()
+    )
+    runs = (
+        db.query(RiskAssessmentRun)
+        .filter(RiskAssessmentRun.user_id.in_(scoped_users))
+        .order_by(RiskAssessmentRun.created_at.desc(), RiskAssessmentRun.id.desc())
+        .limit(20)
+        .all()
+    )
+
+    severity = {
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "informational": 0,
+        "other": 0,
+    }
+    status_counts = {
+        "open": 0,
+        "in_progress": 0,
+        "fixed": 0,
+        "accepted": 0,
+        "false_positive": 0,
+        "other": 0,
+    }
+    cvss_values = []
+
+    for finding in findings:
+        level = str(finding.severity or "").strip().upper()
+        if level == "CRITICAL":
+            severity["critical"] += 1
+        elif level == "HIGH":
+            severity["high"] += 1
+        elif level == "MEDIUM":
+            severity["medium"] += 1
+        elif level == "LOW":
+            severity["low"] += 1
+        elif level in {"INFO", "INFORMATIONAL", "NONE"}:
+            severity["informational"] += 1
+        else:
+            severity["other"] += 1
+
+        finding_status = str(finding.status or "").strip().upper()
+        status_key = {
+            "OPEN": "open",
+            "IN_PROGRESS": "in_progress",
+            "FIXED": "fixed",
+            "ACCEPTED": "accepted",
+            "FALSE_POSITIVE": "false_positive",
+        }.get(finding_status, "other")
+        status_counts[status_key] += 1
+
+        if finding.cvss_score is not None:
+            try:
+                cvss_values.append(float(finding.cvss_score))
+            except (TypeError, ValueError):
+                pass
+
+    from sqlalchemy import func as sql_func
+
+    latest_completed = (
+        db.query(RiskAssessmentRun)
+        .filter(
+            RiskAssessmentRun.user_id.in_(scoped_users),
+            sql_func.lower(RiskAssessmentRun.status) == "completed",
+        )
+        .order_by(
+            RiskAssessmentRun.completed_at.desc(),
+            RiskAssessmentRun.created_at.desc(),
+            RiskAssessmentRun.id.desc(),
+        )
+        .first()
+    )
+    assessment_by_id = {assessment.id: assessment for assessment in assessments}
+
+    def serialize_run(run):
+        assessment = assessment_by_id.get(run.assessment_id)
+        return {
+            "assessment_run_id": run.assessment_run_id,
+            "assessment_id": run.assessment_id,
+            "target": assessment.target if assessment else None,
+            "status": run.status,
+            "total_findings": int(run.total_findings or 0),
+            "average_cvss": float(run.average_cvss or 0),
+            "highest_cvss": float(run.highest_cvss or 0),
+            "overall_risk": run.overall_risk,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+            "created_at": run.created_at.isoformat() if run.created_at else None,
+        }
+
+    latest_risk = serialize_run(latest_completed) if latest_completed else None
+
+    return {
+        "scope": scope_label,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "metrics": {
+            "total_assessments": len(assessments),
+            "total_findings": len(findings),
+            "severity": severity,
+            "finding_status": status_counts,
+            "average_cvss": (
+                round(sum(cvss_values) / len(cvss_values), 2)
+                if cvss_values else 0.0
+            ),
+            "highest_cvss": round(max(cvss_values), 1) if cvss_values else 0.0,
+        },
+        "latest_completed_risk_assessment": latest_risk,
+        "recent_risk_assessments": [serialize_run(run) for run in runs],
+        "risk_data_note": (
+            "Severity and CVSS metrics are calculated from persisted findings in "
+            "the authenticated user's scope. Overall risk is shown only when a "
+            "completed persisted risk-assessment run exists."
+        ),
+    }
+
+
 @router.post("/run")
 async def run_risk_assessment(
     request: RiskAssessmentRequest,
@@ -597,3 +740,182 @@ async def risk_assessment_history(
         _serialize_run(record)
         for record in records
     ]
+
+
+# Read-only metadata views. Match /security-findings personal ownership.
+@router.get("/management")
+def risk_management_metadata(
+    view: str = "register",
+    search: str = "",
+    offset: int = 0,
+    page_size: int = 25,
+    current_user: User = Depends(require_role(1)),
+    db: Session = Depends(get_db),
+):
+    import math
+
+    if view not in {"assets", "vulnerabilities", "register", "trends"}:
+        raise HTTPException(status_code=422, detail="Invalid risk view.")
+    if len(search) > 200 or offset < 0 or not 1 <= page_size <= 100:
+        raise HTTPException(status_code=422, detail="Invalid search or pagination.")
+
+    def iso(value):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.isoformat() + "Z"
+        return value.isoformat()
+
+    def score(value):
+        try:
+            number = float(value)
+            return number if math.isfinite(number) and 0 <= number <= 10 else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    finding_count = None
+    excluded_scores = 0
+
+    if view == "trends":
+        columns = [
+            RiskAssessmentRun.id,
+            RiskAssessmentRun.assessment_run_id,
+            RiskAssessmentRun.assessment_id,
+            RiskAssessmentRun.status,
+            RiskAssessmentRun.overall_risk,
+            RiskAssessmentRun.total_findings,
+            RiskAssessmentRun.average_cvss,
+            RiskAssessmentRun.highest_cvss,
+            RiskAssessmentRun.completed_at,
+            RiskAssessmentRun.created_at,
+        ]
+        query = (
+            db.query(*columns)
+            .filter(RiskAssessmentRun.user_id == current_user.id)
+            .order_by(
+                RiskAssessmentRun.created_at.desc(),
+                RiskAssessmentRun.id.desc(),
+            )
+        )
+        rows = []
+        for record in query.yield_per(200):
+            item = dict(record._mapping)
+            completed = str(item["status"] or "").upper() == "COMPLETED"
+            item["created_at"] = iso(item["created_at"])
+            item["completed_at"] = iso(item["completed_at"])
+            # Defaults on unfinished runs are not completed measurements.
+            if completed:
+                item["average_cvss"] = score(item["average_cvss"])
+                item["highest_cvss"] = score(item["highest_cvss"])
+            else:
+                for key in ("overall_risk", "total_findings", "average_cvss", "highest_cvss"):
+                    item[key] = None
+            rows.append(item)
+    else:
+        columns = [
+            SecurityFinding.id,
+            SecurityFinding.finding_id,
+            SecurityFinding.assessment_id,
+            SecurityFinding.title,
+            SecurityFinding.vulnerability,
+            SecurityFinding.tool_name,
+            SecurityFinding.severity,
+            SecurityFinding.risk_level,
+            SecurityFinding.status,
+            SecurityFinding.cvss_score,
+            SecurityFinding.affected_asset,
+            SecurityFinding.detected_at,
+            SecurityFinding.updated_at,
+        ]
+        query = (
+            db.query(*columns)
+            .filter(SecurityFinding.user_id == current_user.id)
+            .order_by(SecurityFinding.id.desc())
+        )
+        rows = []
+        groups = {}
+        finding_count = 0
+
+        for record in query.yield_per(200):
+            item = dict(record._mapping)
+            finding_count += 1
+            original_score = item["cvss_score"]
+            item["cvss_score"] = score(original_score)
+            if original_score is not None and item["cvss_score"] is None:
+                excluded_scores += 1
+            item["detected_at"] = iso(item["detected_at"])
+            item["updated_at"] = iso(item["updated_at"])
+
+            if view == "register":
+                rows.append(item)
+                continue
+
+            if view == "assets":
+                raw_label = item["affected_asset"]
+                label = raw_label if raw_label else "Unspecified asset"
+                key = (bool(raw_label), label)
+            else:
+                label = item["vulnerability"] or item["title"] or "Unspecified vulnerability"
+                # Keep different scanner labels separate.
+                key = (item["tool_name"], label)
+
+            if key not in groups:
+                groups[key] = {
+                    "label": label,
+                    "tool_name": item["tool_name"] if view == "vulnerabilities" else None,
+                    "findings": 0,
+                    "high_critical": 0,
+                    "scored_findings": 0,
+                    "highest_cvss": None,
+                    "latest_detected_at": None,
+                    "statuses": {},
+                }
+            group = groups[key]
+            group["findings"] += 1
+            severity = str(item["severity"] or "").strip().upper()
+            group["high_critical"] += int(severity in {"HIGH", "CRITICAL"})
+            value = item["cvss_score"]
+            if value is not None:
+                group["scored_findings"] += 1
+                group["highest_cvss"] = (
+                    value if group["highest_cvss"] is None
+                    else max(value, group["highest_cvss"])
+                )
+            stamp = item["detected_at"]
+            if stamp and (
+                group["latest_detected_at"] is None
+                or stamp > group["latest_detected_at"]
+            ):
+                group["latest_detected_at"] = stamp
+            status = str(item["status"] or "UNKNOWN")
+            group["statuses"][status] = group["statuses"].get(status, 0) + 1
+
+        if view != "register":
+            rows = sorted(
+                groups.values(),
+                key=lambda item: (-item["high_critical"], -item["findings"], item["label"]),
+            )
+
+    total = len(rows)
+    needle = search.strip().casefold()
+
+    def searchable(item):
+        return " ".join(
+            str(value)
+            for key, value in item.items()
+            if key != "id" and value is not None
+        ).casefold()
+
+    matched = [item for item in rows if not needle or needle in searchable(item)]
+    page = matched[offset:offset + page_size]
+    return {
+        "scope": "personal",
+        "view": view,
+        "total": total,
+        "matched_total": len(matched),
+        "finding_count": finding_count,
+        "excluded_invalid_cvss": excluded_scores,
+        "offset": offset,
+        "next_offset": offset + page_size if offset + page_size < len(matched) else None,
+        "rows": page,
+    }

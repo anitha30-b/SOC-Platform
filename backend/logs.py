@@ -464,6 +464,8 @@ def read_access_logs(
             }
         )
 
+    logs.reverse()
+
     return logs
 
 
@@ -528,75 +530,30 @@ def start_monitoring(
     db: Session = Depends(get_db),
 ):
     target = payload.target.strip()
+    if not target:
+        raise HTTPException(400, "Target cannot be blank.")
 
     assessment = find_user_assessment(
         db=db,
         current_user=current_user,
         target=target,
     )
-
     if assessment is None:
-
         raise HTTPException(
             status_code=404,
-            detail=(
-                "No assessment exists for this target. "
-                "Complete a successful VAPT scan first."
-            ),
+            detail="No assessment exists for this target.",
         )
-
     if assessment.vapt_status != "completed":
-
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Monitoring can start only after "
-                "the VAPT assessment is completed."
-            ),
+            detail="Monitoring requires a completed VAPT assessment.",
         )
 
-    assessment.monitoring_status = "active"
-
-    assessment.overall_status = "active"
-
-    db.commit()
-
-    db.refresh(assessment)
-
-    return {
-        "message":
-            "Live monitoring started.",
-
-        "assessment_id":
-            assessment.id,
-
-        "target":
-            assessment.target,
-
-        "monitoring_status":
-            assessment.monitoring_status,
-
-        "log_sources": [
-            {
-                "type":
-                    "syslog",
-                "source":
-                    "systemd-journald",
-            },
-            {
-                "type":
-                    "auth",
-                "source":
-                    "systemd-journald",
-            },
-            {
-                "type":
-                    "access",
-                "source":
-                    "soc-api runtime access.log",
-            },
-        ],
-    }
+    # Do not mark collection active when no scoped collector is available.
+    raise HTTPException(
+        status_code=503,
+        detail='Scoped log collection is unavailable. The backend host journal and application access log are shared infrastructure records and cannot be attributed safely to your selected assessment. Use Security Events or Log Explorer for authorized persisted telemetry.',
+    )
 
 
 # ==================================================
@@ -671,39 +628,31 @@ def monitoring_status(
     ),
     db: Session = Depends(get_db),
 ):
+    if not target.strip():
+        raise HTTPException(400, "Target cannot be blank.")
+
     assessment = find_user_assessment(
         db=db,
         current_user=current_user,
         target=target,
     )
-
     if assessment is None:
-
         raise HTTPException(
             status_code=404,
-            detail=(
-                "No assessment exists for this target."
-            ),
+            detail="No assessment exists for this target.",
         )
 
     return {
-        "assessment_id":
-            assessment.id,
-
-        "target":
-            assessment.target,
-
-        "monitoring_status":
-            assessment.monitoring_status,
-
-        "vapt_status":
-            assessment.vapt_status,
-
-        "qa_status":
-            assessment.qa_status,
-
-        "overall_status":
-            assessment.overall_status,
+        "assessment_id": assessment.id,
+        "target": assessment.target,
+        "monitoring_status": "unavailable",
+        "stored_monitoring_status": assessment.monitoring_status,
+        "collection_available": False,
+        "log_sources": [],
+        "vapt_status": assessment.vapt_status,
+        "qa_status": assessment.qa_status,
+        "overall_status": assessment.overall_status,
+        "detail": 'Scoped log collection is unavailable. The backend host journal and application access log are shared infrastructure records and cannot be attributed safely to your selected assessment. Use Security Events or Log Explorer for authorized persisted telemetry.',
     }
 
 
@@ -745,226 +694,30 @@ def get_logs(
         get_db
     ),
 ):
-    """
-    Return system, authentication or access logs.
-
-    When target is supplied, it is treated as the selected
-    assessment context.
-
-    Note:
-    systemd-journald and the local access log are logs from
-    the SOC Platform host/application. They are not remote
-    server logs for an arbitrary external website.
-    """
-
-    if log_type not in {
-        "syslog",
-        "auth",
-        "access",
-    }:
-
+    """Never expose unscoped backend-host logs through user endpoints."""
+    # SCOPED_LOG_COLLECTION_UNAVAILABLE
+    if log_type not in {"syslog", "auth", "access"}:
         raise HTTPException(
             status_code=404,
-            detail=(
-                "Unknown log type. "
-                "Use syslog, auth or access."
-            ),
+            detail="Unknown log type. Use syslog, auth or access.",
         )
 
-    assessment = None
-
-    # --------------------------------------------------
-    # TARGET / ASSESSMENT LINK
-    # --------------------------------------------------
-
-    if target:
+    if target is not None:
+        if not target.strip():
+            raise HTTPException(400, "Target cannot be blank.")
 
         assessment = find_user_assessment(
             db=db,
             current_user=current_user,
             target=target,
         )
-
         if assessment is None:
-
             raise HTTPException(
                 status_code=404,
-                detail=(
-                    "No assessment exists for "
-                    "the selected target."
-                ),
+                detail="No assessment exists for the selected target.",
             )
 
-    # ==================================================
-    # SYSLOG
-    # ==================================================
-
-    if log_type == "syslog":
-
-        lines = read_journal(
-            limit=limit,
-            search=search,
-        )
-
-        logs = format_journal_logs(
-            lines,
-            "syslog",
-        )
-
-        logs = apply_filters(
-            logs,
-            search=None,
-            severity=severity,
-        )
-
-        return {
-
-            "status":
-                "connected",
-
-            "log_type":
-                "syslog",
-
-            "source":
-                "systemd-journald",
-
-            "assessment_id":
-                assessment.id
-                if assessment
-                else None,
-
-            "target":
-                assessment.target
-                if assessment
-                else target,
-
-            "monitoring_status":
-                assessment.monitoring_status
-                if assessment
-                else None,
-
-            "count":
-                len(logs),
-
-            "logs":
-                logs,
-        }
-
-    # ==================================================
-    # AUTH
-    # ==================================================
-
-    if log_type == "auth":
-
-        lines = read_journal(
-            limit=limit,
-            search=None,
-        )
-
-        lines = filter_auth_logs(
-            lines
-        )
-
-        if search:
-
-            query = (
-                search.strip().lower()
-            )
-
-            lines = [
-                line
-                for line in lines
-                if query
-                in line.lower()
-            ]
-
-        logs = format_journal_logs(
-            lines,
-            "auth",
-        )
-
-        logs = apply_filters(
-            logs,
-            search=None,
-            severity=severity,
-        )
-
-        return {
-
-            "status":
-                "connected",
-
-            "log_type":
-                "auth",
-
-            "source":
-                "systemd-journald",
-
-            "assessment_id":
-                assessment.id
-                if assessment
-                else None,
-
-            "target":
-                assessment.target
-                if assessment
-                else target,
-
-            "monitoring_status":
-                assessment.monitoring_status
-                if assessment
-                else None,
-
-            "count":
-                len(logs),
-
-            "logs":
-                logs,
-        }
-
-    # ==================================================
-    # ACCESS
-    # ==================================================
-
-    access_logs = read_access_logs(
-        limit=limit,
+    raise HTTPException(
+        status_code=503,
+        detail='Scoped log collection is unavailable. The backend host journal and application access log are shared infrastructure records and cannot be attributed safely to your selected assessment. Use Security Events or Log Explorer for authorized persisted telemetry.',
     )
-
-    access_logs = apply_filters(
-        access_logs,
-        search=search,
-        severity=severity,
-    )
-
-    return {
-
-        "status":
-            "connected",
-
-        "log_type":
-            "access",
-
-        "source":
-            "soc-api",
-
-        "assessment_id":
-            assessment.id
-            if assessment
-            else None,
-
-        "target":
-            assessment.target
-            if assessment
-            else target,
-
-        "monitoring_status":
-            assessment.monitoring_status
-            if assessment
-            else None,
-
-        "count":
-            len(access_logs),
-
-        "logs":
-            access_logs,
-    }

@@ -1,0 +1,14 @@
+{
+  "id": "subdomain-discovery",
+  "name": "Subdomain Discovery",
+  "stage": "01 Reconnaissance",
+  "category": "Reconnaissance",
+  "execution_type": "scanner",
+  "executable": "dnsrecon",
+  "target_types": [
+    "domain"
+  ],
+  "enabled": true,
+  "integrated": true,
+  "description": "Real DNSRecon brute-force subdomain discovery using the server-side 5,000-entry subdomain wordlist"
+}

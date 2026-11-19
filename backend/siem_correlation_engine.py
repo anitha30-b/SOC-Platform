@@ -343,11 +343,15 @@ def _event_matches_rule(
 def _cooldown_key(
     rule: Dict[str, Any],
     group_value: str | None,
+    scope_key: str | None = None,
 ) -> str:
-    return f"{rule['id']}:{group_value or 'global'}"
+    scope = scope_key or "host-global"
+    return f"{scope}:{rule['id']}:{group_value or 'global'}"
 
 
-def evaluate_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
+def evaluate_event(
+    event: Dict[str, Any], *, allow_response_actions: bool = True
+) -> List[Dict[str, Any]]:
     """
     Evaluate one real SIEM event against configured rules.
     Returns detection records only when a rule actually matches.
@@ -379,7 +383,8 @@ def evaluate_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
         matching_events = [
             item
             for item in RECENT_EVENTS
-            if _event_matches_rule(item, rule)
+            if item.get("_tenant_scope_key") == event.get("_tenant_scope_key")
+            and _event_matches_rule(item, rule)
             and item["_parsed_timestamp"] <= event_time
             and (
                 event_time - item["_parsed_timestamp"]
@@ -441,6 +446,7 @@ def evaluate_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
             cooldown_key = _cooldown_key(
                 rule,
                 group_value,
+                event.get("_tenant_scope_key"),
             )
 
             previous_alert = RECENT_ALERTS.get(
@@ -458,7 +464,7 @@ def evaluate_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
 
             response_actions = []
 
-            if rule.get("response") == "block_ip":
+            if allow_response_actions and rule.get("response") == "block_ip":
                 if rule.get("group_by") == "username":
                     for source_ip in unique_values:
                         response_actions.append(

@@ -1308,7 +1308,6 @@ def get_findings_by_severity(
         )
         .filter(
             SecurityFinding.user_id == current_user.id,
-            SecurityFinding.tool_name.in_(vapt_tools),
         )
     )
 
@@ -1392,7 +1391,6 @@ def get_findings_by_tool(
         )
         .filter(
             SecurityFinding.user_id == current_user.id,
-            SecurityFinding.tool_name.in_(vapt_tools),
         )
     )
 

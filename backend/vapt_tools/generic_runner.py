@@ -1,6 +1,9 @@
+import json
 import shutil
 import socket
 import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any, Callable
 
 
@@ -66,6 +69,17 @@ def build_command(
             "-d",
             target,
             "-a",
+        ]
+
+    if tool_id == "subdomain-discovery":
+        return [
+            resolved,
+            "-d",
+            target,
+            "-t",
+            "brt",
+            "-D",
+            "/usr/share/dnsrecon/dnsrecon/data/subdomains-top1mil-5000.txt",
         ]
 
     if tool_id == "masscan":
@@ -156,6 +170,18 @@ def run_generic_tool(
         target=target,
     )
 
+    json_output_path = None
+
+    if tool_id == "subdomain-discovery":
+        json_file = tempfile.NamedTemporaryFile(
+            prefix="dnsrecon-subdomain-",
+            suffix=".json",
+            delete=False,
+        )
+        json_output_path = json_file.name
+        json_file.close()
+        command.extend(["-j", json_output_path])
+
     if progress_callback:
         progress_callback(
             35,
@@ -172,39 +198,28 @@ def run_generic_tool(
             bufsize=1,
         )
 
-        stdout_lines = []
-        stderr_lines = []
+        timed_out = False
 
-        while process.poll() is None:
-            if process.stdout:
-                line = process.stdout.readline()
-                if line:
-                    stdout_lines.append(line)
-                    if progress_callback:
-                        progress_callback(
-                            60,
-                            "Running",
-                            line.strip()[:240],
-                        )
+        try:
+            stdout, stderr = process.communicate(
+                timeout=max(1, int(timeout_seconds))
+            )
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            process.kill()
+            stdout, stderr = process.communicate()
 
-            if process.stderr:
-                line = process.stderr.readline()
-                if line:
-                    stderr_lines.append(line)
-                    if progress_callback:
-                        progress_callback(
-                            60,
-                            "Running",
-                            line.strip()[:240],
-                        )
-
-        if process.stdout:
-            stdout_lines.extend(process.stdout.readlines())
-
-        if process.stderr:
-            stderr_lines.extend(process.stderr.readlines())
+            timeout_message = (
+                f"{tool_name} timed out after "
+                f"{max(1, int(timeout_seconds))} seconds."
+            )
+            stderr = (
+                f"{stderr or ''}{timeout_message}\n"
+            )
 
         return_code = process.returncode
+        stdout_lines = [stdout or ""]
+        stderr_lines = [stderr or ""]
 
     except OSError as exc:
         raise GenericToolError(
@@ -218,18 +233,36 @@ def run_generic_tool(
             f"Processing {tool_name} output.",
         )
 
-    return {
+    result = {
         "tool": tool_id,
         "tool_name": tool_name,
         "execution_type": execution_type,
         "target": target,
         "status": (
-            "completed"
-            if return_code == 0
-            else "completed_with_errors"
+            "timeout"
+            if timed_out
+            else (
+                "completed"
+                if return_code == 0
+                else "completed_with_errors"
+            )
         ),
         "return_code": return_code,
         "stdout": "".join(stdout_lines),
         "stderr": "".join(stderr_lines),
         "command": command,
     }
+
+    if json_output_path:
+        try:
+            with open(json_output_path, "r", encoding="utf-8") as json_file:
+                result["json_output"] = json.load(json_file)
+        except (OSError, json.JSONDecodeError) as exc:
+            result["json_output_error"] = str(exc)
+        finally:
+            try:
+                Path(json_output_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    return result

@@ -1,4 +1,6 @@
+from collections import defaultdict
 from datetime import datetime, timezone
+import re
 from zoneinfo import ZoneInfo
 import json
 
@@ -7,9 +9,12 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import SecurityEvent, SIEMRuleConfig
+from models import Assessment, SecurityEvent, SIEMRuleConfig, User
 from rbac import require_role
 from siem_correlation_engine import SIEM_RULES, apply_rule_config, reset_rule_config
+from mitre import get_attack_id, get_attack_patterns, get_tactics
+from sigma_router import list_rule_records
+from security_event_scope import owned_security_event_filter
 
 
 router = APIRouter(
@@ -57,6 +62,14 @@ def serialize_event(event):
     elif raw_evidence is not None:
         raw_evidence = str(raw_evidence)
 
+    network_event = raw_event
+    if event.event_type == "network_detection":
+        network_event = raw_event.get("trigger_event") or raw_event
+
+    dns_event = raw_event
+    if event.event_type == "dns_detection":
+        dns_event = raw_event.get("trigger_event") or raw_event
+
     return {
         "id": event.id,
         "event_id": event.event_id,
@@ -67,6 +80,22 @@ def serialize_event(event):
         "message": event.message,
         "target": event.target,
         "assessment_id": event.assessment_id,
+        "network": {
+            "source_ip": network_event.get("source_ip"),
+            "destination_ip": network_event.get("destination_ip"),
+            "source_port": network_event.get("source_port"),
+            "destination_port": network_event.get("destination_port"),
+            "protocol": network_event.get("protocol"),
+        } if event.event_type in {"network_connection_attempt", "network_detection"} else None,
+        "dns": {
+            "query_name": dns_event.get("dns_query_name"),
+            "query_type": dns_event.get("dns_query_type"),
+            "source_ip": dns_event.get("source_ip"),
+            "destination_ip": dns_event.get("destination_ip"),
+            "source_port": dns_event.get("source_port"),
+            "destination_port": dns_event.get("destination_port"),
+            "protocol": dns_event.get("protocol"),
+        } if event.event_type in {"dns_query", "dns_detection"} else None,
 
         "mitre": {
             "technique_id": event.mitre_technique_id,
@@ -118,12 +147,15 @@ def get_security_events(
     limit: int = Query(100, ge=1, le=500),
     severity: str | None = Query(None),
     source: str | None = Query(None),
+    event_type: list[str] | None = Query(None),
     mitre_technique: str | None = Query(None),
     search: str | None = Query(None, max_length=200),
     db: Session = Depends(get_db),
     current_user=Depends(require_role(1)),
 ):
-    query = db.query(SecurityEvent)
+    query = db.query(SecurityEvent).filter(
+        owned_security_event_filter(db, current_user)
+    )
 
     if severity:
         query = query.filter(
@@ -134,6 +166,17 @@ def get_security_events(
         query = query.filter(
             SecurityEvent.source == source
         )
+
+    if event_type:
+        normalized_event_types = [
+            value.strip().lower()
+            for value in event_type
+            if value and value.strip()
+        ]
+        if normalized_event_types:
+            query = query.filter(
+                SecurityEvent.event_type.in_(normalized_event_types)
+            )
 
     if mitre_technique:
         query = query.filter(
@@ -168,6 +211,303 @@ def get_security_events(
     ]
 
 
+@router.get("/anomaly/baseline")
+def get_anomaly_baseline(
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role(1)),
+):
+    """Compare the latest completed 15-minute bucket with seven days of history."""
+    from datetime import timedelta
+    from math import ceil
+    from statistics import median
+
+    bucket_seconds = 900
+    history_bucket_count = 7 * 24 * 4
+
+    # SecurityEvent timestamps are stored as naive UTC timestamps.
+    now_utc = datetime.now(timezone.utc)
+    boundary_epoch = int(now_utc.timestamp() // bucket_seconds) * bucket_seconds
+    window_end = datetime.fromtimestamp(
+        boundary_epoch, tz=timezone.utc
+    ).replace(tzinfo=None)
+    window_start = window_end - timedelta(seconds=bucket_seconds)
+    baseline_start = window_start - timedelta(days=7)
+
+    current_bucket = boundary_epoch // bucket_seconds - 1
+    history_indexes = range(
+        current_bucket - history_bucket_count,
+        current_bucket,
+    )
+
+    # Aggregate in PostgreSQL instead of loading individual events into memory.
+    bucket_expr = func.floor(
+        func.extract("epoch", SecurityEvent.timestamp) / bucket_seconds
+    )
+    aggregated = (
+        db.query(
+            SecurityEvent.event_type,
+            bucket_expr.label("bucket_index"),
+            func.count(SecurityEvent.id).label("event_count"),
+        )
+        .filter(
+            owned_security_event_filter(db, current_user),
+            SecurityEvent.timestamp >= baseline_start,
+            SecurityEvent.timestamp < window_end,
+        )
+        .group_by(SecurityEvent.event_type, bucket_expr)
+        .all()
+    )
+
+    counts = {}
+    event_types = set()
+
+    for event_type, bucket_index, event_count in aggregated:
+        kind = str(event_type or "unknown")
+        event_types.add(kind)
+        counts[(kind, int(bucket_index))] = int(event_count)
+
+    results = []
+    for kind in sorted(event_types):
+        current_count = counts.get((kind, current_bucket), 0)
+
+        # Include zero-event buckets so the baseline is not biased upward
+        # by considering only periods in which an event occurred.
+        historical_counts = [
+            counts.get((kind, index), 0)
+            for index in history_indexes
+        ]
+
+        baseline_median = float(median(historical_counts))
+        deviations = [
+            abs(value - baseline_median)
+            for value in historical_counts
+        ]
+        mad = float(median(deviations))
+
+        raw_threshold = (
+            baseline_median + 3 * 1.4826 * mad
+            if mad > 0
+            else baseline_median * 1.5
+        )
+        threshold = max(5, ceil(raw_threshold))
+
+        results.append({
+            "event_type": kind,
+            "current_count": current_count,
+            "baseline_median": baseline_median,
+            "baseline_mad": mad,
+            "threshold": threshold,
+            "historical_buckets": len(historical_counts),
+            "flagged": current_count >= threshold and current_count > 1,
+        })
+
+    results.sort(
+        key=lambda row: (not row["flagged"], -row["current_count"], row["event_type"])
+    )
+
+    return {
+        "mode": "historical_volume_baseline",
+        "window_minutes": 15,
+        "baseline_days": 7,
+        "baseline_bucket_count": history_bucket_count,
+        "window_start": window_start.isoformat() + "Z",
+        "window_end": window_end.isoformat() + "Z",
+        "baseline_start": baseline_start.isoformat() + "Z",
+        "baseline_end": window_start.isoformat() + "Z",
+        "events_in_current_window": sum(row["current_count"] for row in results),
+        "event_type_count": len(results),
+        "flagged_count": sum(1 for row in results if row["flagged"]),
+        "event_types": results,
+        "interpretation": (
+            "Volume outliers for analyst review, not confirmed malicious activity. "
+            "Sparse history and changes in event collection can affect the baseline."
+        ),
+    }
+
+
+@router.get("/coverage/mitre")
+def get_mitre_coverage(
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role(1)),
+):
+    """Compare explicit rule-to-technique mappings with tenant-scoped observations."""
+    catalogue = {}
+
+    for obj in get_attack_patterns():
+        if obj.get("revoked") or obj.get("x_mitre_deprecated"):
+            continue
+
+        technique_id = get_attack_id(obj)
+        if not technique_id:
+            continue
+
+        technique_id = technique_id.upper()
+        catalogue[technique_id] = {
+            "technique_id": technique_id,
+            "name": obj.get("name", ""),
+            "tactics": get_tactics(obj),
+            "is_subtechnique": bool(obj.get("x_mitre_is_subtechnique")),
+        }
+
+    # Treat only explicit attack.tXXXX tags on valid Sigma rules as mappings.
+    # Do not infer a technique from a rule name or event type.
+    mappings = defaultdict(list)
+    sigma_records = list_rule_records()
+    unmapped_sigma_rules = []
+
+    tag_pattern = re.compile(r"attack\.(t[0-9]{4}(?:\.[0-9]{3})?)", re.I)
+
+    for record in sigma_records:
+        if record.get("validation_status") != "VALID":
+            unmapped_sigma_rules.append({
+                "rule_id": record["rule_id"],
+                "title": record["title"],
+                "reason": "Rule is invalid or has a duplicate ID.",
+            })
+            continue
+
+        rule_mapped_ids = set()
+        for tag in record.get("tags", []):
+            match = tag_pattern.fullmatch(str(tag).strip())
+            if not match:
+                continue
+
+            technique_id = match.group(1).upper()
+            if technique_id not in catalogue:
+                continue
+
+            rule_mapped_ids.add(technique_id)
+
+        if not rule_mapped_ids:
+            unmapped_sigma_rules.append({
+                "rule_id": record["rule_id"],
+                "title": record["title"],
+                "reason": "No explicit technique tag matched the active local catalogue.",
+            })
+
+        for technique_id in sorted(rule_mapped_ids):
+            mappings[technique_id].append({
+                "rule_type": "Sigma",
+                "rule_id": record["rule_id"],
+                "rule_name": record["title"],
+                "integration_status": record.get("integration_status", "UNKNOWN"),
+            })
+
+    # The SIEM rule definitions have no explicit technique-ID field today.
+    siem_unmapped_rules = [
+        {
+            "rule_id": rule.get("id"),
+            "rule_name": rule.get("name"),
+            "reason": "No explicit technique ID is configured on this SIEM rule.",
+        }
+        for rule in SIEM_RULES
+        if not (rule.get("technique_id") or rule.get("mitre_technique_id"))
+    ]
+
+    # Count only explicitly owned assessment or registered telemetry events.
+    observed_query = (
+        db.query(
+            SecurityEvent.mitre_technique_id,
+            func.count(SecurityEvent.id).label("event_count"),
+        )
+        .filter(
+            SecurityEvent.mitre_technique_id.isnot(None),
+            owned_security_event_filter(db, current_user),
+        )
+    )
+
+    scope_description = (
+        "Persisted events authorized by the existing event ownership filter, "
+        "including direct ownership, client scope, assessments, and registered "
+        "telemetry sources."
+    )
+
+    observed_counts = {
+        str(technique_id).upper(): int(event_count)
+        for technique_id, event_count in observed_query.group_by(
+            SecurityEvent.mitre_technique_id
+        ).all()
+    }
+
+    configured_ids = set(mappings)
+    catalogue_ids = set(catalogue)
+    observed_ids = {
+        technique_id
+        for technique_id, event_count in observed_counts.items()
+        if event_count > 0
+    }
+    observed_catalogue_ids = observed_ids & catalogue_ids
+
+    rows = []
+    for technique_id, item in catalogue.items():
+        configured_by = mappings.get(technique_id, [])
+        event_count = observed_counts.get(technique_id, 0)
+        configured = bool(configured_by)
+        observed = event_count > 0
+
+        if configured and observed:
+            status = "CONFIGURED_AND_OBSERVED"
+        elif configured:
+            status = "CONFIGURED_NOT_OBSERVED"
+        elif observed:
+            status = "OBSERVED_NOT_CONFIGURED"
+        else:
+            status = "NOT_CONFIGURED_OR_OBSERVED"
+
+        rows.append({
+            **item,
+            "configured": configured,
+            "configured_by": configured_by,
+            "observed": observed,
+            "observed_event_count": event_count,
+            "coverage_status": status,
+        })
+
+    rows.sort(key=lambda item: (
+        not item["configured"],
+        not item["observed"],
+        item["technique_id"],
+    ))
+
+    return {
+        "framework": "MITRE ATT&CK Enterprise",
+        "version": "19.2",
+        "catalogue_active_only": True,
+        "catalogue_technique_count": len(catalogue),
+        "configured_technique_count": len(configured_ids),
+        "catalogue_techniques_without_explicit_mapping": len(
+            catalogue_ids - configured_ids
+        ),
+        "observed_catalogue_technique_count": len(observed_catalogue_ids),
+        "observed_configured_technique_count": len(
+            observed_catalogue_ids & configured_ids
+        ),
+        "observed_without_configured_mapping_count": len(
+            observed_catalogue_ids - configured_ids
+        ),
+        "observed_techniques_outside_catalogue": sorted(
+            observed_ids - catalogue_ids
+        ),
+        "configured_mapping_count": sum(len(value) for value in mappings.values()),
+        "sigma_rule_count": len(sigma_records),
+        "sigma_rules_without_explicit_mapping": unmapped_sigma_rules,
+        "siem_rule_count": len(SIEM_RULES),
+        "siem_rules_without_explicit_mapping": siem_unmapped_rules,
+        "observed_event_count": sum(observed_counts.values()),
+        "observation_scope": scope_description,
+        "interpretation": (
+            "The catalogue excludes revoked and deprecated techniques. "
+            "Configured coverage counts only explicit active-catalogue technique tags "
+            "on valid Sigma rules; this does not establish detection effectiveness. "
+            "Unmapped techniques are not automatically deployment deficiencies. "
+            "Observations use the existing event ownership filter across all dates. "
+            "Historical observations outside the active catalogue remain included "
+            "in observed_event_count and observed_techniques_outside_catalogue."
+        ),
+        "techniques": rows,
+    }
+
+
 @router.get("/alerts")
 def get_alerts(
     limit: int = Query(200, ge=1, le=500),
@@ -182,10 +522,12 @@ def get_alerts(
         "siem_detection",
         "network_detection",
         "dns_detection",
+        "sigma_detection",
     )
 
     query = db.query(SecurityEvent).filter(
-        SecurityEvent.event_type.in_(detection_types)
+        SecurityEvent.event_type.in_(detection_types),
+        owned_security_event_filter(db, current_user),
     )
 
     if severity and severity.strip().upper() not in {"ALL", "ANY"}:
@@ -347,7 +689,8 @@ def get_mitre_technique_stats(
             ),
         )
         .filter(
-            SecurityEvent.mitre_technique_id.isnot(None)
+            SecurityEvent.mitre_technique_id.isnot(None),
+            owned_security_event_filter(db, current_user),
         )
         .group_by(
             SecurityEvent.mitre_technique_id,
@@ -393,6 +736,7 @@ def get_mitre_tactic_stats(
         .filter(
             SecurityEvent.mitre_technique_id.isnot(None),
             SecurityEvent.mitre_tactic.isnot(None),
+            owned_security_event_filter(db, current_user),
         )
         .group_by(
             SecurityEvent.mitre_tactic,
@@ -425,7 +769,8 @@ def get_recent_mitre_events(
     events = (
         db.query(SecurityEvent)
         .filter(
-            SecurityEvent.mitre_technique_id.isnot(None)
+            SecurityEvent.mitre_technique_id.isnot(None),
+            owned_security_event_filter(db, current_user),
         )
         .order_by(
             SecurityEvent.timestamp.desc()
@@ -457,6 +802,7 @@ def get_active_mitre_alerts(
                 ["ERROR", "HIGH", "CRITICAL"]
             ),
             SecurityEvent.alert_status == "ACTIVE",
+            owned_security_event_filter(db, current_user),
         )
         .order_by(
             SecurityEvent.timestamp.desc()
@@ -483,7 +829,8 @@ def acknowledge_security_event(
     event = (
         db.query(SecurityEvent)
         .filter(
-            SecurityEvent.event_id == event_id
+            SecurityEvent.event_id == event_id,
+            owned_security_event_filter(db, current_user),
         )
         .first()
     )
@@ -522,7 +869,10 @@ def suppress_security_event(
 ):
     event = (
         db.query(SecurityEvent)
-        .filter(SecurityEvent.event_id == event_id)
+        .filter(
+            SecurityEvent.event_id == event_id,
+            owned_security_event_filter(db, current_user),
+        )
         .first()
     )
 
@@ -553,7 +903,10 @@ def unsuppress_security_event(
 ):
     event = (
         db.query(SecurityEvent)
-        .filter(SecurityEvent.event_id == event_id)
+        .filter(
+            SecurityEvent.event_id == event_id,
+            owned_security_event_filter(db, current_user),
+        )
         .first()
     )
 
@@ -585,7 +938,8 @@ def resolve_security_event(
     event = (
         db.query(SecurityEvent)
         .filter(
-            SecurityEvent.event_id == event_id
+            SecurityEvent.event_id == event_id,
+            owned_security_event_filter(db, current_user),
         )
         .first()
     )

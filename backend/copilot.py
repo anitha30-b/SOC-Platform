@@ -1,3 +1,6 @@
+import json
+import math
+from sqlalchemy.orm import load_only
 from datetime import datetime
 from typing import Any
 import re
@@ -9,7 +12,10 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from auth import get_current_user
-from models import User, Assessment, SecurityFinding, SupportTicket, Report
+from models import (
+    User, Assessment, SecurityFinding, SupportTicket,
+    SupportTicketMessage, VAPTReportRun,
+)
 
 
 router = APIRouter(prefix="/copilot", tags=["Security Copilot"])
@@ -43,6 +49,103 @@ class CopilotTicketResponse(BaseModel):
 # ============================================================
 # HELPERS
 # ============================================================
+
+
+def _copilot_cvss(value):
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return None
+    try:
+        number = float(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    if math.isfinite(number) and 0 <= number <= 10:
+        return number
+    return None
+
+
+def _copilot_report_answer(reports):
+    if not reports:
+        return "No stored VAPT reports are currently associated with your account."
+
+    report = reports[0]
+    introduction = (
+        f"Your latest stored VAPT report is {report.report_run_id} "
+        f"for Assessment {report.assessment_id}. "
+        f"Report type: {report.report_type}. Status: {report.status}."
+    )
+
+    if str(report.status).upper() != "COMPLETED":
+        return (
+            introduction
+            + " A completed report snapshot is not available for this run."
+        )
+
+    try:
+        raw = report.canonical_data
+        canonical = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        canonical = None
+
+    if not isinstance(canonical, dict):
+        return introduction + " The stored report content is unavailable."
+
+    findings = canonical.get("findings")
+    if not isinstance(findings, list) or any(
+        not isinstance(item, dict) for item in findings
+    ):
+        return introduction + " A usable findings snapshot is unavailable."
+
+    counts = {
+        "CRITICAL": 0,
+        "HIGH": 0,
+        "MEDIUM": 0,
+        "LOW": 0,
+        "NONE": 0,
+    }
+    unknown = 0
+    scores = []
+
+    for finding in findings:
+        severity = str(finding.get("severity") or "NONE").upper()
+        if severity in counts:
+            counts[severity] += 1
+        else:
+            unknown += 1
+
+        score = _copilot_cvss(finding.get("cvss_score"))
+        if score is not None:
+            scores.append(score)
+
+    parts = [
+        introduction,
+        f"The saved snapshot contains {len(findings)} finding(s): "
+        f"{counts['CRITICAL']} Critical, {counts['HIGH']} High, "
+        f"{counts['MEDIUM']} Medium, {counts['LOW']} Low, "
+        f"and {counts['NONE']} with severity NONE or unspecified.",
+    ]
+
+    if unknown:
+        parts.append(
+            f"{unknown} finding(s) have an unrecognized severity."
+        )
+
+    if scores:
+        parts.append(
+            f"CVSS is available for {len(scores)} finding(s). "
+            f"Average CVSS: {sum(scores) / len(scores):.2f}; "
+            f"highest CVSS: {max(scores):.2f}."
+        )
+    else:
+        parts.append(
+            "CVSS scores are not available in this report snapshot."
+        )
+
+    parts.append(
+        "This summarizes content saved at report generation time. "
+        "Current assessment findings may differ."
+    )
+    return " ".join(parts)
+
 
 def _severity_counts(findings: list[SecurityFinding]) -> dict[str, int]:
     counts = {
@@ -110,7 +213,7 @@ def _build_context(
     findings: list[SecurityFinding],
     assessments: list[Assessment],
     tickets: list[SupportTicket],
-    reports: list[Report],
+    reports: list[VAPTReportRun],
 ) -> dict[str, Any]:
     severity_counts = _severity_counts(findings)
 
@@ -167,7 +270,7 @@ def _answer_from_user_context(
     findings: list[SecurityFinding],
     assessments: list[Assessment],
     tickets: list[SupportTicket],
-    reports: list[Report],
+    reports: list[VAPTReportRun],
 ) -> str:
     text = message.lower().strip()
     counts = _severity_counts(findings)
@@ -180,7 +283,8 @@ def _answer_from_user_context(
     )
 
     if cve_matches:
-        requested_cve = cve_matches[0].upper().replace(" ", "-")
+        digits = re.search(r"(\d{4})-(\d{4,7})$", cve_matches[0])
+        requested_cve = f"CVE-{digits.group(1)}-{digits.group(2)}"
 
         matching_findings = [
             finding
@@ -360,74 +464,24 @@ def _answer_from_user_context(
             answer += f" Recommended remediation: {finding.remediation}"
         return answer
 
-    # Reports
-    if "report" in text and (
-        "latest" in text or "last" in text or "summary" in text or "summarize" in text
+    # Reports: summarize stored snapshots rather than live findings.
+    if "report" in text and any(
+        word in text for word in ("latest", "last", "summary", "summarize")
     ):
-        if not reports:
-            return "No generated security reports are currently associated with your account."
+        return _copilot_report_answer(reports)
 
-        report = reports[0]
-        report_findings = [
-            finding
-            for finding in findings
-            if finding.assessment_id == report.assessment_id
-        ]
-        report_counts = _severity_counts(report_findings)
-
-        assessment = next(
-            (item for item in assessments if item.id == report.assessment_id),
-            None,
+    if "report" in text and any(
+        phrase in text for phrase in ("how many", "count", "total")
+    ):
+        completed = sum(
+            str(report.status).upper() == "COMPLETED"
+            for report in reports
         )
-
-        answer_parts = [
-            f"Your latest report is {report.report_id} for Assessment {report.assessment_id}.",
-            f"Report type: {report.report_type}. Status: {report.status}.",
-            f"It contains {len(report_findings)} security finding(s): "
-            f"{report_counts['CRITICAL']} Critical, {report_counts['HIGH']} High, "
-            f"{report_counts['MEDIUM']} Medium, {report_counts['LOW']} Low.",
-        ]
-
-        if assessment:
-            answer_parts.append(
-                "Assessment status: "
-                f"overall={assessment.overall_status or 'not available'}, "
-                f"VAPT={assessment.vapt_status or 'not available'}, "
-                f"QA={assessment.qa_status or 'not available'}, "
-                f"monitoring={assessment.monitoring_status or 'not available'}, "
-                f"report={assessment.report_status or 'not available'}."
-            )
-
-        priority_text = []
-        if report_counts['CRITICAL']:
-            priority_text.append(
-                f"{report_counts['CRITICAL']} Critical finding(s) should be addressed first."
-            )
-        if report_counts['HIGH']:
-            priority_text.append(
-                f"{report_counts['HIGH']} High finding(s) should be prioritized next."
-            )
-        if report_counts['MEDIUM']:
-            priority_text.append(
-                f"{report_counts['MEDIUM']} Medium finding(s) should then be reviewed and remediated."
-            )
-        if priority_text:
-            answer_parts.append("Priority: " + " ".join(priority_text))
-        elif report_findings:
-            answer_parts.append("No Critical or High findings are recorded in this assessment.")
-        else:
-            answer_parts.append("No findings are currently linked to this assessment.")
-
-        top_findings = []
-        for finding in report_findings[:3]:
-            top_findings.append(_format_finding(finding))
-        if top_findings:
-            answer_parts.append("Recent findings: " + "; ".join(top_findings) + ".")
-
-        return " ".join(answer_parts)
-
-    if "report" in text and ("how many" in text or "count" in text or "total" in text):
-        return f"You currently have {len(reports)} generated report(s)."
+        return (
+            f"You have {len(reports)} stored VAPT report run(s), "
+            f"including {completed} completed report(s). "
+            "Legacy reports are not included in this count."
+        )
 
     # Assessments
     if "assessment" in text and ("how many" in text or "count" in text or "total" in text):
@@ -498,8 +552,8 @@ def _answer_from_user_context(
 
         critical_findings.sort(
             key=lambda item: (
-                float(item.cvss_score)
-                if getattr(item, "cvss_score", None) is not None
+                _copilot_cvss(getattr(item, "cvss_score", None))
+                if _copilot_cvss(getattr(item, "cvss_score", None)) is not None
                 else -1.0
             ),
             reverse=True,
@@ -531,6 +585,16 @@ def _answer_from_user_context(
         )
 
         return " ".join(parts)
+
+    if text.rstrip("?.! ") in {
+        "cve",
+        "what is cve",
+        "what does cve mean",
+    }:
+        return (
+            "CVE stands for Common Vulnerabilities and Exposures. "
+            "A CVE identifier references a publicly known vulnerability."
+        )
 
     # General cybersecurity concepts
     if "owasp top 10" in text or ("what is owasp" in text and "api" not in text):
@@ -693,7 +757,7 @@ def create_copilot_support_ticket(
     finding_marker = f"Finding ID: {finding.finding_id}"
 
     for ticket in existing_tickets:
-        if finding_marker in str(ticket.description or ""):
+        if finding_marker in str(ticket.description or "").splitlines():
             return CopilotTicketResponse(
                 message="An active support ticket already exists for this finding.",
                 ticket_id=ticket.ticket_id,
@@ -706,12 +770,17 @@ def create_copilot_support_ticket(
         user_id=current_user.id,
         assessment_id=finding.assessment_id,
         category="SECURITY_FINDING",
-        subject=f"Security Finding Assistance: {finding.title or finding.finding_id}",
+        subject=f"Security Finding Assistance: {finding.title or finding.finding_id}"[:200],
         description=build_copilot_ticket_description(
             finding,
             payload.description,
         ),
-        priority=str(finding.severity or "MEDIUM").upper(),
+        priority=(
+            str(finding.severity or "MEDIUM").upper()
+            if str(finding.severity or "").upper()
+            in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+            else "MEDIUM"
+        ),
         status="OPEN",
         assignment_channel=None,
         assignment_status="NOT_ASSIGNED",
@@ -720,8 +789,22 @@ def create_copilot_support_ticket(
         ),
     )
 
-    db.add(ticket)
-    db.commit()
+    try:
+        db.add(ticket)
+        db.flush()
+
+        db.add(SupportTicketMessage(
+            ticket_id=ticket.id,
+            sender_type="USER",
+            sender_name=current_user.username,
+            message=ticket.description,
+        ))
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
     db.refresh(ticket)
 
     return CopilotTicketResponse(
@@ -777,9 +860,20 @@ def copilot_chat(
     )
 
     reports = (
-        db.query(Report)
-        .filter(Report.user_id == current_user.id)
-        .order_by(Report.generated_at.desc())
+        db.query(VAPTReportRun)
+        .options(load_only(
+            VAPTReportRun.id,
+            VAPTReportRun.report_run_id,
+            VAPTReportRun.assessment_id,
+            VAPTReportRun.status,
+            VAPTReportRun.report_type,
+            VAPTReportRun.created_at,
+        ))
+        .filter(VAPTReportRun.user_id == current_user.id)
+        .order_by(
+            VAPTReportRun.created_at.desc(),
+            VAPTReportRun.id.desc(),
+        )
         .all()
     )
 

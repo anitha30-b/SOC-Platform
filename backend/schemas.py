@@ -526,3 +526,62 @@ class SupportTicketDetailResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class UserSupportTicketResponse(BaseModel):
+    id: int
+    ticket_id: str
+
+    user_id: int
+    assessment_id: Optional[int] = None
+
+    category: str
+    subject: str
+    description: str
+    priority: str
+    status: str
+
+    assigned_to: Optional[str] = None
+    assignment_channel: Optional[str] = None
+    assignment_status: str
+
+    resolution: Optional[str] = None
+    final_admin_message: Optional[str] = None
+
+    created_at: datetime
+    updated_at: datetime
+    resolved_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+
+class UserSupportTicketDetailResponse(BaseModel):
+    id: int
+    ticket_id: str
+
+    user_id: int
+    assessment_id: Optional[int] = None
+
+    category: str
+    subject: str
+    description: str
+    priority: str
+    status: str
+
+    assigned_to: Optional[str] = None
+    assignment_channel: Optional[str] = None
+    assignment_status: str
+
+    resolution: Optional[str] = None
+    final_admin_message: Optional[str] = None
+
+    created_at: datetime
+    updated_at: datetime
+    resolved_at: Optional[datetime] = None
+
+    messages: list[SupportTicketMessageResponse] = []
+
+    class Config:
+        from_attributes = True

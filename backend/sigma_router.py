@@ -4,6 +4,7 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from rbac import require_role
+from sigma_evaluator import get_rule_execution_support
 
 router = APIRouter(prefix="/sigma", tags=["Sigma Rules"])
 
@@ -117,6 +118,25 @@ def list_rule_records():
                     "Duplicate rule ID in the Sigma library."
                 )
 
+    # Derive execution status only after validation and duplicate-ID checks.
+    for record in records:
+        _, rule, _ = read_rule_file(RULE_DIR / record["filename"])
+        support = get_rule_execution_support(rule)
+        enabled = (
+            record["validation_status"] == "VALID"
+            and support["supported"]
+        )
+        record["execution_supported"] = support["supported"]
+        record["execution_note"] = support["reason"]
+        record["live_detection_enabled"] = enabled
+
+        if record["validation_status"] != "VALID":
+            record["integration_status"] = "INVALID"
+        elif enabled:
+            record["integration_status"] = "LIVE_ENABLED"
+        else:
+            record["integration_status"] = "LIBRARY_ONLY"
+
     return records
 
 
@@ -128,7 +148,12 @@ def get_sigma_rules(
     current_user=Depends(require_role(1)),
 ):
     """List stored Sigma rules and their validation/integration status."""
-    records = list_rule_records()
+    all_records = list_rule_records()
+    live_enabled_rule_count = sum(
+        1 for record in all_records if record["live_detection_enabled"]
+    )
+    total_rule_count = len(all_records)
+    records = all_records
 
     if search and search.strip():
         term = search.strip().casefold()
@@ -161,8 +186,16 @@ def get_sigma_rules(
     return {
         "count": len(records),
         "rules": records,
-        "execution_mode": "LIBRARY_ONLY",
-        "live_detection_enabled": False,
+        "execution_mode": (
+            "LIVE_EVALUATION"
+            if live_enabled_rule_count == total_rule_count and total_rule_count > 0
+            else "PARTIAL_LIVE"
+            if live_enabled_rule_count > 0
+            else "LIBRARY_ONLY"
+        ),
+        "live_detection_enabled": live_enabled_rule_count > 0,
+        "live_enabled_rule_count": live_enabled_rule_count,
+        "total_rule_count": total_rule_count,
     }
 
 
@@ -175,27 +208,71 @@ def get_sigma_rule(
     for path in RULE_DIR.glob("*.yml"):
         content, rule, errors = read_rule_file(path)
         if isinstance(rule, dict) and rule.get("id") == rule_id:
+            execution_record = next(
+                (
+                    record for record in list_rule_records()
+                    if record["rule_id"] == rule_id
+                ),
+                None,
+            )
             return {
                 "rule": rule,
                 "filename": path.name,
                 "yaml": content,
-                "validation_status": "VALID" if not errors else "INVALID",
-                "validation_errors": errors,
-                "integration_status": "LIBRARY_ONLY",
-                "live_detection_enabled": False,
+                "validation_status": (
+                    execution_record["validation_status"]
+                    if execution_record else "INVALID"
+                ),
+                "validation_errors": (
+                    execution_record["validation_errors"]
+                    if execution_record else errors
+                ),
+                "integration_status": (
+                    execution_record["integration_status"]
+                    if execution_record else "LIBRARY_ONLY"
+                ),
+                "live_detection_enabled": bool(
+                    execution_record and execution_record["live_detection_enabled"]
+                ),
+                "execution_note": (
+                    execution_record.get("execution_note", "")
+                    if execution_record else "Execution metadata unavailable."
+                ),
             }
 
     for path in RULE_DIR.glob("*.yaml"):
         content, rule, errors = read_rule_file(path)
         if isinstance(rule, dict) and rule.get("id") == rule_id:
+            execution_record = next(
+                (
+                    record for record in list_rule_records()
+                    if record["rule_id"] == rule_id
+                ),
+                None,
+            )
             return {
                 "rule": rule,
                 "filename": path.name,
                 "yaml": content,
-                "validation_status": "VALID" if not errors else "INVALID",
-                "validation_errors": errors,
-                "integration_status": "LIBRARY_ONLY",
-                "live_detection_enabled": False,
+                "validation_status": (
+                    execution_record["validation_status"]
+                    if execution_record else "INVALID"
+                ),
+                "validation_errors": (
+                    execution_record["validation_errors"]
+                    if execution_record else errors
+                ),
+                "integration_status": (
+                    execution_record["integration_status"]
+                    if execution_record else "LIBRARY_ONLY"
+                ),
+                "live_detection_enabled": bool(
+                    execution_record and execution_record["live_detection_enabled"]
+                ),
+                "execution_note": (
+                    execution_record.get("execution_note", "")
+                    if execution_record else "Execution metadata unavailable."
+                ),
             }
 
     raise HTTPException(status_code=404, detail="Sigma rule not found.")

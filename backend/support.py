@@ -1,3 +1,4 @@
+from schemas import UserSupportTicketResponse, UserSupportTicketDetailResponse
 import uuid
 from datetime import datetime
 
@@ -103,7 +104,7 @@ def get_user_ticket(
 
 @router.post(
     "/tickets",
-    response_model=SupportTicketResponse,
+    response_model=UserSupportTicketResponse,
 )
 def create_ticket(
     request: SupportTicketCreate,
@@ -111,6 +112,13 @@ def create_ticket(
     current_user: User = Depends(get_current_user),
 ):
     require_user(current_user)
+
+    for field_name in ("category", "subject", "description"):
+        if not getattr(request, field_name).strip():
+            raise HTTPException(422, f"{field_name} must not be blank.")
+    if request.assessment_id is not None and request.assessment_id <= 0:
+        raise HTTPException(422, "Assessment ID must be positive.")
+
 
     # --------------------------------------------------------
     # Validate assessment when supplied
@@ -156,23 +164,23 @@ def create_ticket(
         final_admin_message=None,
     )
 
-    db.add(ticket)
-    db.commit()
+    try:
+        db.add(ticket)
+        db.flush()
+
+        first_message = SupportTicketMessage(
+            ticket_id=ticket.id,
+            sender_type="USER",
+            sender_name=current_user.username,
+            message=request.description.strip(),
+        )
+        db.add(first_message)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
     db.refresh(ticket)
-
-    # --------------------------------------------------------
-    # Automatically create first ticket message
-    # --------------------------------------------------------
-
-    first_message = SupportTicketMessage(
-        ticket_id=ticket.id,
-        sender_type="USER",
-        sender_name=current_user.username,
-        message=request.description.strip(),
-    )
-
-    db.add(first_message)
-    db.commit()
 
     return ticket
 
@@ -183,7 +191,7 @@ def create_ticket(
 
 @router.get(
     "/tickets",
-    response_model=list[SupportTicketResponse],
+    response_model=list[UserSupportTicketResponse],
 )
 def get_my_tickets(
     db: Session = Depends(get_db),
@@ -211,7 +219,7 @@ def get_my_tickets(
 
 @router.get(
     "/tickets/{ticket_id}",
-    response_model=SupportTicketDetailResponse,
+    response_model=UserSupportTicketDetailResponse,
 )
 def get_my_ticket(
     ticket_id: int,
@@ -238,7 +246,7 @@ def get_my_ticket(
     )
 
     return {
-        **ticket.__dict__,
+        **{key: value for key, value in ticket.__dict__.items() if key != "admin_notes"},
         "messages": messages,
     }
 
@@ -258,6 +266,8 @@ def add_user_message(
     current_user: User = Depends(get_current_user),
 ):
     require_user(current_user)
+    if not request.message.strip():
+        raise HTTPException(422, "Message must not be blank.")
 
     ticket = get_user_ticket(
         db,

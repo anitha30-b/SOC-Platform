@@ -1,5 +1,9 @@
+from sqlalchemy import func, cast
 import json
-from datetime import datetime
+from models import User
+from pydantic import BaseModel, Field
+from sqlalchemy import or_
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
@@ -7,6 +11,8 @@ from sqlalchemy.orm import Session
 
 from database import Base, engine, get_db
 from models import SecurityEvent
+from rbac import require_role
+from security_event_scope import owned_security_event_filter
 
 
 # ==================================================
@@ -138,9 +144,161 @@ router = APIRouter(
 )
 
 
+
+@router.get("/eligible-assignees")
+def get_eligible_incident_assignees(
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role(1)),
+):
+    query = db.query(User).filter(User.role_id == 1)
+    if current_user.client_id is not None:
+        query = query.filter(User.client_id == current_user.client_id)
+    else:
+        query = query.filter(User.id == current_user.id)
+
+    return {
+        "assignees": [
+            {"username": user.username}
+            for user in query.order_by(User.username.asc()).all()
+        ]
+    }
+
+
+def _owned_incident_case_query(db, current_user):
+    """Restrict incident cases to explicitly owned security events."""
+    return (
+        db.query(Incident)
+        .join(SecurityEvent, Incident.security_event_id == SecurityEvent.id)
+        .filter(owned_security_event_filter(db, current_user))
+    )
+
+
 # ==================================================
 # HELPERS
 # ==================================================
+
+
+def _incident_utc_response(payload):
+    """Format stored UTC timestamps without changing raw evidence."""
+    fields = {
+        "timestamp", "created_at", "updated_at", "acknowledged_at",
+        "investigation_started_at", "contained_at", "resolved_at", "closed_at",
+    }
+
+    def record(item):
+        result = dict(item)
+        for field in fields:
+            value = result.get(field)
+            if isinstance(value, str) and value:
+                parsed = datetime.fromisoformat(value)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                result[field] = parsed.astimezone(timezone.utc).isoformat()
+        if isinstance(result.get("case"), dict):
+            result["case"] = record(result["case"])
+        return result
+
+    if "incidents" in payload:
+        return {**payload, "incidents": [
+            record(item) for item in payload["incidents"]
+        ]}
+    return record(payload)
+
+
+
+# Server-generated history, separate from client-submitted audit messages.
+class IncidentHistory(Base):
+    __tablename__ = "incident_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    incident_id = Column(
+        String(100),
+        ForeignKey("incidents.incident_id"),
+        nullable=False,
+        index=True,
+    )
+    actor_user_id = Column(
+        Integer, ForeignKey("users.id"), nullable=False, index=True
+    )
+    actor_username = Column(String(100), nullable=False)
+    action = Column(String(100), nullable=False)
+    case_status = Column(String(30), nullable=False)
+    assigned_to = Column(String(255), nullable=True)
+    created_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, index=True
+    )
+
+
+IncidentHistory.__table__.create(bind=engine, checkfirst=True)
+
+
+def _record_incident_history(db, case, current_user, action):
+    # No independent commit: history and case succeed or fail together.
+    db.add(IncidentHistory(
+        incident_id=case.incident_id,
+        actor_user_id=current_user.id,
+        actor_username=current_user.username,
+        action=action,
+        case_status=case.status,
+        assigned_to=case.assigned_to,
+        created_at=datetime.utcnow(),
+    ))
+
+
+@router.get("/{incident_id}/history")
+def get_incident_history(
+    incident_id: str,
+    before_id: int | None = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role(1)),
+):
+    case = (
+        _owned_incident_case_query(db, current_user)
+        .filter(Incident.incident_id == incident_id)
+        .first()
+    )
+    if not case:
+        raise HTTPException(status_code=404, detail="Incident case not found.")
+
+    limit = min(max(limit, 1), 200)
+    query = db.query(IncidentHistory).filter(
+        IncidentHistory.incident_id == case.incident_id
+    )
+    if before_id is not None:
+        query = query.filter(IncidentHistory.id < before_id)
+
+    rows = query.order_by(IncidentHistory.id.desc()).limit(limit + 1).all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+
+    return {
+        "incident_id": case.incident_id,
+        "history": [
+            {
+                "id": row.id,
+                "actor_username": row.actor_username,
+                "action": row.action,
+                "case_status": row.case_status,
+                "assigned_to": row.assigned_to,
+                "created_at": row.created_at.replace(
+                    tzinfo=timezone.utc
+                ).isoformat(),
+            }
+            for row in rows
+        ],
+        "next_before_id": rows[-1].id if has_more else None,
+    }
+
+
+
+class IncidentNotesRequest(BaseModel):
+    notes: str = Field(min_length=1, max_length=50000)
+
+
+class IncidentResolutionRequest(BaseModel):
+    resolution: str = Field(min_length=1, max_length=20000)
+
 
 def parse_raw_event(raw_event):
     if not raw_event:
@@ -276,12 +434,46 @@ def serialize_case(case: Incident):
 
 @router.get("/")
 def get_incidents(
+    utc_timestamps: bool = False,
+    include_unmapped_network: bool = False,
+    include_case: bool = False,
+    compact: bool = False,
+    page_size: int | None = None,
+    offset: int = 0,
+    search: str = "",
+    severity: str = "ALL",
+    status: str = "ALL",
+    incident_view: str = "all",
+    include_summary: bool = False,
     db: Session = Depends(get_db),
+    current_user=Depends(require_role(1)),
 ):
-    events = (
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="Offset cannot be negative.")
+    if page_size is not None and not 1 <= page_size <= 200:
+        raise HTTPException(
+            status_code=400,
+            detail="Page size must be between 1 and 200.",
+        )
+    if page_size is None and offset:
+        raise HTTPException(
+            status_code=400,
+            detail="Offset requires page_size.",
+        )
+
+    query = (
         db.query(SecurityEvent)
         .filter(
-            SecurityEvent.mitre_technique_id.isnot(None),
+            owned_security_event_filter(db, current_user),
+            or_(
+                SecurityEvent.mitre_technique_id.isnot(None),
+                (
+                    (SecurityEvent.source == "tshark-siem")
+                    & (SecurityEvent.event_type == "network_detection")
+                    if include_unmapped_network
+                    else False
+                ),
+            ),
             SecurityEvent.severity.in_(
                 [
                     "ERROR",
@@ -290,21 +482,158 @@ def get_incidents(
                 ]
             ),
         )
-        .order_by(
-            SecurityEvent.timestamp.desc()
-        )
-        .all()
     )
+
+    allowed_views = {
+        "all", "active", "critical", "closed",
+        "investigation", "cases", "assignments",
+    }
+    if incident_view not in allowed_views:
+        raise HTTPException(status_code=400, detail="Invalid incident view.")
+    if len(search) > 200:
+        raise HTTPException(status_code=400, detail="Search is limited to 200 characters.")
+
+    severity = severity.strip().upper()
+    status = status.strip().upper()
+    summary = None
+
+    if include_summary or search.strip() or severity != "ALL" or status != "ALL" or incident_view != "all":
+        # Select the first saved case per event, matching existing serialization.
+        first_case_id = (
+            db.query(func.min(Incident.id))
+            .filter(Incident.security_event_id == SecurityEvent.id)
+            .correlate(SecurityEvent)
+            .scalar_subquery()
+        )
+        query = query.outerjoin(Incident, Incident.id == first_case_id)
+        effective_status = func.upper(func.coalesce(
+            Incident.status, SecurityEvent.alert_status, "OPEN"
+        ))
+
+        if include_summary:
+            summary = {"Total": 0, "Active": 0, "Critical": 0, "Closed": 0}
+            groups = (
+                query.with_entities(
+                    effective_status,
+                    func.upper(SecurityEvent.severity),
+                    func.count(SecurityEvent.id),
+                )
+                .group_by(effective_status, func.upper(SecurityEvent.severity))
+                .all()
+            )
+            for state, level, count in groups:
+                summary["Total"] += count
+                if state not in {"RESOLVED", "CLOSED"}:
+                    summary["Active"] += count
+                if level == "CRITICAL":
+                    summary["Critical"] += count
+                if state == "CLOSED":
+                    summary["Closed"] += count
+
+        if incident_view == "active":
+            query = query.filter(effective_status.notin_(["RESOLVED", "CLOSED"]))
+        elif incident_view == "critical":
+            query = query.filter(func.upper(SecurityEvent.severity) == "CRITICAL")
+        elif incident_view == "closed":
+            query = query.filter(effective_status == "CLOSED")
+        elif incident_view == "investigation":
+            query = query.filter(
+                Incident.id.isnot(None), effective_status == "IN_PROGRESS"
+            )
+        elif incident_view in {"cases", "assignments"}:
+            query = query.filter(Incident.id.isnot(None))
+
+        if severity != "ALL":
+            query = query.filter(func.upper(SecurityEvent.severity) == severity)
+        if status != "ALL":
+            query = query.filter(effective_status == status)
+
+        term = search.strip().lower()
+        if term:
+            fields = [
+                SecurityEvent.message, SecurityEvent.source,
+                SecurityEvent.target, SecurityEvent.event_type,
+                SecurityEvent.mitre_technique_id, Incident.assigned_to,
+                # Retain IP searching in stored detection evidence.
+                cast(SecurityEvent.raw_event, String),
+            ]
+            conditions = [
+                func.lower(field).contains(term, autoescape=True)
+                for field in fields
+            ]
+            if term.startswith("inc-") and term[4:].isdigit():
+                conditions.append(SecurityEvent.id == int(term[4:]))
+            query = query.filter(or_(*conditions))
+
+    total = query.count() if page_size is not None else None
+    query = query.order_by(
+        SecurityEvent.timestamp.desc(),
+        SecurityEvent.id.desc(),
+    )
+    if page_size is not None:
+        query = query.offset(offset).limit(page_size)
+    events = query.all()
 
     incidents = [
         serialize_security_event_incident(event)
         for event in events
     ]
 
-    return {
+    if include_case and events:
+        event_ids = [event.id for event in events]
+        cases = (
+            _owned_incident_case_query(db, current_user)
+            .filter(Incident.security_event_id.in_(event_ids))
+            .order_by(Incident.id.asc())
+            .all()
+        )
+        cases_by_event = {}
+        for case in cases:
+            cases_by_event.setdefault(case.security_event_id, case)
+
+        for item in incidents:
+            case = cases_by_event.get(item["database_id"])
+            item["case"] = serialize_case(case) if case else None
+
+    if compact:
+        for item in incidents:
+            for key in ("raw_event", "correlation", "detection"):
+                item.pop(key, None)
+
+            if isinstance(item.get("mitre"), dict):
+                item["mitre"] = {
+                    key: value
+                    for key, value in item["mitre"].items()
+                    if key != "evidence"
+                }
+
+            if isinstance(item.get("case"), dict):
+                item["case"] = {
+                    key: value
+                    for key, value in item["case"].items()
+                    if key not in {
+                        "description", "investigation_notes", "resolution"
+                    }
+                }
+
+    response = {
         "count": len(incidents),
         "incidents": incidents,
     }
+    if include_summary:
+        response["summary"] = summary
+    if page_size is not None:
+        response.update({
+            "total": total,
+            "offset": offset,
+            "page_size": page_size,
+            "next_offset": (
+                offset + len(incidents)
+                if offset + len(incidents) < total
+                else None
+            ),
+        })
+    return _incident_utc_response(response) if utc_timestamps else response
 
 
 # ==================================================
@@ -314,7 +643,9 @@ def get_incidents(
 @router.post("/{incident_id}/case")
 def create_incident_case(
     incident_id: str,
+    include_unmapped_network: bool = False,
     db: Session = Depends(get_db),
+    current_user=Depends(require_role(1)),
 ):
     if not incident_id.startswith("INC-"):
         raise HTTPException(
@@ -339,8 +670,17 @@ def create_incident_case(
     event = (
         db.query(SecurityEvent)
         .filter(
+            owned_security_event_filter(db, current_user),
             SecurityEvent.id == security_event_id,
-            SecurityEvent.mitre_technique_id.isnot(None),
+            or_(
+                SecurityEvent.mitre_technique_id.isnot(None),
+                (
+                    (SecurityEvent.source == "tshark-siem")
+                    & (SecurityEvent.event_type == "network_detection")
+                    if include_unmapped_network
+                    else False
+                ),
+            ),
             SecurityEvent.severity.in_(
                 [
                     "ERROR",
@@ -413,6 +753,7 @@ def create_incident_case(
     )
 
     db.add(case)
+    _record_incident_history(db, case, current_user, "CASE_CREATED")
     db.commit()
     db.refresh(case)
 
@@ -430,12 +771,11 @@ def create_incident_case(
 def get_incident_case(
     incident_id: str,
     db: Session = Depends(get_db),
+    current_user=Depends(require_role(1)),
 ):
     case = (
-        db.query(Incident)
-        .filter(
-            Incident.incident_id == incident_id
-        )
+        _owned_incident_case_query(db, current_user)
+        .filter(Incident.incident_id == incident_id)
         .first()
     )
 
@@ -456,12 +796,11 @@ def get_incident_case(
 def start_incident_investigation(
     incident_id: str,
     db: Session = Depends(get_db),
+    current_user=Depends(require_role(1)),
 ):
     case = (
-        db.query(Incident)
-        .filter(
-            Incident.incident_id == incident_id
-        )
+        _owned_incident_case_query(db, current_user)
+        .filter(Incident.incident_id == incident_id)
         .first()
     )
 
@@ -498,6 +837,7 @@ def start_incident_investigation(
     )
     case.updated_at = now
 
+    _record_incident_history(db, case, current_user, "INVESTIGATION_STARTED")
     db.commit()
     db.refresh(case)
 
@@ -515,12 +855,11 @@ def start_incident_investigation(
 def contain_incident(
     incident_id: str,
     db: Session = Depends(get_db),
+    current_user=Depends(require_role(1)),
 ):
     case = (
-        db.query(Incident)
-        .filter(
-            Incident.incident_id == incident_id
-        )
+        _owned_incident_case_query(db, current_user)
+        .filter(Incident.incident_id == incident_id)
         .first()
     )
 
@@ -551,6 +890,7 @@ def contain_incident(
     case.contained_at = case.contained_at or now
     case.updated_at = now
 
+    _record_incident_history(db, case, current_user, "MARKED_CONTAINED")
     db.commit()
     db.refresh(case)
 
@@ -569,12 +909,11 @@ def assign_incident_case(
     incident_id: str,
     db: Session = Depends(get_db),
     assigned_to: str | None = None,
+    current_user=Depends(require_role(1)),
 ):
     case = (
-        db.query(Incident)
-        .filter(
-            Incident.incident_id == incident_id
-        )
+        _owned_incident_case_query(db, current_user)
+        .filter(Incident.incident_id == incident_id)
         .first()
     )
 
@@ -598,10 +937,35 @@ def assign_incident_case(
             detail="Assigned analyst is required.",
         )
 
+    candidates = db.query(User).filter(
+        User.username == analyst,
+        User.role_id == 1,
+    )
+    if current_user.client_id is not None:
+        candidates = candidates.filter(
+            User.client_id == current_user.client_id
+        )
+    else:
+        candidates = candidates.filter(User.id == current_user.id)
+
+    assignee = candidates.first()
+    if assignee is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Select an eligible account within your client scope.",
+        )
+
+    if case.assigned_to == assignee.username:
+        return {
+            "assigned": False,
+            "case": serialize_case(case),
+        }
+
     now = datetime.utcnow()
-    case.assigned_to = analyst
+    case.assigned_to = assignee.username
     case.updated_at = now
 
+    _record_incident_history(db, case, current_user, "ANALYST_ASSIGNED")
     db.commit()
     db.refresh(case)
 
@@ -620,12 +984,12 @@ def resolve_incident(
     incident_id: str,
     db: Session = Depends(get_db),
     resolution: str | None = None,
+    payload: IncidentResolutionRequest | None = None,
+    current_user=Depends(require_role(1)),
 ):
     case = (
-        db.query(Incident)
-        .filter(
-            Incident.incident_id == incident_id
-        )
+        _owned_incident_case_query(db, current_user)
+        .filter(Incident.incident_id == incident_id)
         .first()
     )
 
@@ -655,7 +1019,9 @@ def resolve_incident(
             ),
         )
 
-    resolution_text = (resolution or "").strip()
+    resolution_text = (
+        payload.resolution if payload is not None else resolution or ""
+    ).strip()
 
     if not resolution_text:
         raise HTTPException(
@@ -670,6 +1036,7 @@ def resolve_incident(
     case.resolved_at = now
     case.updated_at = now
 
+    _record_incident_history(db, case, current_user, "CASE_RESOLVED")
     db.commit()
     db.refresh(case)
 
@@ -687,12 +1054,11 @@ def resolve_incident(
 def close_incident(
     incident_id: str,
     db: Session = Depends(get_db),
+    current_user=Depends(require_role(1)),
 ):
     case = (
-        db.query(Incident)
-        .filter(
-            Incident.incident_id == incident_id
-        )
+        _owned_incident_case_query(db, current_user)
+        .filter(Incident.incident_id == incident_id)
         .first()
     )
 
@@ -722,6 +1088,7 @@ def close_incident(
     case.closed_at = now
     case.updated_at = now
 
+    _record_incident_history(db, case, current_user, "CASE_CLOSED")
     db.commit()
     db.refresh(case)
 
@@ -740,12 +1107,12 @@ def update_incident_notes(
     incident_id: str,
     db: Session = Depends(get_db),
     notes: str | None = None,
+    payload: IncidentNotesRequest | None = None,
+    current_user=Depends(require_role(1)),
 ):
     case = (
-        db.query(Incident)
-        .filter(
-            Incident.incident_id == incident_id
-        )
+        _owned_incident_case_query(db, current_user)
+        .filter(Incident.incident_id == incident_id)
         .first()
     )
 
@@ -755,7 +1122,9 @@ def update_incident_notes(
             detail="Persistent incident case not found.",
         )
 
-    notes_text = (notes or "").strip()
+    notes_text = (
+        payload.notes if payload is not None else notes or ""
+    ).strip()
 
     if not notes_text:
         raise HTTPException(
@@ -766,6 +1135,7 @@ def update_incident_notes(
     case.investigation_notes = notes_text
     case.updated_at = datetime.utcnow()
 
+    _record_incident_history(db, case, current_user, "NOTES_UPDATED")
     db.commit()
     db.refresh(case)
 
@@ -782,7 +1152,10 @@ def update_incident_notes(
 @router.get("/{incident_id}")
 def get_incident(
     incident_id: str,
+    utc_timestamps: bool = False,
+    include_unmapped_network: bool = False,
     db: Session = Depends(get_db),
+    current_user=Depends(require_role(1)),
 ):
     if not incident_id.startswith("INC-"):
         raise HTTPException(
@@ -807,8 +1180,17 @@ def get_incident(
     event = (
         db.query(SecurityEvent)
         .filter(
+            owned_security_event_filter(db, current_user),
             SecurityEvent.id == event_id,
-            SecurityEvent.mitre_technique_id.isnot(None),
+            or_(
+                SecurityEvent.mitre_technique_id.isnot(None),
+                (
+                    (SecurityEvent.source == "tshark-siem")
+                    & (SecurityEvent.event_type == "network_detection")
+                    if include_unmapped_network
+                    else False
+                ),
+            ),
             SecurityEvent.severity.in_(
                 [
                     "ERROR",
@@ -842,4 +1224,4 @@ def get_incident(
         else None
     )
 
-    return response
+    return _incident_utc_response(response) if utc_timestamps else response

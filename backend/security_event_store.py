@@ -74,6 +74,10 @@ def store_security_event(
             )
         ),
         target=event.get("target"),
+        client_id=event.get("client_id"),
+        owner_user_id=event.get("owner_user_id"),
+        telemetry_source_id=event.get("telemetry_source_id"),
+        endpoint_asset_id=event.get("endpoint_asset_id"),
         assessment_id=event.get(
             "assessment_id"
         ),

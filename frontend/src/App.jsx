@@ -1,4 +1,30 @@
-import { useEffect, useState , useRef } from "react";
+import { useCallback as useAssetLoadCallback } from "react";
+import AccountProfile from "./AccountProfile";
+import AccountNotificationCenter from "./AccountNotificationCenter";
+import UserReports from "./UserReports";
+import PortScanner from "./PortScanner";
+import TestingScanHistory from "./TestingScanHistory";
+import SecurityAssessmentEntry from "./SecurityAssessmentEntry";
+import RiskManagement from "./RiskManagement";
+import SoarObservations from "./SoarObservations";
+import SecurityConfiguration from "./SecurityConfiguration";
+import SecretsSecurity from "./SecretsSecurity";
+import IdentityEvidence from "./IdentityEvidence";
+import IdentityDashboard from "./IdentityDashboard";
+import IdentityActivity from "./IdentityActivity";
+import NetworkDetectionViews from "./NetworkDetectionViews";
+import NetworkObservations from "./NetworkObservations";
+import NetworkSecurityDashboard from "./NetworkSecurityDashboard";
+import MitreReference from "./MitreReference";
+import HuntingExplorer from "./HuntingExplorer";
+import HuntingQueryBuilder from "./HuntingQueryBuilder";
+import HuntingDashboard from "./HuntingDashboard";
+import { useRef as useHuntingRequestRef } from "react";
+import ThreatFeeds from "./ThreatFeeds";
+import ThreatKnowledgeModule from "./ThreatKnowledgeModule";
+import ThreatIntelligenceModule from "./ThreatIntelligenceModule";
+import { useRef as useIncidentRequestRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import axios from "axios";
 import DetectionRulesPage from "./DetectionRulesPage";
 import SigmaRulesPage from "./SigmaRulesPage";
@@ -3020,6 +3046,7 @@ function AdminSupportTickets({
   const [detailsError, setDetailsError] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  const [progressNow, setProgressNow] = useState(Date.now());
   const [replyLoading, setReplyLoading] = useState(false);
   const [actionMessage, setActionMessage] = useState("");
 
@@ -7390,10 +7417,12 @@ function formatTimestampIST(value) {
 function UserDashboard({ onLogout }) {
   const [user, setUser] = useState(null);
   const [dashboard, setDashboard] = useState(null);
+  const [overviewUpdatedAt, setOverviewUpdatedAt] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [activeMenu, setActiveMenu] = useState("dashboard");
   const [activeSIEMPage, setActiveSIEMPage] = useState("siem-dashboard");
+  const [savedSearchToApply, setSavedSearchToApply] = useState(null);
 
   // User Dashboard SOC navigation groups.
   // Existing functional routes remain unchanged; this state only
@@ -7474,53 +7503,68 @@ function UserDashboard({ onLogout }) {
   const [zapResultPage, setZapResultPage] = useState(null);
 
   useEffect(() => {
+    if (activeMenu !== "dashboard") return undefined;
+
+    let stopped = false;
+    let busy = false;
+    let controller = null;
+
     const loadUserDashboard = async () => {
+      if (stopped || busy) return;
+      busy = true;
+      controller = new AbortController();
+
       try {
         const token = localStorage.getItem("token");
-
-        if (!token) {
-          throw new Error("No authentication token found.");
-        }
+        if (!token) throw new Error("No authentication token found.");
 
         const config = {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
         };
 
-        const meResponse = await axios.get(`${API_URL}/auth/me`, config);
+        const [meResponse, dashboardResponse] = await Promise.all([
+          axios.get(`${API_URL}/auth/me`, config),
+          axios.get(`${API_URL}/client/dashboard`, config),
+        ]);
 
+        if (stopped) return;
         if (meResponse.data.role_id !== 1) {
-          localStorage.removeItem("token");
+          setDashboard(null);
           setError("You do not have user/client access.");
           return;
         }
 
         setUser(meResponse.data);
-
-        const dashboardResponse = await axios.get(
-          `${API_URL}/client/dashboard`,
-          config
-        );
-
         setDashboard(dashboardResponse.data);
+        setOverviewUpdatedAt(new Date());
+        setError("");
       } catch (err) {
-        console.error(err);
-
-        if (err.response?.status === 401) {
-          setError("Your session has expired. Please login again.");
-        } else if (err.response?.status === 403) {
-          setError("You do not have permission to access this dashboard.");
-        } else {
-          setError("Unable to load user dashboard.");
-        }
+        if (stopped || controller.signal.aborted) return;
+        // Do not retain stale totals as though a refresh succeeded.
+        setDashboard(null);
+        setError(
+          err.response?.status === 401
+            ? "Your session has expired. Please log in again."
+            : err.response?.status === 403
+              ? "You do not have permission to access this dashboard."
+              : "Unable to refresh the account overview."
+        );
       } finally {
-        setLoading(false);
+        busy = false;
+        if (!stopped) setLoading(false);
       }
     };
 
     loadUserDashboard();
-  }, []);
+    const timer = setInterval(loadUserDashboard, 30000);
+
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      controller?.abort();
+    };
+  }, [activeMenu]);
 
   const displayUsername = user?.username || dashboard?.username || "User";
   const displayEmail = user?.email || dashboard?.email || "—";
@@ -7585,11 +7629,11 @@ function UserDashboard({ onLogout }) {
                 label: "SOC Overview",
                 items: [
                   ["Security Dashboard", "dashboard"],
-                  ["Active Alerts"],
-                  ["Active Incidents"],
-                  ["Critical Threats"],
-                  ["Risk Overview"],
-                  ["Environment Health"],
+                  ["Active Alerts", "alerts-open"],
+                  ["Active Incidents", "incidents-active"],
+                  ["Critical Threats", "alerts-critical"],
+                  ["Risk Overview", "risk-overview"],
+                  ["Environment Health", "environment-health"],
                 ],
               },
               {
@@ -7597,16 +7641,16 @@ function UserDashboard({ onLogout }) {
                 icon: "🖥️",
                 label: "Asset Management",
                 items: [
-                  ["Asset Inventory"],
-                  ["Asset Discovery"],
-                  ["Servers"],
-                  ["Endpoints"],
-                  ["Network Devices"],
-                  ["Applications"],
-                  ["Databases"],
-                  ["Domains"],
-                  ["IP Addresses"],
-                  ["Asset Groups"],
+                  ["Asset Inventory", "asset-inventory"],
+                  ["Asset Discovery", "asset-discovery"],
+                  ["Servers", "servers"],
+                  ["Endpoints", "endpoints"],
+                  ["Network Devices", "network-devices"],
+                  ["Applications", "applications"],
+                  ["Databases", "databases"],
+                  ["Domains", "domains"],
+                  ["IP Addresses", "ip-addresses"],
+                  ["Asset Groups", "asset-groups"],
                 ],
               },
               {
@@ -7614,16 +7658,16 @@ function UserDashboard({ onLogout }) {
                 icon: "🌐",
                 label: "Attack Surface",
                 items: [
-                  ["External Attack Surface"],
-                  ["Internal Attack Surface"],
-                  ["Domain Discovery"],
-                  ["Subdomain Discovery"],
-                  ["DNS Security"],
-                  ["IP Intelligence"],
-                  ["Open Ports"],
-                  ["Exposed Services"],
-                  ["SSL/TLS"],
-                  ["Security Headers"],
+                  ["External Attack Surface", "external-attack-surface"],
+                  ["Internal Attack Surface", "internal-attack-surface"],
+                  ["Domain Discovery", "domain-discovery"],
+                  ["Subdomain Discovery", "subdomain-discovery"],
+                  ["DNS Security", "dns-security"],
+                  ["IP Intelligence", "ip-intelligence"],
+                  ["Open Ports", "open-ports"],
+                  ["Exposed Services", "exposed-services"],
+                  ["SSL/TLS", "ssl-tls"],
+                  ["Security Headers", "security-headers"],
                 ],
               },
               {
@@ -7631,35 +7675,14 @@ function UserDashboard({ onLogout }) {
                 icon: "🔍",
                 label: "Vulnerability Management",
                 items: [
-                  ["Vulnerability Dashboard"],
                   ["Vulnerabilities", "findings"],
-                  ["CVE Database"],
-                  ["Vulnerability Scans"],
-                  ["Network Scans"],
-                  ["Web Scans"],
-                  ["API Scans"],
-                  ["Configuration Scans"],
-                  ["Patch Management"],
-                  ["Remediation"],
-                ],
-              },
-              {
-                id: "05",
-                icon: "🛡️",
-                label: "Endpoint Security",
-                items: [
-                  ["Endpoint Dashboard"],
-                  ["Endpoint Inventory"],
-                  ["Endpoint Agents"],
-                  ["Agent Health"],
-                  ["Process Monitoring"],
-                  ["File Monitoring"],
-                  ["File Integrity Monitoring"],
-                  ["Login Monitoring"],
-                  ["USB Monitoring"],
-                  ["Network Connections"],
-                  ["Endpoint Isolation"],
-                  ["Endpoint Response"],
+                  ["CVE Database", "cve-database"],
+                  ["Vulnerability Scans", "vapt"],
+                  ["Network Scans", "vapt"],
+                  ["Web Scans", "vapt"],
+                  ["API Scans", "vapt"],
+                  ["Configuration Scans", "vapt"],
+                  ["Remediation", "remediation"],
                 ],
               },
               {
@@ -7667,16 +7690,16 @@ function UserDashboard({ onLogout }) {
                 icon: "🖥️",
                 label: "Server Security",
                 items: [
-                  ["Server Dashboard"],
-                  ["Linux Security"],
-                  ["Windows Security"],
-                  ["SSH Security"],
-                  ["User Accounts"],
-                  ["Privileged Accounts"],
-                  ["Running Processes"],
-                  ["Services"],
-                  ["Firewall"],
-                  ["System Hardening"],
+                  ["Server Dashboard", "server-dashboard"],
+                  ["Linux Security", "linux-security"],
+                  ["Windows Security", "windows-security"],
+                  ["SSH Security", "ssh-security"],
+                  ["User Accounts", "user-accounts"],
+                  ["Privileged Accounts", "privileged-accounts"],
+                  ["Running Processes", "running-processes"],
+                  ["Services", "services"],
+                  ["Firewall", "firewall"],
+                  ["System Hardening", "system-hardening"],
                   ["Server Configuration", "server-config"],
                 ],
               },
@@ -7686,17 +7709,17 @@ function UserDashboard({ onLogout }) {
                 label: "SIEM",
                 items: [
                   ["SIEM Dashboard", "logs"],
-                  ["Log Explorer", "logs"],
-                  ["Security Events", "logs"],
-                  ["Authentication Logs"],
-                  ["Network Logs"],
-                  ["Firewall Logs"],
-                  ["DNS Logs"],
-                  ["Application Logs"],
-                  ["Windows Events"],
-                  ["Linux Logs"],
-                  ["Log Sources"],
-                  ["Saved Searches"],
+                  ["Log Explorer", "log-explorer"],
+                  ["Security Events", "security-events"],
+                  ["Authentication Logs", "authentication-logs"],
+                  ["Network Logs", "network-logs"],
+                  ["Firewall Logs", "firewall-logs"],
+                  ["DNS Logs", "dns-logs"],
+                  ["Application Logs", "application-logs"],
+                  ["Windows Events", "windows-events"],
+                  ["Linux Logs", "linux-logs"],
+                  ["Log Sources", "log-sources"],
+                  ["Saved Searches", "saved-searches"],
                 ],
               },
               {
@@ -7735,16 +7758,16 @@ function UserDashboard({ onLogout }) {
                 label: "Incidents",
                 items: [
                   ["Incident Dashboard", "incidents"],
-                  ["Active Incidents"],
-                  ["Critical Incidents"],
-                  ["Investigation"],
-                  ["Evidence"],
-                  ["Incident Timeline"],
-                  ["Case Management"],
-                  ["Assignments"],
-                  ["SLA Management"],
-                  ["Incident Playbooks"],
-                  ["Closed Incidents"],
+                  ["Active Incidents", "incidents-active"],
+                  ["Critical Incidents", "incidents-critical"],
+                  ["Investigation", "incidents-investigation"],
+                  ["Evidence", "incidents-evidence"],
+                  ["Incident Timeline", "incidents-timeline"],
+                  ["Case Management", "incidents-cases"],
+                  ["Assignments", "incidents-assignments"],
+                  ["SLA Management", "incidents-sla"],
+                  ["Incident Playbooks", "incidents-playbooks"],
+                  ["Closed Incidents", "incidents-closed"],
                 ],
               },
               {
@@ -7752,17 +7775,17 @@ function UserDashboard({ onLogout }) {
                 icon: "🧠",
                 label: "Threat Intelligence",
                 items: [
-                  ["Threat Intelligence Dashboard"],
-                  ["Indicators"],
-                  ["IP Intelligence"],
-                  ["Domain Intelligence"],
-                  ["URL Intelligence"],
-                  ["Hash Intelligence"],
-                  ["Threat Actors"],
-                  ["Campaigns"],
-                  ["Malware Intelligence"],
-                  ["CVE Intelligence"],
-                  ["Threat Feeds"],
+                  ["Threat Intelligence Dashboard", "threat-intelligence"],
+                  ["Indicators", "threat-indicators"],
+                  ["IP Intelligence", "ip-intelligence"],
+                  ["Domain Intelligence", "threat-domains"],
+                  ["URL Intelligence", "threat-urls"],
+                  ["Hash Intelligence", "threat-hashes"],
+                  ["Threat Actors", "threat-actors"],
+                  ["Campaigns", "threat-campaigns"],
+                  ["Malware Intelligence", "threat-malware"],
+                  ["CVE Intelligence", "threat-cve"],
+                  ["Threat Feeds", "threat-feeds"],
                 ],
               },
               {
@@ -7770,15 +7793,15 @@ function UserDashboard({ onLogout }) {
                 icon: "🎯",
                 label: "Threat Hunting",
                 items: [
-                  ["Hunting Dashboard"],
-                  ["Query Builder"],
-                  ["Event Search"],
-                  ["IOC Hunting"],
-                  ["User Hunting"],
-                  ["Process Hunting"],
-                  ["Network Hunting"],
-                  ["Timeline Analysis"],
-                  ["Saved Hunts"],
+                  ["Hunting Dashboard", "hunt-dashboard"],
+                  ["Query Builder", "hunt-builder"],
+                  ["Event Search", "hunt-events"],
+                  ["IOC Hunting", "hunt-ioc"],
+                  ["User Hunting", "hunt-users"],
+                  ["Process Hunting", "hunt-processes"],
+                  ["Network Hunting", "hunt-network"],
+                  ["Timeline Analysis", "hunt-timeline"],
+                  ["Saved Hunts", "hunt-saved"],
                 ],
               },
               {
@@ -7787,12 +7810,12 @@ function UserDashboard({ onLogout }) {
                 label: "MITRE ATT&CK",
                 items: [
                   ["ATT&CK Dashboard", "mitre-attack"],
-                  ["Tactics"],
-                  ["Techniques"],
-                  ["Sub-Techniques"],
-                  ["Groups"],
-                  ["Software"],
-                  ["Detection Coverage"],
+                  ["Tactics", "mitre-tactics"],
+                  ["Techniques", "mitre-techniques"],
+                  ["Sub-Techniques", "mitre-subtechniques"],
+                  ["Groups", "mitre-groups"],
+                  ["Software", "mitre-software"],
+                  ["Detection Coverage", "mitre-coverage"],
                 ],
               },
               {
@@ -7800,18 +7823,18 @@ function UserDashboard({ onLogout }) {
                 icon: "🌐",
                 label: "Network Security",
                 items: [
-                  ["Network Dashboard"],
-                  ["Network Discovery"],
-                  ["Network Topology"],
-                  ["Traffic Analysis"],
-                  ["Connections"],
-                  ["Ports"],
-                  ["Protocols"],
-                  ["Firewall"],
-                  ["VPN"],
-                  ["DNS Security"],
-                  ["IDS/IPS"],
-                  ["Network Anomalies"],
+                  ["Network Dashboard", "network-dashboard"],
+                  ["Network Discovery", "network-discovery"],
+                  ["Network Topology", "network-topology"],
+                  ["Traffic Analysis", "network-traffic"],
+                  ["Connections", "network-connections"],
+                  ["Ports", "network-ports"],
+                  ["Protocols", "network-protocols"],
+                  ["Firewall", "network-firewall"],
+                  ["VPN", "network-vpn"],
+                  ["DNS Security", "network-dns"],
+                  ["IDS/IPS", "network-ids"],
+                  ["Network Anomalies", "network-anomalies"],
                 ],
               },
               {
@@ -7819,14 +7842,14 @@ function UserDashboard({ onLogout }) {
                 icon: "🔐",
                 label: "Identity Security",
                 items: [
-                  ["Identity Dashboard"],
-                  ["Users"],
-                  ["Groups"],
-                  ["Privileged Users"],
-                  ["Authentication"],
-                  ["MFA"],
-                  ["Login Anomalies"],
-                  ["Identity Risk"],
+                  ["Identity Dashboard", "identity-dashboard"],
+                  ["Users", "identity-users"],
+                  ["Groups", "identity-groups"],
+                  ["Privileged Users", "identity-privileged"],
+                  ["Authentication", "identity-authentication"],
+                  ["MFA", "identity-mfa"],
+                  ["Login Anomalies", "identity-anomalies"],
+                  ["Identity Risk", "identity-risk"],
                 ],
               },
               {
@@ -7834,12 +7857,12 @@ function UserDashboard({ onLogout }) {
                 icon: "🔑",
                 label: "Secrets Security",
                 items: [
-                  ["Secrets Dashboard"],
-                  ["Exposed Secrets"],
-                  ["API Keys"],
-                  ["Tokens"],
-                  ["Credentials"],
-                  ["Repository Scanning"],
+                  ["Secrets Dashboard", "secrets-dashboard"],
+                  ["Exposed Secrets", "secrets-exposed"],
+                  ["API Keys", "secrets-api-keys"],
+                  ["Tokens", "secrets-tokens"],
+                  ["Credentials", "secrets-credentials"],
+                  ["Repository Scanning", "secrets-scanning"],
                 ],
               },
               {
@@ -7847,13 +7870,13 @@ function UserDashboard({ onLogout }) {
                 icon: "⚙️",
                 label: "Security Configuration",
                 items: [
-                  ["Security Baselines"],
-                  ["Hardening"],
-                  ["CIS Benchmarks"],
-                  ["Linux Configuration"],
-                  ["Windows Configuration"],
-                  ["Web Server Configuration"],
-                  ["Configuration Drift"],
+                  ["Security Baselines", "config-baselines"],
+                  ["Hardening", "config-hardening"],
+                  ["CIS Benchmarks", "config-cis"],
+                  ["Linux Configuration", "config-linux"],
+                  ["Windows Configuration", "config-windows"],
+                  ["Web Server Configuration", "config-web"],
+                  ["Configuration Drift", "config-drift"],
                 ],
               },
               {
@@ -7861,12 +7884,12 @@ function UserDashboard({ onLogout }) {
                 icon: "🤖",
                 label: "SOAR / Automation",
                 items: [
-                  ["Playbooks"],
-                  ["Workflows"],
-                  ["Triggers"],
-                  ["Actions"],
-                  ["Approvals"],
-                  ["Response Actions"],
+                  ["Playbooks", "soar-playbooks"],
+                  ["Workflows", "soar-workflows"],
+                  ["Triggers", "soar-triggers"],
+                  ["Actions", "soar-actions"],
+                  ["Approvals", "soar-approvals"],
+                  ["Response Actions", "soar-responses"],
                 ],
               },
               {
@@ -7874,12 +7897,12 @@ function UserDashboard({ onLogout }) {
                 icon: "📋",
                 label: "Risk Management",
                 items: [
-                  ["Risk Dashboard"],
-                  ["Asset Risk"],
-                  ["Vulnerability Risk"],
-                  ["Identity Risk"],
-                  ["Risk Register"],
-                  ["Risk Trends"],
+                  ["Risk Dashboard", "risk-dashboard"],
+                  ["Asset Risk", "risk-assets"],
+                  ["Vulnerability Risk", "risk-vulnerabilities"],
+                  ["Identity Risk", "risk-identity"],
+                  ["Risk Register", "risk-register"],
+                  ["Risk Trends", "risk-trends"],
                 ],
               },
               {
@@ -7888,13 +7911,13 @@ function UserDashboard({ onLogout }) {
                 label: "Security Assessment",
                 items: [
                   ["VAPT", "vapt"],
-                  ["Web Application Testing"],
-                  ["API Testing"],
-                  ["Network Assessment"],
-                  ["Configuration Assessment"],
-                  ["Security Audit"],
+                  ["Web Application Testing", "vapt"],
+                  ["API Testing", "vapt"],
+                  ["Network Assessment", "assessment-network"],
+                  ["Configuration Assessment", "assessment-configuration"],
+                  ["Security Audit", "assessment-audit"],
                   ["Findings", "findings"],
-                  ["Remediation"],
+                  ["Remediation", "assessment-remediation"],
                   ["QA Testing", "qa"],
                 ],
               },
@@ -7903,15 +7926,15 @@ function UserDashboard({ onLogout }) {
                 icon: "🧪",
                 label: "Security Testing",
                 items: [
-                  ["Port Scanner"],
-                  ["Service Discovery"],
-                  ["Web Scanner"],
-                  ["API Scanner"],
-                  ["DNS Scanner"],
-                  ["TLS Scanner"],
-                  ["Header Scanner"],
+                  ["Port Scanner", "testing-port-scanner"],
+                  ["Service Discovery", "testing-service-discovery"],
+                  ["Web Scanner", "vapt"],
+                  ["API Scanner", "vapt"],
+                  ["DNS Scanner", "dns-security"],
+                  ["TLS Scanner", "ssl-tls"],
+                  ["Header Scanner", "security-headers"],
                   ["Code Security", "code-security"],
-                  ["Scan History"],
+                  ["Scan History", "testing-scan-history"],
                 ],
               },
               {
@@ -7927,11 +7950,11 @@ function UserDashboard({ onLogout }) {
                 icon: "📊",
                 label: "Reports",
                 items: [
-                  ["Security Reports"],
-                  ["Vulnerability Reports"],
-                  ["Incident Reports"],
-                  ["Risk Reports"],
-                  ["Scheduled Reports"],
+                  ["Security Reports", "reports-security"],
+                  ["Vulnerability Reports", "reports-vulnerability"],
+                  ["Incident Reports", "reports-incidents"],
+                  ["Risk Reports", "reports-risk"],
+                  ["Scheduled Reports", "reports-scheduled"],
                 ],
               },
             ].map((group) => {
@@ -7967,8 +7990,52 @@ function UserDashboard({ onLogout }) {
                             }
 
                             if (label === "Security Events") {
-                              setActiveSIEMPage("security-events");
-                              setActiveMenu("logs");
+                              setActiveMenu("security-events");
+                              return;
+                            }
+
+                            if (label === "Authentication Logs") {
+                              setActiveMenu("authentication-logs");
+                              return;
+                            }
+
+                            if (label === "Network Logs") {
+                              setActiveMenu("network-logs");
+                              return;
+                            }
+
+                            if (label === "Firewall Logs") {
+                              setActiveMenu("firewall-logs");
+                              return;
+                            }
+
+                            if (label === "DNS Logs") {
+                              setActiveMenu("dns-logs");
+                              return;
+                            }
+
+                            if (label === "Application Logs") {
+                              setActiveMenu("application-logs");
+                              return;
+                            }
+
+                            if (label === "Linux Logs") {
+                              setActiveMenu("linux-logs");
+                              return;
+                            }
+
+                            if (label === "Log Sources") {
+                              setActiveMenu("log-sources");
+                              return;
+                            }
+
+                            if (label === "Saved Searches") {
+                              setActiveMenu("saved-searches");
+                              return;
+                            }
+
+                            if (label === "Log Explorer") {
+                              setActiveMenu("log-explorer");
                               return;
                             }
 
@@ -8183,35 +8250,47 @@ function UserDashboard({ onLogout }) {
                 </h1>
 
                 <p className="mt-2 text-sm text-gray-500">
-                  Monitor your organization's security posture from one place.
+                  Review your personal assessments, recorded findings, and completed VAPT reports.
                 </p>
               </div>
+
+              {error && (
+                <div role="alert" className="mb-5 border border-red-600/30 bg-red-600/5 p-4 text-sm text-red-400">
+                  {error}
+                </div>
+              )}
+              <p className="mb-5 text-xs leading-6 text-gray-500">
+                Scope: personal, including when your account belongs to a client.
+                Overview refreshes every 30 seconds while this page is open.
+                Last successful refresh: {overviewUpdatedAt
+                  ? overviewUpdatedAt.toLocaleString()
+                  : "Not loaded yet"}.
+              </p>
 
               {/* STATS */}
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
                 <AdminStat
-                  title="Account"
-                  value={loading ? "—" : "ACTIVE"}
-                  subtitle="User account status"
-                  status
+                  title="Account Session"
+                  value={loading || !dashboard ? "—" : "AUTHENTICATED"}
+                  subtitle="Confirmed by the latest account request"
                 />
 
                 <AdminStat
-                  title="Security Scans"
-                  value={dashboard?.total_scans ?? "—"}
-                  subtitle="VAPT scans"
+                  title="Assessments"
+                  value={dashboard?.total_assessments ?? "—"}
+                  subtitle="All owned assessment records; not tool executions"
                 />
 
                 <AdminStat
                   title="Findings"
                   value={dashboard?.total_vulnerabilities ?? dashboard?.total_findings ?? "—"}
-                  subtitle="Security findings"
+                  subtitle="All owned findings, across recorded statuses"
                 />
 
                 <AdminStat
-                  title="Reports"
+                  title="Completed VAPT Reports"
                   value={dashboard?.total_reports ?? "—"}
-                  subtitle="Available reports"
+                  subtitle="Completed stored runs; legacy reports excluded"
                 />
               </div>
 
@@ -8269,30 +8348,26 @@ function UserDashboard({ onLogout }) {
                 <div className="border border-white/10 bg-[#0d0d0d]">
                   <div className="border-b border-white/10 px-6 py-5">
                     <p className="text-sm font-semibold">
-                      Security Status
+                      Verification Limits
                     </p>
                     <p className="mt-1 text-xs text-gray-600">
-                      Current platform status
+                      Health checks are not performed by this overview
                     </p>
                   </div>
 
                   <div className="space-y-5 p-6">
-                    <HealthItem
-                      name="SOC Platform"
-                      status="Operational"
-                    />
-                    <HealthItem
-                      name="Authentication"
-                      status="Protected"
-                    />
-                    <HealthItem
-                      name="Security Monitoring"
-                      status="Ready"
-                    />
-                    <HealthItem
-                      name="Reporting"
-                      status="Available"
-                    />
+                    <p className="text-sm leading-6 text-gray-400">
+                      This overview does not run infrastructure, collector,
+                      scanner, or report-generation health checks.
+                    </p>
+                    <p className="text-sm leading-6 text-gray-400">
+                      Successful authentication confirms this account request.
+                      It does not certify platform health or security.
+                    </p>
+                    <p className="text-sm leading-6 text-gray-400">
+                      Review each module for its latest results, collection
+                      status, and errors.
+                    </p>
                   </div>
                 </div>
               </div>
@@ -8319,7 +8394,7 @@ function UserDashboard({ onLogout }) {
                   <ManagementCard
                     number="02"
                     title="Uptime Monitoring"
-                    description="Monitor website availability, latency and live traffic."
+                    description="Run HTTP availability checks and review response latency."
                     onClick={() => setActiveMenu("uptime")}
                   />
 
@@ -8338,14 +8413,14 @@ function UserDashboard({ onLogout }) {
                   />
 
                   <ManagementCard
-                    number="03"
+                    number="05"
                     title="Reports"
                     description="Access your security assessment reports."
-                    onClick={() => setActiveMenu("reports")}
+                    onClick={() => setActiveMenu("reports-security")}
                   />
 
                   <ManagementCard
-                    number="04"
+                    number="06"
                     title="Support"
                     description="Contact the security team about an issue."
                     onClick={() => setActiveMenu("support")}
@@ -8589,6 +8664,15 @@ function UserDashboard({ onLogout }) {
           )}
 
           {/* MITRE ATT&CK */}
+
+          {["mitre-tactics", "mitre-techniques", "mitre-subtechniques", "mitre-groups", "mitre-software", "mitre-coverage"].includes(activeMenu) && (
+            <MitreReference
+              key={activeMenu}
+              apiUrl={API_URL}
+              view={activeMenu}
+            />
+          )}
+
           {activeMenu === "mitre-attack" && (
             <MitreAttack />
           )}
@@ -8602,6 +8686,217 @@ function UserDashboard({ onLogout }) {
           {activeMenu === "logs" && (
             <LiveLogMonitoring initialTab={activeSIEMPage} />
           )}
+
+          {/* LOG EXPLORER */}
+          {activeMenu === "log-explorer" && (
+            <LogExplorer initialSavedSearch={savedSearchToApply} />
+          )}
+
+
+          {["hunt-users", "hunt-processes", "hunt-network", "hunt-timeline"].includes(activeMenu) && (
+            <HuntingExplorer
+              key={activeMenu}
+              apiUrl={API_URL}
+              kind={{
+                "hunt-users": "users",
+                "hunt-processes": "processes",
+                "hunt-network": "network",
+                "hunt-timeline": "timeline",
+              }[activeMenu]}
+            />
+          )}
+
+          {activeMenu === "hunt-dashboard" && (
+            <HuntingDashboard apiUrl={API_URL} />
+          )}
+
+          {activeMenu === "hunt-builder" && (
+            <HuntingQueryBuilder onRun={(query) => {
+              setSavedSearchToApply(query);
+              setActiveMenu("hunt-events");
+            }} />
+          )}
+
+          {activeMenu === "hunt-ioc" && (
+            <div>
+              <p className="mb-5 text-xs leading-6 text-gray-400">
+                Select an indicator, open Details, and run Check Recent Events.
+                Matching examines up to the latest 500 authorized events.
+                Results are candidates, not confirmed threats.
+              </p>
+              <ThreatIntelligenceModule
+                key="hunt-ioc"
+                apiUrl={API_URL}
+                view="hunt-ioc"
+              />
+            </div>
+          )}
+
+          {activeMenu === "hunt-events" && (
+            <div>
+              <h1 className="mb-3 text-2xl font-bold text-white">Event Search</h1>
+              <p className="mb-5 text-xs leading-6 text-gray-400">
+                Searches authorized events. Returns up to the latest 500 matches;
+                this is not a complete event-history count.
+              </p>
+              <HuntingEventSearch initialSavedSearch={savedSearchToApply} />
+            </div>
+          )}
+
+          {activeMenu === "hunt-saved" && (
+            <div>
+              <h1 className="mb-3 text-2xl font-bold text-white">Saved Hunts</h1>
+              <p className="mb-5 text-xs text-gray-400">
+                Shared with Saved SIEM Searches. These are saved queries, not scheduled investigations.
+              </p>
+              <SavedSearches onApply={(savedSearch) => {
+                setSavedSearchToApply(savedSearch);
+                setActiveMenu("hunt-events");
+              }} />
+            </div>
+          )}
+
+          {activeMenu === "saved-searches" && (
+            <SavedSearches
+              onApply={(savedSearch) => {
+                setSavedSearchToApply(savedSearch);
+                setActiveMenu("log-explorer");
+              }}
+            />
+          )}
+
+          {/* SIEM SECURITY EVENTS */}
+          {activeMenu === "security-events" && (
+            <SecurityEvents />
+          )}
+
+          {/* SIEM AUTHENTICATION LOGS */}
+          {activeMenu === "authentication-logs" && (
+            <AuthenticationLogs />
+          )}
+
+          {/* SIEM NETWORK LOGS */}
+
+
+          {activeMenu === "network-discovery" && (
+            <AssetDiscovery
+              title="Network Discovery"
+              sectionLabel="Network Security"
+            />
+          )}
+
+          {["network-topology", "network-traffic", "network-protocols"].includes(activeMenu) && (
+            <NetworkObservations
+              key={activeMenu}
+              apiUrl={API_URL}
+              view={activeMenu}
+            />
+          )}
+
+
+          {["network-vpn", "network-ids", "network-anomalies"].includes(activeMenu) && (
+            <NetworkDetectionViews
+              key={activeMenu}
+              apiUrl={API_URL}
+              view={activeMenu}
+            />
+          )}
+
+
+
+          {["identity-users", "identity-groups", "identity-mfa",
+            "identity-anomalies", "identity-risk"].includes(activeMenu) && (
+            <IdentityEvidence
+              key={activeMenu}
+              apiUrl={API_URL}
+              view={activeMenu}
+            />
+          )}
+
+
+          {activeMenu === "secrets-scanning" && (
+            <CodeSecurity
+              title="Repository Scanning"
+              sectionLabel="Secrets Security"
+            />
+          )}
+
+          {["secrets-dashboard", "secrets-exposed", "secrets-api-keys",
+            "secrets-tokens", "secrets-credentials"].includes(activeMenu) && (
+            <SecretsSecurity key={activeMenu} apiUrl={API_URL} view={activeMenu} />
+          )}
+
+          {activeMenu === "identity-dashboard" && (
+            <IdentityDashboard apiUrl={API_URL} />
+          )}
+
+          {["identity-authentication", "identity-privileged"].includes(activeMenu) && (
+            <IdentityActivity
+              key={activeMenu}
+              apiUrl={API_URL}
+              view={activeMenu}
+            />
+          )}
+
+          {activeMenu === "network-dashboard" && (
+            <NetworkSecurityDashboard apiUrl={API_URL} />
+          )}
+
+          {activeMenu === "network-connections" && (
+            <div>
+              <h1 className="mb-3 text-2xl font-bold text-white">
+                Recorded Network Connections
+              </h1>
+              <p className="mb-5 text-sm text-gray-400">
+                Recorded connection attempts and network detections.
+                These are not a live socket inventory.
+                The existing log view loads up to the latest 500 eligible events.
+              </p>
+              <NetworkLogs />
+            </div>
+          )}
+
+          {activeMenu === "network-ports" && <OpenPorts />}
+
+          {activeMenu === "network-firewall" && (
+            <div>
+              <p className="mb-5 text-sm text-gray-400">
+                Collected endpoint firewall rule inventory.
+                This view does not change firewall policy.
+              </p>
+              <Firewall />
+            </div>
+          )}
+
+          {activeMenu === "network-dns" && <DNSSecurity />}
+
+          {activeMenu === "network-logs" && (
+            <NetworkLogs />
+          )}
+
+          {/* SIEM FIREWALL LOGS */}
+          {activeMenu === "firewall-logs" && (
+            <FirewallLogs />
+          )}
+
+          {/* SIEM DNS LOGS */}
+          {activeMenu === "dns-logs" && (
+            <DNSLogs />
+          )}
+
+          {/* SIEM APPLICATION LOGS */}
+          {activeMenu === "application-logs" && (
+            <ApplicationLogs />
+          )}
+
+          {/* SIEM WINDOWS EVENTS */}
+          {activeMenu === "windows-events" && (
+            <WindowsEvents />
+          )}
+
+          {/* SIEM LINUX LOGS */}
+          {activeMenu === "linux-logs" && <LinuxLogs />}
+          {activeMenu === "log-sources" && <LogSources />}
 
           {/* UPTIME MONITORING */}
           {activeMenu === "uptime" && (
@@ -8618,9 +8913,26 @@ function UserDashboard({ onLogout }) {
             <SupportDashboard />
           )}
 
+          {/* CVE DATABASE */}
+          {activeMenu === "cve-database" && (
+            <CVEDatabase />
+          )}
+
+          {activeMenu === "threat-cve" && (
+            <CVEDatabase
+              title="CVE Intelligence"
+              sectionLabel="Threat Intelligence"
+            />
+          )}
+
           {/* SECURITY FINDINGS */}
           {activeMenu === "findings" && (
             <SecurityFindings />
+          )}
+
+          {/* REMEDIATION */}
+          {activeMenu === "remediation" && (
+            <Remediation />
           )}
 
           {/* SECURITY COPILOT */}
@@ -8631,13 +8943,40 @@ function UserDashboard({ onLogout }) {
           )}
 
           {/* CODE SECURITY */}
+          {activeMenu === "testing-scan-history" && (
+            <TestingScanHistory apiUrl={API_URL} />
+          )}
+
+          {activeMenu === "testing-service-discovery" && (
+            <PortScanner
+              key="service-discovery"
+              apiUrl={API_URL}
+              title="Service Discovery"
+              initialProfile="service"
+            />
+          )}
+
+          {activeMenu === "testing-port-scanner" && (
+            <PortScanner apiUrl={API_URL} />
+          )}
+
           {activeMenu === "code-security" && (
             <CodeSecurity />
           )}
 
           {/* USER NOTIFICATIONS */}
+          {["reports-security", "reports-vulnerability", "reports-incidents",
+            "reports-risk", "reports-scheduled"].includes(activeMenu) && (
+            <UserReports
+              key={activeMenu}
+              apiUrl={API_URL}
+              view={activeMenu}
+              onNavigate={setActiveMenu}
+            />
+          )}
+
           {activeMenu === "notifications" && (
-            <UserNotificationCenter />
+            <AccountNotificationCenter apiUrl={API_URL} />
           )}
 
           {/* MY ACTIVITY */}
@@ -8657,6 +8996,36 @@ function UserDashboard({ onLogout }) {
             <SigmaRulesPage />
           )}
 
+          {activeMenu === "soar-playbooks" && (
+            <div className="space-y-5">
+              <p className="text-sm uppercase tracking-widest text-red-500">SOAR / Automation</p>
+              <IncidentManagement key="soar-playbooks" view="incidents-playbooks" />
+            </div>
+          )}
+
+          {activeMenu === "soar-workflows" && (
+            <div className="space-y-5">
+              <div className="rounded-xl border border-slate-800 bg-[#0b1217] p-6">
+                <p className="text-sm uppercase tracking-widest text-red-500">SOAR / Automation</p>
+                <h1 className="mt-3 text-3xl font-bold text-white">Workflows</h1>
+                <p className="mt-4 text-slate-300">
+                  Existing incident cases track manual investigation, assignment,
+                  containment status, resolution, and closure. This view reuses
+                  that case workflow. It is not a general automation engine.
+                </p>
+                <p className="mt-3 text-slate-400">
+                  Case status changes record analyst decisions. Containment status
+                  does not execute firewall blocking or endpoint isolation.
+                </p>
+              </div>
+              <IncidentManagement key="soar-workflows" view="incidents-cases" />
+            </div>
+          )}
+
+          {["soar-triggers", "soar-actions", "soar-approvals", "soar-responses"].includes(activeMenu) && (
+            <SoarObservations key={activeMenu} apiUrl={API_URL} view={activeMenu} />
+          )}
+
           {activeMenu === "correlation-rules" && (
             <CorrelationRulesPage />
           )}
@@ -8670,16 +9039,288 @@ function UserDashboard({ onLogout }) {
             <AlertsModule view={activeMenu} />
           )}
 
-          {activeMenu === "incidents" && (
-            <IncidentManagement />
+          {["incidents", "incidents-active", "incidents-critical",
+             "incidents-closed", "incidents-investigation",
+             "incidents-cases", "incidents-assignments", "incidents-evidence", "incidents-timeline", "incidents-sla", "incidents-playbooks"].includes(activeMenu) && (
+            <IncidentManagement key={activeMenu} view={activeMenu} />
+          )}
+
+          {activeMenu === "risk-dashboard" && (
+            <div className="space-y-5">
+              <div className="rounded-xl border border-slate-800 bg-[#0b1217] p-6 text-slate-300">
+                <p className="text-sm uppercase tracking-widest text-red-500">Risk Management</p>
+                <h1 className="mt-3 text-3xl font-bold text-white">Risk Dashboard</h1>
+                <p className="mt-4">
+                  The existing overview uses personal scope or shared client scope,
+                  as indicated below. Asset Risk, Vulnerability Risk, Risk Register,
+                  and Risk Trends use personal ownership, matching the finding API.
+                </p>
+                <p className="mt-3">
+                  CVSS describes finding severity. Historical run classifications
+                  are not organization-wide business risk scores.
+                </p>
+              </div>
+              <RiskOverview />
+            </div>
+          )}
+
+          {activeMenu === "risk-identity" && (
+            <IdentityEvidence apiUrl={API_URL} view="identity-risk" />
+          )}
+
+          {["risk-assets", "risk-vulnerabilities", "risk-register", "risk-trends"].includes(activeMenu) && (
+            <RiskManagement key={activeMenu} apiUrl={API_URL} view={activeMenu} />
+          )}
+
+          {["assessment-web", "assessment-api", "assessment-audit"].includes(activeMenu) && (
+            <SecurityAssessmentEntry
+              key={activeMenu}
+              view={activeMenu}
+              onNavigate={setActiveMenu}
+            />
+          )}
+
+          {activeMenu === "assessment-network" && (
+            <div className="space-y-5">
+              <div className="rounded-xl border border-slate-800 bg-[#0b1217] p-6 text-slate-300">
+                <p className="text-sm uppercase tracking-widest text-red-500">Security Assessment</p>
+                <h1 className="mt-3 text-3xl font-bold text-white">Network Assessment</h1>
+                <p className="mt-4">
+                  Use the existing discovery workflow against an authorized target
+                  assessment. Discovery results describe observed hosts and ports;
+                  they are not a complete network security assessment.
+                </p>
+              </div>
+              <AssetDiscovery
+                title="Network Discovery"
+                sectionLabel="Security Assessment"
+              />
+            </div>
+          )}
+
+          {activeMenu === "assessment-configuration" && (
+            <div className="space-y-5">
+              <div className="rounded-xl border border-slate-800 bg-[#0b1217] p-6 text-slate-300">
+                <p className="text-sm uppercase tracking-widest text-red-500">Security Assessment</p>
+                <h1 className="mt-3 text-3xl font-bold text-white">Configuration Assessment</h1>
+                <p className="mt-4">
+                  Review recorded endpoint hardening observations below.
+                  This view does not run a baseline comparison, certify CIS
+                  compliance, or apply configuration changes.
+                </p>
+              </div>
+              <SecurityConfiguration apiUrl={API_URL} view="hardening" />
+            </div>
+          )}
+
+          {activeMenu === "assessment-remediation" && (
+            <div className="space-y-5">
+              <div className="rounded-xl border border-slate-800 bg-[#0b1217] p-6 text-slate-300">
+                <p className="text-sm uppercase tracking-widest text-red-500">Security Assessment</p>
+                <p className="mt-3">
+                  Existing report remediation issues and their recorded status.
+                  Saving an update changes workflow records; it does not apply a
+                  technical fix or independently verify remediation.
+                </p>
+              </div>
+              <Remediation />
+            </div>
+          )}
+
+          {activeMenu === "risk-overview" && (
+            <RiskOverview />
+          )}
+
+          {activeMenu === "environment-health" && (
+            <EnvironmentHealth />
+          )}
+
+          {activeMenu === "asset-inventory" && (
+            <AssetInventory />
+          )}
+
+          {activeMenu === "asset-discovery" && (
+            <AssetDiscovery />
+          )}
+
+          {activeMenu === "server-dashboard" && (
+            <ServerDashboard />
+          )}
+
+          {activeMenu === "privileged-accounts" && (
+  <PrivilegedAccounts />
+)}
+
+          {activeMenu === "running-processes" && (
+            <RunningProcesses />
+          )}
+
+          {activeMenu === "services" && (
+            <Services />
+          )}
+
+          {activeMenu === "firewall" && (
+            <Firewall />
+          )}
+
+                    {activeMenu === "config-baselines" && (
+            <SecurityConfiguration apiUrl={API_URL} view="baselines" />
+          )}
+
+          {activeMenu === "config-hardening" && (
+            <SecurityConfiguration apiUrl={API_URL} view="hardening" />
+          )}
+
+          {activeMenu === "config-cis" && (
+            <SecurityConfiguration apiUrl={API_URL} view="cis" />
+          )}
+
+          {activeMenu === "config-linux" && (
+            <SecurityConfiguration apiUrl={API_URL} view="linux" />
+          )}
+
+          {activeMenu === "config-windows" && (
+            <SecurityConfiguration apiUrl={API_URL} view="windows" />
+          )}
+
+          {activeMenu === "config-web" && (
+            <SecurityConfiguration apiUrl={API_URL} view="web" />
+          )}
+
+          {activeMenu === "config-drift" && (
+            <SecurityConfiguration apiUrl={API_URL} view="drift" />
+          )}
+
+          {activeMenu === "system-hardening" && (
+            <SystemHardening />
+          )}
+
+{activeMenu === "user-accounts" && (
+            <UserAccounts />
+          )}
+
+          {activeMenu === "linux-security" && (
+            <LinuxSecurity />
+          )}
+
+          {activeMenu === "ssh-security" && (
+            <SSHSecurity />
+          )}
+
+          {activeMenu === "windows-security" && (
+            <WindowsSecurity />
+          )}
+
+          {activeMenu === "servers" && (
+            <Servers />
+          )}
+
+          {activeMenu === "endpoints" && (
+            <Endpoints />
+          )}
+
+          {activeMenu === "network-devices" && (
+            <NetworkDevices />
+          )}
+
+          {activeMenu === "applications" && (
+            <Applications />
+          )}
+
+          {activeMenu === "databases" && (
+            <Databases />
+          )}
+          {activeMenu === "domains" && (
+            <Domains />
+          )}
+
+          {activeMenu === "ip-addresses" && (
+            <IPAddresses />
+          )}
+          {activeMenu === "asset-groups" && (
+            <AssetGroups />
+          )}
+          {activeMenu === "internal-attack-surface" && <InternalAttackSurface />}
+
+          {activeMenu === "external-attack-surface" && (
+            <ExternalAttackSurface />
+          )}
+
+          {activeMenu === "subdomain-discovery" && <SubdomainDiscovery />}
+          {activeMenu === "domain-discovery" && (
+            <DomainDiscovery />
+          )}
+
+          {activeMenu === "dns-security" && (
+            <DNSSecurity />
+          )}
+
+          {["threat-intelligence", "threat-indicators", "threat-domains",
+             "threat-urls", "threat-hashes"].includes(activeMenu) && (
+            <ThreatIntelligenceModule key={activeMenu} apiUrl={API_URL} view={activeMenu} />
+          )}
+
+          {["threat-actors", "threat-campaigns", "threat-malware"].includes(activeMenu) && (
+            <ThreatKnowledgeModule key={activeMenu} apiUrl={API_URL} view={activeMenu} />
+          )}
+
+          {activeMenu === "threat-feeds" && (
+            <ThreatFeeds apiUrl={API_URL} />
+          )}
+
+          {activeMenu === "ip-intelligence" && (
+            <IPIntelligence />
+          )}
+
+          {activeMenu === "open-ports" && (
+            <OpenPorts />
+          )}
+
+          {activeMenu === "exposed-services" && (
+            <ExposedServices />
+          )}
+
+          {activeMenu === "ssl-tls" && (
+            <SSLTLS />
+          )}
+
+          {activeMenu === "security-headers" && (
+            <SecurityHeaders />
           )}
 
           {/* OTHER MODULES */}
           {activeMenu === "profile" && (
-            <TelegramConnection />
+            <AccountProfile apiUrl={API_URL}>
+              <TelegramConnection />
+            </AccountProfile>
           )}
 
           {activeMenu !== "dashboard" &&
+            activeMenu !== "cve-database" &&
+            activeMenu !== "dig-results" &&
+            activeMenu !== "dns-recon-results" &&
+            activeMenu !== "endpoints" &&
+            activeMenu !== "exposed-services" &&
+            activeMenu !== "hping3-results" &&
+            activeMenu !== "hydra-results" &&
+            activeMenu !== "john-results" &&
+            activeMenu !== "juice-shop" &&
+            activeMenu !== "linux-security" &&
+            activeMenu !== "masscan-results" &&
+            activeMenu !== "metasploit-results" &&
+            activeMenu !== "multi-tool-results" &&
+            activeMenu !== "network-devices" &&
+            activeMenu !== "nslookup-results" &&
+            activeMenu !== "ping-results" &&
+            activeMenu !== "privileged-accounts" &&
+            activeMenu !== "report-results" &&
+            activeMenu !== "risk-assessment-results" &&
+            activeMenu !== "snort-results" &&
+            activeMenu !== "tshark-results" &&
+            activeMenu !== "user-accounts" &&
+            activeMenu !== "whois-results" &&
+            activeMenu !== "wireshark-results" &&
+            activeMenu !== "zap-results" &&
             activeMenu !== "vapt" &&
             activeMenu !== "nmap-results" &&
             activeMenu !== "nikto-results" &&
@@ -8693,6 +9334,103 @@ function UserDashboard({ onLogout }) {
             activeMenu !== "copilot" &&
             activeMenu !== "support" &&
             activeMenu !== "profile" &&
+            activeMenu !== "databases" && activeMenu !== "domains" &&
+            activeMenu !== "applications" &&
+            activeMenu !== "asset-groups" &&
+            activeMenu !== "internal-attack-surface" &&
+            activeMenu !== "external-attack-surface" &&
+            activeMenu !== "domain-discovery" &&
+            activeMenu !== "subdomain-discovery" &&
+            activeMenu !== "dns-security" &&
+            activeMenu !== "ip-intelligence" &&
+            activeMenu !== "threat-intelligence" &&
+            activeMenu !== "threat-indicators" &&
+            activeMenu !== "threat-domains" &&
+            activeMenu !== "threat-urls" &&
+            activeMenu !== "threat-hashes" &&
+            activeMenu !== "threat-cve" &&
+            activeMenu !== "threat-feeds" &&
+            activeMenu !== "hunt-events" &&
+            activeMenu !== "hunt-users" &&
+            activeMenu !== "hunt-processes" &&
+            activeMenu !== "hunt-network" &&
+            activeMenu !== "hunt-timeline" &&
+            activeMenu !== "mitre-tactics" &&
+            activeMenu !== "mitre-techniques" &&
+            activeMenu !== "mitre-subtechniques" &&
+            activeMenu !== "mitre-groups" &&
+            activeMenu !== "mitre-software" &&
+            activeMenu !== "mitre-coverage" &&
+            activeMenu !== "mitre-attack" &&
+            activeMenu !== "network-dashboard" &&
+            activeMenu !== "network-connections" &&
+            activeMenu !== "network-ports" &&
+            activeMenu !== "network-firewall" &&
+            activeMenu !== "network-dns" &&
+            activeMenu !== "network-discovery" &&
+            activeMenu !== "network-topology" &&
+            activeMenu !== "network-traffic" &&
+            activeMenu !== "network-protocols" &&
+            activeMenu !== "network-vpn" &&
+            activeMenu !== "network-ids" &&
+            activeMenu !== "network-anomalies" &&
+            activeMenu !== "identity-dashboard" &&
+            activeMenu !== "identity-authentication" &&
+            activeMenu !== "identity-privileged" &&
+            activeMenu !== "identity-users" &&
+            activeMenu !== "identity-groups" &&
+            activeMenu !== "identity-mfa" &&
+            activeMenu !== "identity-anomalies" &&
+            activeMenu !== "identity-risk" &&
+            activeMenu !== "secrets-dashboard" &&
+            activeMenu !== "secrets-exposed" &&
+            activeMenu !== "secrets-api-keys" &&
+            activeMenu !== "secrets-tokens" &&
+            activeMenu !== "secrets-credentials" &&
+            activeMenu !== "secrets-scanning" &&
+            activeMenu !== "hunt-dashboard" &&
+            activeMenu !== "reports-security" &&
+            activeMenu !== "reports-vulnerability" &&
+            activeMenu !== "reports-incidents" &&
+            activeMenu !== "reports-risk" &&
+            activeMenu !== "reports-scheduled" &&
+            activeMenu !== "testing-service-discovery" &&
+            activeMenu !== "testing-port-scanner" &&
+            activeMenu !== "testing-scan-history" &&
+            activeMenu !== "assessment-web" &&
+            activeMenu !== "assessment-api" &&
+            activeMenu !== "assessment-network" &&
+            activeMenu !== "assessment-configuration" &&
+            activeMenu !== "assessment-audit" &&
+            activeMenu !== "assessment-remediation" &&
+            activeMenu !== "risk-dashboard" &&
+            activeMenu !== "risk-assets" &&
+            activeMenu !== "risk-vulnerabilities" &&
+            activeMenu !== "risk-identity" &&
+            activeMenu !== "risk-register" &&
+            activeMenu !== "risk-trends" &&
+            activeMenu !== "soar-playbooks" &&
+            activeMenu !== "soar-workflows" &&
+            activeMenu !== "soar-triggers" &&
+            activeMenu !== "soar-actions" &&
+            activeMenu !== "soar-approvals" &&
+            activeMenu !== "soar-responses" &&
+            activeMenu !== "config-baselines" &&
+            activeMenu !== "config-hardening" &&
+            activeMenu !== "config-cis" &&
+            activeMenu !== "config-linux" &&
+            activeMenu !== "config-windows" &&
+            activeMenu !== "config-web" &&
+            activeMenu !== "config-drift" &&
+            activeMenu !== "hunt-builder" &&
+            activeMenu !== "hunt-ioc" &&
+            activeMenu !== "hunt-saved" &&
+            activeMenu !== "threat-actors" &&
+            activeMenu !== "threat-campaigns" &&
+            activeMenu !== "threat-malware" &&
+            activeMenu !== "open-ports" &&
+            activeMenu !== "ssl-tls" &&
+            activeMenu !== "security-headers" &&
             activeMenu !== "reports" &&
             activeMenu !== "activity" &&
             activeMenu !== "detection-dashboard" &&
@@ -8703,8 +9441,39 @@ function UserDashboard({ onLogout }) {
             !activeMenu.startsWith("alerts") &&
             activeMenu !== "code-security" &&
             activeMenu !== "incidents" &&
-            activeMenu !== "notifications" && (
-              <UserModulePlaceholder menu={activeMenu} />
+            activeMenu !== "risk-overview" &&
+            activeMenu !== "environment-health" &&
+            activeMenu !== "asset-inventory" &&
+            activeMenu !== "asset-discovery" &&
+            activeMenu !== "servers" &&
+            activeMenu !== "server-dashboard" &&
+            activeMenu !== "running-processes" &&
+            activeMenu !== "services" &&
+            activeMenu !== "firewall" &&
+            activeMenu !== "system-hardening" &&
+            activeMenu !== "windows-security" &&
+            activeMenu !== "ip-addresses" &&
+            activeMenu !== "notifications" &&
+            activeMenu !== "remediation" &&
+            activeMenu !== "ssh-security" &&
+            activeMenu !== "security-events" &&
+            activeMenu !== "log-explorer" &&
+            activeMenu !== "authentication-logs" &&
+            activeMenu !== "network-logs" &&
+            activeMenu !== "firewall-logs" &&
+            activeMenu !== "dns-logs" &&
+            activeMenu !== "application-logs" &&
+            activeMenu !== "windows-events" &&
+            activeMenu !== "linux-logs" &&
+            activeMenu !== "log-sources" &&
+            activeMenu !== "saved-searches" && (
+              (
+              ["incidents", "incidents-active", "incidents-critical",
+               "incidents-closed", "incidents-investigation",
+               "incidents-cases", "incidents-assignments", "incidents-evidence", "incidents-timeline", "incidents-sla", "incidents-playbooks"].includes(activeMenu)
+                ? null
+                : <UserModulePlaceholder menu={activeMenu} />
+            )
             )}
         </main>
       </div>
@@ -8934,6 +9703,14 @@ function MyActivity() {
 // UPTIME MONITORING
 // ==================================================
 function UptimeMonitoring() {
+  const uptimeAuthHeaders = () => {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      throw new Error("Sign in to use uptime monitoring.");
+    }
+    return { Authorization: `Bearer ${token}` };
+  };
+
   const [websiteName, setWebsiteName] = useState("");
   const [targetUrl, setTargetUrl] = useState(
     localStorage.getItem("active_vapt_target") || "http://127.0.0.1:3000"
@@ -8989,7 +9766,7 @@ function UptimeMonitoring() {
 
     try {
       const response = await axios.get(`${API_URL}/uptime/status`, {
-        params: {
+        headers: uptimeAuthHeaders(), params: {
           target_url: url,
         },
       });
@@ -9024,7 +9801,7 @@ function UptimeMonitoring() {
         setChecking(true);
 
         await axios.post(`${API_URL}/uptime/check`, null, {
-          params: {
+          headers: uptimeAuthHeaders(), params: {
             target_url: targetUrl,
           },
         });
@@ -9090,7 +9867,7 @@ function UptimeMonitoring() {
         `${API_URL}/uptime/start`,
         null,
         {
-          params: {
+          headers: uptimeAuthHeaders(), params: {
             website_name: cleanName,
             target_url: cleanUrl,
           },
@@ -9122,7 +9899,7 @@ function UptimeMonitoring() {
       setError("");
 
       await axios.post(`${API_URL}/uptime/check`, null, {
-        params: {
+        headers: uptimeAuthHeaders(), params: {
           target_url: targetUrl,
         },
       });
@@ -9148,7 +9925,7 @@ function UptimeMonitoring() {
       setError("");
 
       await axios.post(`${API_URL}/uptime/stop`, null, {
-        params: {
+        headers: uptimeAuthHeaders(), params: {
           target_url: targetUrl,
         },
       });
@@ -9226,10 +10003,16 @@ function UptimeMonitoring() {
           <h1 className="mt-2 text-3xl font-bold">
             Uptime Monitoring
           </h1>
+          <p className="mt-3 text-sm leading-6 text-gray-500">
+            Monitoring samples belong to your account and are stored temporarily
+            in the backend process. Checks run while this page is open.
+            Restarting the backend clears these samples. Availability is the
+            percentage of successful recorded checks.
+          </p>
+
 
           <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-500">
-            Monitor website availability, response time, request activity and
-            live traffic from your security workspace.
+            Monitor HTTP availability and response latency using checks initiated while this page is open. Counts represent checks, not website visitors.
           </p>
         </div>
 
@@ -9377,13 +10160,13 @@ function UptimeMonitoring() {
               />
 
               <UptimeMetric
-                label="Requests"
+                label="Checks"
                 value={totalRequests}
                 subtitle={`${successfulRequests} successful`}
               />
 
               <UptimeMetric
-                label="Live Traffic"
+                label="Monitor Checks"
                 value={`${trafficPerMinute}/min`}
                 subtitle={`${failedRequests} failed`}
               />
@@ -9400,7 +10183,7 @@ function UptimeMonitoring() {
             <div className="border border-white/10 bg-[#0d0d0d] xl:col-span-2">
               <div className="border-b border-white/10 px-6 py-5">
                 <p className="text-sm font-semibold">
-                  Latency & Traffic
+                  Response Latency
                 </p>
 
                 <p className="mt-1 text-xs text-gray-600">
@@ -9603,12 +10386,12 @@ function UptimeMonitoring() {
                 />
 
                 <UptimeDetail
-                  label="Successful Requests"
+                  label="Successful Checks"
                   value={successfulRequests}
                 />
 
                 <UptimeDetail
-                  label="Failed Requests"
+                  label="Failed Checks"
                   value={failedRequests}
                 />
               </div>
@@ -9618,7 +10401,7 @@ function UptimeMonitoring() {
           <div className="mt-6 overflow-hidden border border-white/10 bg-[#0d0d0d]">
             <div className="border-b border-white/10 px-6 py-5">
               <p className="text-sm font-semibold">
-                Live Traffic
+                Monitor Checks
               </p>
 
               <p className="mt-1 text-xs text-gray-600">
@@ -9693,7 +10476,7 @@ function UptimeMonitoring() {
                         colSpan="5"
                         className="px-5 py-10 text-center text-sm text-gray-700"
                       >
-                        No traffic/check data yet.
+                        No monitor check data yet.
                       </td>
                     </tr>
                   )}
@@ -9847,6 +10630,21 @@ function SupportDashboard() {
       setDetailsLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (detailsLoading || !selectedTicket) return;
+
+    const frame = requestAnimationFrame(() => {
+      document.getElementById("support-ticket-details")?.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+        block: "start",
+      });
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [detailsLoading, selectedTicket]);
 
   const resetForm = () => {
     setForm({
@@ -10338,7 +11136,7 @@ function SupportDashboard() {
       </div>
 
       {(detailsLoading || selectedTicket) && (
-        <div className="mt-8 border border-white/10 bg-[#0d0d0d]">
+        <div id="support-ticket-details" className="mt-8 scroll-mt-28 border border-white/10 bg-[#0d0d0d]">
           <div className="flex items-center justify-between border-b border-white/10 px-6 py-5">
             <div>
               <p className="text-sm font-semibold">Ticket Details</p>
@@ -10553,6 +11351,7 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [dataSource, setDataSource] = useState("—");
   const [securityEvents, setSecurityEvents] = useState([]);
+  const [siemConnection, setSiemConnection] = useState("disconnected");
 
   const logTabs = [
     { id: "siem-dashboard", label: "SIEM Dashboard" },
@@ -10639,56 +11438,10 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
     }
   };
 
-  const startMonitoring = async (target = activeTarget) => {
-    if (!target) {
-      setMonitoringStatus("not_started");
-      return false;
-    }
-
-    const token = localStorage.getItem("token");
-
-    if (!token) {
-      setError("Your session has expired. Please log in again.");
-      return false;
-    }
-
-    try {
-      setMonitoringLoading(true);
-      setError("");
-
-      const response = await axios.post(
-        `${API_URL}/logs/monitoring/start`,
-        { target },
-        {
-          ...getAuthConfig(),
-          headers: {
-            ...getAuthConfig().headers,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-
-      setMonitoringStatus(
-        response.data?.monitoring_status || "active"
-      );
-
-      return true;
-    } catch (err) {
-      console.error("Start monitoring error:", err);
-
-      if (err.response?.status === 401) {
-        localStorage.removeItem("token");
-        setError("Your session has expired. Please log in again.");
-      } else if (err.response?.data?.detail) {
-        setError(err.response.data.detail);
-      } else {
-        setError("Unable to start live monitoring for this target.");
-      }
-
-      return false;
-    } finally {
-      setMonitoringLoading(false);
-    }
+  const startMonitoring = async () => {
+    setMonitoringStatus("unavailable");
+    setError("Scoped log collection is unavailable.");
+    return false;
   };
 
   const fetchSecurityEvents = async ({ silent = false } = {}) => {
@@ -10722,6 +11475,8 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
         ? response.data
         : [];
 
+      // Clear the previous request failure after successful retrieval.
+      setError("");
       setSecurityEvents(returnedEvents);
       setDataSource("SOC Security Events API");
       setLastUpdated(new Date());
@@ -10789,131 +11544,27 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
     }
   };
 
-  const fetchLogs = async ({
-    includeFilters = true,
-    silent = false,
-  } = {}) => {
-    const token = localStorage.getItem("token");
-
-    if (!token) {
-      setError("Your session has expired. Please log in again.");
-      setLoading(false);
-      return;
-    }
-
-    if (!activeTarget) {
-      setLogs([]);
-      setDataSource("—");
-      setLoading(false);
-      return;
-    }
-
-    try {
-      if (!silent) {
-        setLoading(true);
-      }
-
-      setError("");
-
-      const params = new URLSearchParams();
-      params.set("limit", "200");
-      params.set("target", activeTarget);
-
-      if (includeFilters) {
-        if (search.trim()) {
-          params.set("search", search.trim());
-        }
-
-        params.set("severity", severity);
-      } else {
-        params.set("severity", "all");
-      }
-
-      const response = await axios.get(
-        `${API_URL}/logs/${activeLog}?${params.toString()}`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        }
-      );
-
-      const returnedLogs = response.data.logs || [];
-
-      if (includeFilters) {
-        setLogs(returnedLogs);
-      }
-
-      setDataSource(
-        response.data.source ||
-          (activeLog === "access"
-            ? "SOC Platform API"
-            : "systemd-journald")
-      );
-
-      if (response.data.monitoring_status) {
-        setMonitoringStatus(response.data.monitoring_status);
-      }
-
-      setLastUpdated(new Date());
-    } catch (err) {
-      console.error("Live log fetch error:", err);
-
-      if (err.response?.status === 401) {
-        setError("Your session has expired. Please log in again.");
-        localStorage.removeItem("token");
-      } else if (err.response?.data?.detail) {
-        setError(err.response.data.detail);
-      } else {
-        setError(
-          "Unable to retrieve live logs from the SOC Platform backend."
-        );
-      }
-
-      if (!silent) {
-        setLogs([]);
-        }
-    } finally {
-      if (!silent) {
-        setLoading(false);
-      }
-    }
+  const fetchLogs = async () => {
+    if (["siem-dashboard", "security-events"].includes(activeLog)) return;
+    setLogs([]);
+    setMonitoringStatus("unavailable");
+    setLoading(false);
   };
 
-  // Automatically connect monitoring to the active VAPT target.
+  // Scoped collection requires a configured, attributable collector.
+  // Visiting a page must not claim collection has started.
   useEffect(() => {
-    const initializeMonitoring = async () => {
-      if (!activeTarget) {
-        setMonitoringStatus("not_started");
-        setLogs([]);
-          setLoading(false);
-        return;
-      }
-
-      const status = await getMonitoringStatus(activeTarget);
-
-      if (
-        !status ||
-        status.monitoring_status !== "active"
-      ) {
-        await startMonitoring(activeTarget);
-      }
-
-      await fetchLogs({ includeFilters: true });
-      await fetchLogs({
-        includeFilters: false,
-        silent: true,
-      });
-    };
-
-    initializeMonitoring();
-    // Initialize monitoring on target changes; other effects handle refreshes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTarget]);
+    if (["syslog", "auth", "access"].includes(activeLog)) {
+      setLogs([]);
+      setMonitoringStatus("unavailable");
+      setLoading(false);
+      setError("");
+    }
+  }, [activeTarget, activeLog]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (activeLog === "security-events") {
+      if (["siem-dashboard", "security-events"].includes(activeLog)) {
         fetchSecurityEvents({ silent: true });
       } else {
         fetchLogs({ includeFilters: true });
@@ -10927,13 +11578,17 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
   }, [search, severity]);
 
   useEffect(() => {
-    if (activeLog !== "security-events") {
+    if (!["siem-dashboard", "security-events"].includes(activeLog)) {
       return undefined;
     }
 
-    // Fetching here is intentional; the helper sets the loading state.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // Fetch once when entering the tab, even when auto-refresh is paused.
     fetchSecurityEvents();
+
+    if (!autoRefresh) {
+      setSiemConnection("paused");
+      return undefined;
+    }
 
     const token = localStorage.getItem("token");
     if (!token) {
@@ -10946,6 +11601,7 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
 
     const connect = () => {
       if (stopped) return;
+      setSiemConnection("connecting");
 
       const protocol =
         window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -10953,44 +11609,36 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
         API_URL.replace(/^https?:\/\//, "").replace(/\/$/, "");
 
       socket = new WebSocket(
-        `${protocol}//${host}/ws/security-events`
+        `${protocol}//${host}/ws/client/siem-events?token=${encodeURIComponent(token)}`
       );
 
       socket.onopen = () => {
-        console.log("[SIEM] Security events WebSocket connected");
+        if (stopped) return;
+        setSiemConnection("connected");
       };
 
       socket.onmessage = (event) => {
+        if (stopped) return;
         try {
           const incoming = JSON.parse(event.data);
 
-          setSecurityEvents((current) => {
-            const eventId = incoming.event_id || incoming.id;
-
-            if (
-              eventId &&
-              current.some(
-                (item) => (item.event_id || item.id) === eventId
-              )
-            ) {
-              return current;
-            }
-
-            return [incoming, ...current].slice(0, 200);
-          });
-
-          setLastUpdated(new Date());
+          if (incoming.type === "siem_refresh") {
+            fetchSecurityEvents({ silent: true });
+          }
         } catch (err) {
-          console.error("[SIEM] Invalid WebSocket payload:", err);
+          console.error("[SIEM] Invalid WebSocket signal:", err);
         }
       };
 
       socket.onerror = (error) => {
+        if (stopped) return;
+        setSiemConnection("disconnected");
         console.error("[SIEM] Security events WebSocket error:", error);
       };
 
       socket.onclose = () => {
         if (!stopped) {
+          setSiemConnection("disconnected");
           reconnectTimer = window.setTimeout(connect, 3000);
         }
       };
@@ -11024,28 +11672,6 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeLog, autoRefresh]);
 
-  useEffect(() => {
-    if (!autoRefresh || !activeTarget) {
-      return undefined;
-    }
-
-    const interval = setInterval(async () => {
-      await getMonitoringStatus(activeTarget);
-      await fetchLogs({
-        includeFilters: true,
-        silent: true,
-      });
-      await fetchLogs({
-        includeFilters: false,
-        silent: true,
-      });
-    }, 5000);
-
-    return () => clearInterval(interval);
-    // These state changes intentionally control the monitoring polling schedule.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRefresh, activeTarget, activeLog, search, severity]);
-
   const siemTotalEvents = securityEvents.length;
 
   const siemErrorCount = securityEvents.filter(
@@ -11065,11 +11691,13 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
     const message = String(event.message || "").toLowerCase();
 
     return (
-      type.includes("authentication") ||
-      type.includes("auth") ||
+      /(?:auth|authentication|login|logon).*(?:fail|denied|invalid)/.test(type) ||
+      /(?:fail|denied|invalid).*(?:auth|authentication|login|logon)/.test(type) ||
       message.includes("authentication failure") ||
       message.includes("failed password") ||
-      message.includes("invalid user")
+      message.includes("invalid user") ||
+      message.includes("failed login") ||
+      message.includes("failed logon")
     );
   }).length;
 
@@ -11145,231 +11773,188 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
   const monitoringIsActive =
     monitoringStatus === "active";
 
+
+  // SCOPED_COLLECTION_NOTICE
+  if (["syslog", "auth", "access"].includes(activeLog)) {
+    const title = {
+      syslog: "Sys Logs",
+      auth: "Auth Logs",
+      access: "Access Logs",
+    }[activeLog];
+
+    return (
+      <div className="space-y-6">
+        <div>
+          <p className="text-xs uppercase tracking-[0.2em] text-red-500">
+            SIEM / Assessment Logs
+          </p>
+          <h1 className="mt-2 text-3xl font-bold text-white">{title}</h1>
+          <p className="mt-3 max-w-3xl text-sm leading-6 text-gray-400">
+            Assessment log collection requires a configured collector whose
+            records can be attributed to your authorized environment.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-2 border-b border-white/10 pb-4">
+          {logTabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => handleTabChange(tab.id)}
+              className={`border px-4 py-3 text-sm ${
+                activeLog === tab.id
+                  ? "border-red-600 bg-red-600/10 text-white"
+                  : "border-white/10 text-gray-400 hover:text-white"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div
+          role="status"
+          className="border border-yellow-600/30 bg-yellow-600/5 p-6"
+        >
+          <h2 className="text-lg font-semibold text-yellow-400">
+            Scoped collection unavailable
+          </h2>
+          <p className="mt-3 max-w-3xl text-sm leading-6 text-gray-300">
+            No attributable log collection is configured for this view.
+            Shared backend-host journal and application access records
+            are not exposed through user accounts.
+          </p>
+          <p className="mt-3 text-sm text-gray-400">
+            Selected assessment target: {activeTarget || "None selected"}
+          </p>
+          <p className="mt-3 max-w-3xl text-sm leading-6 text-gray-400">
+            Selecting a VAPT target does not install a remote collector or
+            establish ownership of backend-host logs.
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-6">
+          <h2 className="font-semibold text-white">
+            Review available security telemetry
+          </h2>
+          <p className="mt-3 max-w-3xl text-sm leading-6 text-gray-400">
+            Account Security Events remain available independently of
+            assessment log collection.
+          </p>
+          <div className="mt-5 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => handleTabChange("siem-dashboard")}
+              className="border border-white/20 px-5 py-3 text-sm text-white"
+            >
+              Open SIEM Dashboard
+            </button>
+            <button
+              type="button"
+              onClick={() => handleTabChange("security-events")}
+              className="bg-red-600 px-5 py-3 text-sm font-semibold text-white"
+            >
+              Open Security Events
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div>
-      {/* HEADER */}
-      <div className="mb-8 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+      {/* ACCOUNT_EVENT_HEADER */}
+      <div className="mb-8 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <p className="text-xs uppercase tracking-[0.3em] text-red-500">
-            Security Monitoring
+          <p className="text-xs uppercase tracking-[0.2em] text-red-500">
+            SIEM / Account Security Events
           </p>
-
           <h1 className="mt-2 text-3xl font-bold">
-            Live Log Monitoring
+            {activeLog === "security-events"
+              ? "Security Events"
+              : "SIEM Dashboard"}
           </h1>
-
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-500">
-            Monitor system, authentication and application access events for
-            the active VAPT assessment. The monitoring context is selected
-            automatically from the successful VAPT target.
+          <p className="mt-3 max-w-3xl text-sm leading-6 text-gray-400">
+            Review persisted security events within your authorized scope.
+            Account event refresh is independent of VAPT assessment monitoring.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          <div className="border border-white/10 bg-[#0d0d0d] px-4 py-3 text-xs">
-            <p className="text-[10px] uppercase tracking-wider text-gray-600">
-              Monitoring Status
+          <div className="border border-white/10 bg-[#0d0d0d] px-4 py-3">
+            <p className="text-[10px] uppercase tracking-wider text-gray-500">
+              Automatic Refresh
             </p>
-
-            <p
-              className={`mt-1 font-semibold ${
-                monitoringIsActive
-                  ? "text-green-500"
-                  : "text-yellow-500"
-              }`}
-            >
-              {monitoringLoading
-                ? "CONNECTING..."
-                : monitoringIsActive
-                ? "ACTIVE"
-                : "NOT STARTED"}
+            <p className={`mt-1 text-xs font-semibold ${
+              autoRefresh ? "text-green-500" : "text-yellow-500"
+            }`}>
+              {autoRefresh ? "ENABLED / EVERY 5 SECONDS" : "PAUSED"}
             </p>
           </div>
 
-          <div className="border border-white/10 bg-[#0d0d0d] px-4 py-3 text-xs">
-            <p className="text-[10px] uppercase tracking-wider text-gray-600">
-              Data Source
+          <div className="border border-white/10 bg-[#0d0d0d] px-4 py-3">
+            <p className="text-[10px] uppercase tracking-wider text-gray-500">
+              Event Notifications
             </p>
-
-            <p className="mt-1 max-w-[190px] truncate text-green-500">
-              {sourceForDisplay || "Loading..."}
+            <p className={`mt-1 text-xs font-semibold ${
+              autoRefresh && siemConnection === "connected"
+                ? "text-green-500" : "text-yellow-500"
+            }`}>
+              {!autoRefresh
+                ? "PAUSED"
+                : siemConnection === "connected"
+                  ? "CONNECTED"
+                  : siemConnection === "connecting"
+                    ? "CONNECTING"
+                    : "DISCONNECTED / POLLING ENABLED"}
             </p>
           </div>
-
-          <span className="flex items-center gap-2 border border-white/10 bg-[#0d0d0d] px-4 py-3 text-xs">
-            <span
-              className={`h-1.5 w-1.5 rounded-full ${
-                autoRefresh && monitoringIsActive
-                  ? "bg-green-500"
-                  : "bg-gray-600"
-              }`}
-            />
-
-            <span
-              className={
-                autoRefresh && monitoringIsActive
-                  ? "text-green-500"
-                  : "text-gray-600"
-              }
-            >
-              {autoRefresh && monitoringIsActive
-                ? "LIVE"
-                : "PAUSED"}
-            </span>
-          </span>
 
           <button
+            type="button"
             onClick={() => setAutoRefresh((value) => !value)}
-            className="border border-white/10 px-4 py-3 text-xs text-gray-400 transition hover:border-red-600 hover:text-white"
+            aria-pressed={!autoRefresh}
+            className="border border-white/20 px-5 py-3 text-sm text-gray-300 transition hover:border-red-600 hover:text-white"
           >
-            {autoRefresh ? "Pause" : "Resume"}
+            {autoRefresh ? "Pause Auto Refresh" : "Resume Auto Refresh"}
           </button>
         </div>
       </div>
 
-      {/* ERROR */}
       {error && (
         <div className="mb-6 border border-red-600/20 bg-red-600/5 px-5 py-4">
           <p className="text-sm text-red-400">
-            {error}
+            {typeof error === "string"
+              ? error
+              : "Unable to retrieve security events."}
           </p>
         </div>
       )}
 
-      {/* ACTIVE VAPT TARGET */}
-      <div className="mb-6 border border-red-600/20 bg-red-600/5 p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div className="min-w-0">
-            <p className="text-[10px] uppercase tracking-[0.2em] text-red-500">
-              Active Security Target
-            </p>
-
-            {activeTarget ? (
-              <>
-                <p className="mt-2 break-all text-base font-semibold text-white">
-                  {activeTarget}
-                </p>
-
-                <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2 text-xs text-gray-600">
-                  <span>
-                    VAPT Status:{" "}
-                    <span className="text-green-500">
-                      {activeTargetMeta?.status || "Completed"}
-                    </span>
-                  </span>
-
-                  {activeTargetMeta?.scenario && (
-                    <span>
-                      Scenario:{" "}
-                      <span className="text-gray-400">
-                        {activeTargetMeta.scenario}
-                      </span>
-                    </span>
-                  )}
-
-                  {activeTargetMeta?.profile && (
-                    <span>
-                      Profile:{" "}
-                      <span className="text-gray-400">
-                        {activeTargetMeta.profile}
-                      </span>
-                    </span>
-                  )}
-
-                  {activeTargetMeta?.scannedAt && (
-                    <span>
-                      Last Scan:{" "}
-                      <span className="text-gray-400">
-                        {new Date(
-                          activeTargetMeta.scannedAt
-                        ).toLocaleString()}
-                      </span>
-                    </span>
-                  )}
-
-                  <span>
-                    Monitoring:{" "}
-                    <span
-                      className={
-                        monitoringIsActive
-                          ? "text-green-500"
-                          : "text-yellow-500"
-                      }
-                    >
-                      {monitoringIsActive
-                        ? "Active"
-                        : "Not started"}
-                    </span>
-                  </span>
-                </div>
-              </>
-            ) : (
-              <>
-                <p className="mt-2 text-base font-semibold text-white">
-                  No active VAPT target selected
-                </p>
-
-                <p className="mt-2 text-xs leading-5 text-gray-600">
-                  Complete an authorized VAPT scan first. The successful scan
-                  target becomes the monitoring context for this workspace.
-                </p>
-              </>
-            )}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {activeTarget && !monitoringIsActive && (
-              <button
-                onClick={handleManualStart}
-                disabled={monitoringLoading}
-                className="bg-red-600 px-5 py-3 text-xs font-semibold transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {monitoringLoading
-                  ? "Starting..."
-                  : "Start Monitoring"}
-              </button>
-            )}
-
-            {activeTarget && monitoringIsActive && (
-              <button
-                onClick={handleStop}
-                disabled={monitoringLoading}
-                className="border border-white/10 px-5 py-3 text-xs text-gray-400 transition hover:border-red-600 hover:text-white disabled:opacity-50"
-              >
-                Stop Monitoring
-              </button>
-            )}
-
-            <div className="border border-white/10 bg-[#080808] px-4 py-3 text-xs">
-              <p className="text-[10px] uppercase tracking-wider text-gray-600">
-                Log Source
-              </p>
-
-              <p className="mt-1 text-green-500">
-                {dataSource || "Loading..."}
-              </p>
-            </div>
-          </div>
-        </div>
+      <div className="mb-6 border border-white/10 bg-[#0d0d0d] p-5">
+        <p className="text-xs font-semibold text-gray-300">
+          Source: SOC Security Events API
+        </p>
+        <p className="mt-2 text-sm leading-6 text-gray-400">
+          Counters describe up to 200 returned events, not all historical
+          records. Search and severity filters narrow the returned set.
+          Manual refresh remains available while automatic refresh is paused.
+        </p>
+        <p className="mt-2 text-xs leading-5 text-gray-500">
+          Sys, Auth, and Access Logs require separately configured scoped
+          collection. Their availability does not control account event refresh.
+        </p>
       </div>
-
-      {!activeTarget && (
-        <div className="mb-6 border border-yellow-600/20 bg-yellow-600/5 px-5 py-4">
-          <p className="text-sm text-yellow-500">
-            No VAPT target is linked yet. Complete an authorized VAPT scan to
-            establish the active security target.
-          </p>
-        </div>
-      )}
 
       {/* EVENT SUMMARY */}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <LogStat label="Total Events" value={siemTotalEvents} />
-        <LogStat label="Errors" value={siemErrorCount} critical />
-        <LogStat label="Warnings" value={siemWarningCount} />
+        <LogStat label="Returned Events" value={siemTotalEvents} />
+        <LogStat label="High / Critical / Error" value={siemErrorCount} critical />
+        <LogStat label="Medium / Warning" value={siemWarningCount} />
 
         <LogStat
-          label="Auth Failures"
+          label="Auth Failure Matches"
           value={siemAuthFailures}
           critical={siemAuthFailures > 0}
         />
@@ -11436,7 +12021,7 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
           <div className="flex items-end">
             <button
               onClick={() => {
-                if (activeLog === "security-events") {
+                if (["siem-dashboard", "security-events"].includes(activeLog)) {
                   fetchSecurityEvents();
                   return;
                 }
@@ -11444,7 +12029,10 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
                 fetchLogs({ includeFilters: true });
                 fetchLogs({ includeFilters: false, silent: true });
               }}
-              disabled={loading || (activeLog !== "security-events" && !activeTarget)}
+              disabled={loading || (
+                !["siem-dashboard", "security-events"].includes(activeLog)
+                && !activeTarget
+              )}
               className="border border-white/10 px-4 py-3 text-xs text-gray-400 transition hover:border-red-600 hover:text-white disabled:opacity-50"
             >
               {loading ? "Loading..." : "Refresh Now"}
@@ -11456,38 +12044,47 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
           <div className="grid gap-6 lg:grid-cols-2">
             <div className="border border-white/10 bg-[#0a0a0a] p-6">
               <p className="text-[10px] uppercase tracking-[0.2em] text-gray-600">
-                Live SIEM Status
+                Account Event Refresh
               </p>
               <div className="mt-4 flex items-center gap-3">
-                <span className="h-3 w-3 rounded-full bg-green-500" />
-                <span className="text-sm text-green-400">
-                  Real-time event stream active
+                <span className={`h-3 w-3 rounded-full ${
+                  autoRefresh && siemConnection === "connected"
+                    ? "bg-green-500" : "bg-yellow-500"
+                }`} />
+                <span className="text-sm text-gray-300">
+                  {!autoRefresh
+                    ? "Account event auto-refresh paused"
+                    : siemConnection === "connected"
+                      ? "Account event notifications connected; polling every 5 seconds"
+                      : siemConnection === "connecting"
+                        ? "Connecting event notifications; polling every 5 seconds"
+                        : "Event notifications disconnected; polling every 5 seconds"}
                 </span>
               </div>
               <p className="mt-3 text-xs text-gray-600">
                 Source: {dataSource}
               </p>
               <p className="mt-1 text-xs text-gray-600">
-                Last event: {lastUpdated ? lastUpdated.toLocaleString() : "Waiting for events"}
+                Last successful fetch: {lastUpdated ? lastUpdated.toLocaleString() : "Not fetched yet"}
               </p>
             </div>
 
             <div className="border border-white/10 bg-[#0a0a0a] p-6">
               <p className="text-[10px] uppercase tracking-[0.2em] text-gray-600">
-                Detection Activity
+                Returned Event Summary
               </p>
               <div className="mt-4 grid grid-cols-2 gap-4">
                 <LogStat label="Total" value={siemTotalEvents} />
                 <LogStat label="High Risk" value={siemErrorCount} critical />
-                <LogStat label="Warnings" value={siemWarningCount} />
-                <LogStat label="Auth Failures" value={siemAuthFailures} critical={siemAuthFailures > 0} />
+                <LogStat label="Medium / Warning" value={siemWarningCount} />
+                <LogStat label="Auth Failure Matches" value={siemAuthFailures} critical={siemAuthFailures > 0} />
               </div>
             </div>
           </div>
         ) : null}
 
         {/* TABLE */}
-        {activeLog === "security-events" ? (
+        {["siem-dashboard", "security-events"].includes(activeLog) ? (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[1250px] text-left text-sm">
               <thead className="border-b border-white/10 bg-[#0a0a0a] text-[10px] uppercase tracking-wider text-gray-600">
@@ -11860,9 +12457,3464 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
   );
 }
 
+
+// ==================================================
+// LOG EXPLORER
+// ==================================================
+function SavedSearches({ onApply }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [deletingId, setDeletingId] = useState(null);
+
+  const requestErrorText = (err, fallback) => {
+    const detail = err?.response?.data?.detail;
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) {
+      return detail.map((item) => item.msg || "Invalid request").join("; ");
+    }
+    return err?.message || fallback;
+  };
+
+
+  const getConfig = () => {
+    const token = localStorage.getItem("token");
+    if (!token) throw new Error("Your session has expired. Please log in again.");
+    return { headers: { Authorization: `Bearer ${token}` } };
+  };
+
+  const loadSavedSearches = async () => {
+    try {
+      setLoading(true);
+      setError("");
+      const response = await axios.get(
+        `${API_URL}/saved-searches`,
+        getConfig()
+      );
+      setItems(Array.isArray(response.data) ? response.data : []);
+    } catch (err) {
+      setError(requestErrorText(
+        err, "Unable to load saved searches."
+      ));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadSavedSearches();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const deleteSearch = async (item) => {
+    if (!window.confirm(`Delete saved search "${item.name}"?`)) return;
+
+    setDeletingId(item.id);
+    setError("");
+    try {
+      await axios.delete(
+        `${API_URL}/saved-searches/${item.id}`,
+        getConfig()
+      );
+      setItems((current) => current.filter((row) => row.id !== item.id));
+    } catch (err) {
+      setError(requestErrorText(
+        err, "Unable to delete saved search."
+      ));
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const filterSummary = (item) => [
+    item.search_text ? `Search: ${item.search_text}` : null,
+    `Severity: ${item.severity}`,
+    `Source: ${item.source}`,
+    `Event type: ${item.event_type}`,
+  ].filter(Boolean);
+
+  return (
+    <div className="min-h-screen bg-[#080808] px-6 py-8 text-white">
+      <div className="mx-auto max-w-[1450px] space-y-6">
+        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.25em] text-red-500">
+              SIEM / INVESTIGATION WORKSPACE
+            </p>
+            <h1 className="mt-2 text-3xl font-bold">Saved Searches</h1>
+            <p className="mt-2 text-sm text-gray-500">
+              Reopen frequently used Log Explorer filter combinations.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={loadSavedSearches}
+            disabled={loading}
+            className="border border-white/10 px-5 py-3 text-xs text-gray-400 hover:border-red-600 hover:text-white disabled:opacity-50"
+          >
+            Refresh
+          </button>
+        </div>
+
+        {error && (
+          <div className="border border-red-600/20 bg-red-600/5 px-5 py-4 text-sm text-red-400">
+            {error}
+          </div>
+        )}
+
+        <div className="flex items-center justify-between border border-white/10 bg-[#0d0d0d] p-5">
+          <div>
+            <p className="text-xs uppercase tracking-wider text-gray-500">
+              Stored Searches
+            </p>
+            <p className="mt-1 text-2xl font-semibold tabular-nums">
+              {items.length}
+            </p>
+          </div>
+          <p className="max-w-md text-right text-xs text-gray-600">
+            Saved filters are persisted in PostgreSQL and scoped to your account or client tenant.
+          </p>
+        </div>
+
+        {loading ? (
+          <div className="border border-white/10 bg-[#0d0d0d] px-6 py-14 text-center text-sm text-gray-500">
+            Loading saved searches...
+          </div>
+        ) : items.length === 0 ? (
+          <div className="border border-white/10 bg-[#0d0d0d] px-6 py-14 text-center">
+            <p className="text-sm text-gray-300">No saved searches yet.</p>
+            <p className="mt-2 text-xs text-gray-600">
+              Open Log Explorer, set your filters, and select Save Current Search.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {items.map((item) => (
+              <div
+                key={item.id}
+                className="flex flex-col justify-between gap-4 border border-white/10 bg-[#0d0d0d] p-5 lg:flex-row lg:items-center"
+              >
+                <div className="min-w-0 flex-1">
+                  <h2 className="text-sm font-semibold text-gray-200">
+                    {item.name}
+                  </h2>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {filterSummary(item).map((value) => (
+                      <span
+                        key={value}
+                        className="border border-white/10 bg-white/[0.02] px-2.5 py-1.5 text-[10px] text-gray-500"
+                      >
+                        {value}
+                      </span>
+                    ))}
+                  </div>
+                  <p className="mt-3 text-[10px] text-gray-600">
+                    Updated: {item.updated_at
+                      ? formatTimestampIST(item.updated_at)
+                      : "—"}
+                  </p>
+                </div>
+                <div className="flex shrink-0 items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => onApply(item)}
+                    className="bg-red-600 px-5 py-3 text-xs font-semibold text-white hover:bg-red-500"
+                  >
+                    Apply Search
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => deleteSearch(item)}
+                    disabled={deletingId === item.id}
+                    className="border border-red-500/20 px-4 py-3 text-xs text-red-400 hover:bg-red-500/5 disabled:opacity-40"
+                  >
+                    {deletingId === item.id ? "Deleting..." : "Delete"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LogExplorer({ initialSavedSearch = null }) {
+  const [events, setEvents] = useState([]);
+  const [search, setSearch] = useState(initialSavedSearch?.search_text || "");
+  const [severity, setSeverity] = useState(initialSavedSearch?.severity || "all");
+  const [source, setSource] = useState(initialSavedSearch?.source || "all");
+  const [eventType, setEventType] = useState(initialSavedSearch?.event_type || "all");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [saveName, setSaveName] = useState("");
+  const [savingSearch, setSavingSearch] = useState(false);
+  const [saveNotice, setSaveNotice] = useState("");
+  const explorerRequestRef = useRef({ sequence: 0, controller: null });
+
+  const requestErrorText = (err, fallback) => {
+    const detail = err?.response?.data?.detail;
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) {
+      return detail.map((item) => item.msg || "Invalid request").join("; ");
+    }
+    return err?.message || fallback;
+  };
+
+  useEffect(() => {
+    if (!initialSavedSearch) return;
+    setSearch(initialSavedSearch.search_text || "");
+    setSeverity(initialSavedSearch.severity || "all");
+    setSource(initialSavedSearch.source || "all");
+    setEventType(initialSavedSearch.event_type || "all");
+    setSaveNotice("");
+  }, [initialSavedSearch]);
+
+
+  const handleSaveSearch = async (event) => {
+    event.preventDefault();
+
+    const name = saveName.trim();
+    if (!name) {
+      setError("Enter a name for this saved search.");
+      return;
+    }
+
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setError("Your session has expired. Please log in again.");
+      return;
+    }
+
+    setSavingSearch(true);
+    setError("");
+    setSaveNotice("");
+
+    try {
+      const response = await axios.post(
+        `${API_URL}/saved-searches`,
+        {
+          name,
+          search_text: search.trim(),
+          severity,
+          source,
+          event_type: eventType,
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      setSaveName("");
+      setSaveNotice(`Saved "${response.data.name}" successfully.`);
+    } catch (requestError) {
+      setError(requestErrorText(
+        requestError, "Unable to save this search."
+      ));
+    } finally {
+      setSavingSearch(false);
+    }
+  };
+
+  const loadEvents = async () => {
+    const request = explorerRequestRef.current;
+    const sequence = ++request.sequence;
+    request.controller?.abort();
+    const controller = new AbortController();
+    request.controller = controller;
+
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setEvents([]);
+      setError("Your session has expired. Please log in again.");
+      setLoading(false);
+      return;
+    }
+
+    if (search.trim().length > 200) {
+      setEvents([]);
+      setError("Search text must be 200 characters or fewer.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError("");
+
+      const params = new URLSearchParams({ limit: "500" });
+      if (search.trim()) params.set("search", search.trim());
+      if (severity !== "all") params.set("severity", severity);
+      if (source !== "all") params.set("source", source);
+      if (eventType !== "all") params.append("event_type", eventType);
+
+      const response = await axios.get(
+        `${API_URL}/security-events?${params.toString()}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        }
+      );
+
+      if (controller.signal.aborted || sequence !== request.sequence) return;
+
+      setEvents(Array.isArray(response.data) ? response.data : []);
+      setLastUpdated(new Date());
+    } catch (err) {
+      if (controller.signal.aborted || sequence !== request.sequence) return;
+      setEvents([]);
+      setError(requestErrorText(err, "Unable to load security events."));
+    } finally {
+      if (!controller.signal.aborted && sequence === request.sequence) {
+        setLoading(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    let stopped = false;
+    let timer;
+
+    const refresh = async () => {
+      await loadEvents();
+      if (!stopped) timer = setTimeout(refresh, 15000);
+    };
+
+    // Debounce filter changes; subsequent refreshes use these same filters.
+    timer = setTimeout(refresh, 300);
+
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      explorerRequestRef.current.sequence += 1;
+      explorerRequestRef.current.controller?.abort();
+    };
+    // Each filter change replaces the previous polling cycle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, severity, source, eventType]);
+
+  const availableSources = Array.from(
+    new Set(
+      [
+        ...(source !== "all" ? [source] : []),
+        ...events.map((event) => event.source).filter(Boolean),
+      ]
+    )
+  ).sort();
+
+  const availableEventTypes = Array.from(
+    new Set(
+      [
+        ...(eventType !== "all" ? [eventType] : []),
+        ...events.map((event) => event.event_type).filter(Boolean),
+      ]
+    )
+  ).sort();
+
+  const filteredEvents = events.filter((event) => {
+    const matchesEventType =
+      eventType === "all" || event.event_type === eventType;
+
+    return matchesEventType;
+  });
+
+  const highRiskCount = filteredEvents.filter((event) =>
+    ["HIGH", "CRITICAL", "ERROR"].includes(
+      String(event.severity || "").toUpperCase()
+    )
+  ).length;
+
+  const mitreMappedCount = filteredEvents.filter(
+    (event) => event.mitre?.technique_id
+  ).length;
+
+  return (
+    <div className="min-h-screen bg-[#080808] px-6 py-8 text-white">
+      <div className="mx-auto max-w-[1600px]">
+        <div className="mb-8 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.25em] text-red-500">
+              SIEM
+            </p>
+            <h1 className="mt-2 text-3xl font-bold">Log Explorer</h1>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-500">
+              Search and investigate persisted security telemetry collected
+              from registered endpoint and SOC data sources. Filters are
+              applied before returning up to 500 matching events. Counters
+              describe the returned results, not all historical records.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={loadEvents}
+            disabled={loading}
+            className="border border-white/10 px-5 py-3 text-xs text-gray-400 transition hover:border-red-600 hover:text-white disabled:opacity-50"
+          >
+            {loading ? "Loading..." : "Refresh"}
+          </button>
+        </div>
+
+        {error && (
+          <div className="mb-6 border border-red-600/20 bg-red-600/5 px-5 py-4">
+            <p className="text-sm text-red-400">{error}</p>
+          </div>
+        )}
+
+        <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <LogStat label="Events" value={filteredEvents.length} />
+          <LogStat
+            label="High Risk"
+            value={highRiskCount}
+            critical={highRiskCount > 0}
+          />
+          <LogStat label="MITRE Mapped" value={mitreMappedCount} />
+          <LogStat
+            label="Last Updated"
+            value={lastUpdated ? lastUpdated.toLocaleTimeString() : "—"}
+          />
+        </div>
+
+        <div className="mb-6 grid gap-4 border border-white/10 bg-[#0d0d0d] p-6 md:grid-cols-[1fr_170px_220px_220px]">
+          <div>
+            <label className="text-[10px] uppercase tracking-wider text-gray-600">
+              Search
+            </label>
+            <input
+              type="text"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              maxLength={200}
+              placeholder="Search source, event, message, target or MITRE..."
+              className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600"
+            />
+          </div>
+
+          <div>
+            <label className="text-[10px] uppercase tracking-wider text-gray-600">
+              Severity
+            </label>
+            <select
+              value={severity}
+              onChange={(event) => setSeverity(event.target.value)}
+              className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-gray-300 outline-none focus:border-red-600"
+            >
+              <option value="all">All Levels</option>
+              <option value="INFO">INFO</option>
+              <option value="LOW">LOW</option>
+              <option value="MEDIUM">MEDIUM</option>
+              <option value="HIGH">HIGH</option>
+              <option value="CRITICAL">CRITICAL</option>
+              <option value="ERROR">ERROR</option>
+              <option value="WARNING">WARNING</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="text-[10px] uppercase tracking-wider text-gray-600">
+              Source
+            </label>
+            <select
+              value={source}
+              onChange={(event) => setSource(event.target.value)}
+              className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-gray-300 outline-none focus:border-red-600"
+            >
+              <option value="all">All Sources</option>
+              {availableSources.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="text-[10px] uppercase tracking-wider text-gray-600">
+              Event Type
+            </label>
+            <select
+              value={eventType}
+              onChange={(event) => setEventType(event.target.value)}
+              className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-gray-300 outline-none focus:border-red-600"
+            >
+              <option value="all">All Event Types</option>
+              {availableEventTypes.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <form
+          onSubmit={handleSaveSearch}
+          className="mb-6 flex flex-col gap-3 border border-white/10 bg-[#0d0d0d] p-5 sm:flex-row sm:items-center"
+        >
+          <div className="min-w-0 flex-1">
+            <label className="text-[10px] uppercase tracking-wider text-gray-600">
+              Save Current Filter Combination
+            </label>
+            <input
+              value={saveName}
+              onChange={(event) => setSaveName(event.target.value)}
+              maxLength={150}
+              placeholder="Name this search, e.g. Critical Linux Events"
+              className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={savingSearch || !saveName.trim()}
+            className="self-end bg-red-600 px-6 py-3 text-xs font-semibold uppercase tracking-wider text-white hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {savingSearch ? "Saving..." : "Save Current Search"}
+          </button>
+        </form>
+
+        {saveNotice && (
+          <div className="mb-6 border border-emerald-500/20 bg-emerald-500/5 px-5 py-3 text-sm text-emerald-400">
+            {saveNotice}
+          </div>
+        )}
+
+        <div className="overflow-x-auto border border-white/10 bg-[#0d0d0d]">
+          <table className="w-full min-w-[1250px] text-left text-sm">
+            <thead className="border-b border-white/10 bg-[#0a0a0a] text-[10px] uppercase tracking-wider text-gray-600">
+              <tr>
+                <th className="px-6 py-4">Time</th>
+                <th className="px-6 py-4">Severity</th>
+                <th className="px-6 py-4">Source</th>
+                <th className="px-6 py-4">Event Type</th>
+                <th className="px-6 py-4">Target</th>
+                <th className="px-6 py-4">MITRE</th>
+                <th className="px-6 py-4">Status</th>
+                <th className="px-6 py-4">Message</th>
+              </tr>
+            </thead>
+
+            <tbody className="divide-y divide-white/5">
+              {filteredEvents.map((event) => (
+                <tr
+                  key={event.id || event.event_id}
+                  className="transition hover:bg-white/[0.02]"
+                >
+                  <td className="whitespace-nowrap px-6 py-5 font-mono text-xs text-gray-600">
+                    {formatTimestampIST(event.timestamp)}
+                  </td>
+
+                  <td className="px-6 py-5">
+                    <LogLevel level={event.severity} />
+                  </td>
+
+                  <td className="px-6 py-5 text-gray-400">
+                    {event.source || "—"}
+                  </td>
+
+                  <td className="px-6 py-5 text-gray-300">
+                    {event.event_type || "—"}
+                  </td>
+
+                  <td className="max-w-xs px-6 py-5 text-gray-400">
+                    {event.target || "—"}
+                  </td>
+
+                  <td className="px-6 py-5">
+                    <span className="font-mono text-red-400">
+                      {event.mitre?.technique_id || "—"}
+                    </span>
+                    {event.mitre?.technique_name && (
+                      <p className="mt-1 max-w-[180px] text-xs text-gray-600">
+                        {event.mitre.technique_name}
+                      </p>
+                    )}
+                  </td>
+
+                  <td className="px-6 py-5">
+                    <span className="text-xs uppercase text-gray-400">
+                      {event.alert_status || "UNKNOWN"}
+                    </span>
+                  </td>
+
+                  <td className="max-w-md px-6 py-5 text-xs leading-5 text-gray-500">
+                    {event.message || "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {!loading && filteredEvents.length === 0 && (
+            <div className="px-6 py-12 text-center">
+              <p className="text-sm text-gray-500">
+                No persisted security events match the current filters.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+
+// ==================================================
+// SIEM SECURITY EVENTS
+// ==================================================
+function HuntingEventSearch({ initialSavedSearch = null }) {
+  const huntingRequest = useHuntingRequestRef(0);
+  const [events, setEvents] = useState([]);
+  const [search, setSearch] = useState(initialSavedSearch?.search_text || "");
+  const [severity, setSeverity] = useState(initialSavedSearch?.severity || "all");
+  const [source, setSource] = useState(initialSavedSearch?.source || "all");
+  const [eventType, setEventType] = useState(initialSavedSearch?.event_type || "all");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [saveName, setSaveName] = useState("");
+  const [savingSearch, setSavingSearch] = useState(false);
+  const [saveNotice, setSaveNotice] = useState("");
+
+  const handleSaveSearch = async (event) => {
+    event.preventDefault();
+
+    const name = saveName.trim();
+    if (!name) {
+      setError("Enter a name for this saved search.");
+      return;
+    }
+
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setError("Your session has expired. Please log in again.");
+      return;
+    }
+
+    setSavingSearch(true);
+    setError("");
+    setSaveNotice("");
+
+    try {
+      const response = await axios.post(
+        `${API_URL}/saved-searches`,
+        {
+          name,
+          search_text: search.trim(),
+          severity,
+          source,
+          event_type: eventType,
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      setSaveName("");
+      setSaveNotice(`Saved "${response.data.name}" successfully.`);
+    } catch (requestError) {
+      setError(
+        requestError?.response?.data?.detail ||
+        requestError?.message ||
+        "Unable to save this search."
+      );
+    } finally {
+      setSavingSearch(false);
+    }
+  };
+
+  const loadEvents = async () => {
+    const sequence = ++huntingRequest.current;
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      setError("Your session has expired. Please log in again.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError("");
+
+      const params = new URLSearchParams();
+      params.set("limit", "500");
+
+      if (search.trim()) {
+        params.set("search", search.trim());
+      }
+
+      if (severity !== "all") {
+        params.set("severity", severity);
+      }
+
+      if (source !== "all") {
+        params.set("source", source);
+      }
+
+      if (eventType !== "all") {
+        params.append("event_type", eventType);
+      }
+
+      const response = await axios.get(
+        `${API_URL}/security-events?${params.toString()}`,
+        {
+          timeout: 20000,
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (sequence !== huntingRequest.current) return;
+      if (!Array.isArray(response.data)) {
+        throw new Error("Unexpected event-search response.");
+      }
+      const returnedEvents = Array.isArray(response.data)
+        ? response.data
+        : [];
+
+      setEvents(returnedEvents);
+      setLastUpdated(new Date());
+    } catch (requestError) {
+      if (sequence !== huntingRequest.current) return;
+      setEvents([]);
+      setError(
+        requestError?.response?.data?.detail ||
+          requestError?.message ||
+          "Unable to load security events."
+      );
+    } finally {
+      if (sequence === huntingRequest.current) setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    let stopped = false;
+    let timer;
+    setLoading(true);
+    setEvents([]);
+
+    const poll = async () => {
+      await loadEvents();
+      if (!stopped) timer = setTimeout(poll, 15000);
+    };
+
+    timer = setTimeout(poll, 300);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      huntingRequest.current += 1;
+    };
+  }, [search, severity, source, eventType]);
+
+  const availableSources = Array.from(
+    new Set(
+      events
+        .map((event) => event.source)
+        .filter(Boolean)
+    )
+  ).sort();
+
+  const availableEventTypes = Array.from(
+    new Set(
+      events
+        .map((event) => event.event_type)
+        .filter(Boolean)
+    )
+  ).sort();
+
+  const filteredEvents = events.filter((event) => {
+    const matchesEventType =
+      eventType === "all" || event.event_type === eventType;
+
+    return matchesEventType;
+  });
+
+  const highRiskCount = filteredEvents.filter((event) =>
+    ["HIGH", "CRITICAL", "ERROR"].includes(
+      String(event.severity || "").toUpperCase()
+    )
+  ).length;
+
+  const mitreMappedCount = filteredEvents.filter(
+    (event) => event.mitre?.technique_id
+  ).length;
+
+  return (
+    <div className="min-h-screen bg-[#080808] px-6 py-8 text-white">
+      <div className="mx-auto max-w-[1600px]">
+        <div className="mb-8 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.25em] text-red-500">
+              SIEM
+            </p>
+            
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-500">
+              Search and investigate persisted security telemetry collected
+              from registered endpoint and SOC data sources.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={loadEvents}
+            disabled={loading}
+            className="border border-white/10 px-5 py-3 text-xs text-gray-400 transition hover:border-red-600 hover:text-white disabled:opacity-50"
+          >
+            {loading ? "Loading..." : "Refresh"}
+          </button>
+        </div>
+
+        {error && (
+          <div className="mb-6 border border-red-600/20 bg-red-600/5 px-5 py-4">
+            <p className="text-sm text-red-400">{error}</p>
+          </div>
+        )}
+
+        <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <LogStat label="Events" value={filteredEvents.length} />
+          <LogStat
+            label="High Risk"
+            value={highRiskCount}
+            critical={highRiskCount > 0}
+          />
+          <LogStat label="MITRE Mapped" value={mitreMappedCount} />
+          <LogStat
+            label="Last Updated"
+            value={lastUpdated ? lastUpdated.toLocaleTimeString() : "—"}
+          />
+        </div>
+
+        <div className="mb-6 grid gap-4 border border-white/10 bg-[#0d0d0d] p-6 md:grid-cols-[1fr_170px_220px_220px]">
+          <div>
+            <label className="text-[10px] uppercase tracking-wider text-gray-600">
+              Search
+            </label>
+            <input
+              type="text"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search source, event, message, target or MITRE..."
+              className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600"
+            />
+          </div>
+
+          <div>
+            <label className="text-[10px] uppercase tracking-wider text-gray-600">
+              Severity
+            </label>
+            <select
+              value={severity}
+              onChange={(event) => setSeverity(event.target.value)}
+              className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-gray-300 outline-none focus:border-red-600"
+            >
+              <option value="all">All Levels</option>
+              <option value="INFO">INFO</option>
+              <option value="LOW">LOW</option>
+              <option value="MEDIUM">MEDIUM</option>
+              <option value="HIGH">HIGH</option>
+              <option value="CRITICAL">CRITICAL</option>
+              <option value="ERROR">ERROR</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="text-[10px] uppercase tracking-wider text-gray-600">
+              Source
+            </label>
+            <select
+              value={source}
+              onChange={(event) => setSource(event.target.value)}
+              className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-gray-300 outline-none focus:border-red-600"
+            >
+              <option value="all">All Sources</option>
+              {availableSources.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="text-[10px] uppercase tracking-wider text-gray-600">
+              Event Type
+            </label>
+            <select
+              value={eventType}
+              onChange={(event) => setEventType(event.target.value)}
+              className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-gray-300 outline-none focus:border-red-600"
+            >
+              <option value="all">All Event Types</option>
+              {availableEventTypes.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <form
+          onSubmit={handleSaveSearch}
+          className="mb-6 flex flex-col gap-3 border border-white/10 bg-[#0d0d0d] p-5 sm:flex-row sm:items-center"
+        >
+          <div className="min-w-0 flex-1">
+            <label className="text-[10px] uppercase tracking-wider text-gray-600">
+              Save Current Filter Combination
+            </label>
+            <input
+              value={saveName}
+              onChange={(event) => setSaveName(event.target.value)}
+              maxLength={150}
+              placeholder="Name this search, e.g. Critical Linux Events"
+              className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={savingSearch || !saveName.trim()}
+            className="self-end bg-red-600 px-6 py-3 text-xs font-semibold uppercase tracking-wider text-white hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {savingSearch ? "Saving..." : "Save Current Search"}
+          </button>
+        </form>
+
+        {saveNotice && (
+          <div className="mb-6 border border-emerald-500/20 bg-emerald-500/5 px-5 py-3 text-sm text-emerald-400">
+            {saveNotice}
+          </div>
+        )}
+
+        <div className="overflow-x-auto border border-white/10 bg-[#0d0d0d]">
+          <table className="w-full min-w-[1250px] text-left text-sm">
+            <thead className="border-b border-white/10 bg-[#0a0a0a] text-[10px] uppercase tracking-wider text-gray-600">
+              <tr>
+                <th className="px-6 py-4">Time</th>
+                <th className="px-6 py-4">Severity</th>
+                <th className="px-6 py-4">Source</th>
+                <th className="px-6 py-4">Event Type</th>
+                <th className="px-6 py-4">Target</th>
+                <th className="px-6 py-4">MITRE</th>
+                <th className="px-6 py-4">Status</th>
+                <th className="px-6 py-4">Message</th>
+              </tr>
+            </thead>
+
+            <tbody className="divide-y divide-white/5">
+              {filteredEvents.map((event) => (
+                <tr
+                  key={event.id || event.event_id}
+                  className="transition hover:bg-white/[0.02]"
+                >
+                  <td className="whitespace-nowrap px-6 py-5 font-mono text-xs text-gray-600">
+                    {formatTimestampIST(event.timestamp)}
+                  </td>
+
+                  <td className="px-6 py-5">
+                    <LogLevel level={event.severity} />
+                  </td>
+
+                  <td className="px-6 py-5 text-gray-400">
+                    {event.source || "—"}
+                  </td>
+
+                  <td className="px-6 py-5 text-gray-300">
+                    {event.event_type || "—"}
+                  </td>
+
+                  <td className="max-w-xs px-6 py-5 text-gray-400">
+                    {event.target || "—"}
+                  </td>
+
+                  <td className="px-6 py-5">
+                    <span className="font-mono text-red-400">
+                      {event.mitre?.technique_id || "—"}
+                    </span>
+                    {event.mitre?.technique_name && (
+                      <p className="mt-1 max-w-[180px] text-xs text-gray-600">
+                        {event.mitre.technique_name}
+                      </p>
+                    )}
+                  </td>
+
+                  <td className="px-6 py-5">
+                    <span className="text-xs uppercase text-gray-400">
+                      {event.alert_status || "ACTIVE"}
+                    </span>
+                  </td>
+
+                  <td className="max-w-md px-6 py-5 text-xs leading-5 text-gray-500">
+                    {event.message || "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {!loading && filteredEvents.length === 0 && (
+            <div className="px-6 py-12 text-center">
+              <p className="text-sm text-gray-500">
+                No persisted security events match the current filters.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+
+// ==================================================
+// SIEM SECURITY EVENTS
+// ==================================================
+
+function SecurityEvents() {
+  const [events, setEvents] = useState([]);
+  const [search, setSearch] = useState("");
+  const [severity, setSeverity] = useState("all");
+  const [source, setSource] = useState("all");
+  const [eventType, setEventType] = useState("all");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+
+  const loadEvents = async ({ silent = false } = {}) => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      setError("Your session has expired. Please log in again.");
+      return;
+    }
+
+    try {
+      if (silent) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      const params = new URLSearchParams({ limit: "500" });
+
+      if (search.trim()) {
+        params.set("search", search.trim());
+      }
+
+      if (severity !== "all") {
+        params.set("severity", severity);
+      }
+
+      if (source !== "all") {
+        params.set("source", source);
+      }
+
+      const response = await axios.get(
+        `${API_URL}/security-events?${params.toString()}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      setEvents(Array.isArray(response.data) ? response.data : []);
+      setLastUpdated(new Date());
+      setError("");
+    } catch (err) {
+      console.error("Security Events fetch error:", err);
+
+      if (err.response?.status === 401) {
+        localStorage.removeItem("token");
+        setError("Your session has expired. Please log in again.");
+      } else if (err.response?.data?.detail) {
+        setError(err.response.data.detail);
+      } else {
+        setError("Unable to retrieve security events.");
+      }
+
+      if (!silent) {
+        setEvents([]);
+      }
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadEvents();
+
+    const interval = setInterval(() => {
+      loadEvents({ silent: true });
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, [severity, source]);
+
+  const sources = [...new Set(
+    events.map((event) => event.source).filter(Boolean)
+  )].sort();
+
+  const eventTypes = [...new Set(
+    events.map((event) => event.event_type).filter(Boolean)
+  )].sort();
+
+  const filteredEvents = events.filter((event) => {
+    const term = search.trim().toLowerCase();
+
+    const matchesSearch =
+      !term ||
+      [
+        event.source,
+        event.event_type,
+        event.message,
+        event.target,
+        event.mitre?.technique_id,
+        event.mitre?.technique_name,
+        event.mitre?.tactic,
+      ].some((value) =>
+        String(value || "").toLowerCase().includes(term)
+      );
+
+    const matchesEventType =
+      eventType === "all" || event.event_type === eventType;
+
+    return matchesSearch && matchesEventType;
+  });
+
+  const highRisk = filteredEvents.filter((event) =>
+    ["ERROR", "HIGH", "CRITICAL"].includes(
+      String(event.severity || "").toUpperCase()
+    )
+  ).length;
+
+  const mitreMapped = filteredEvents.filter(
+    (event) => event.mitre?.technique_id
+  ).length;
+
+  const activeEvents = filteredEvents.filter(
+    (event) =>
+      String(event.alert_status || "").toUpperCase() === "ACTIVE"
+  ).length;
+
+  const acknowledgeOrResolve = async (event, action) => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      setError("Your session has expired. Please log in again.");
+      return;
+    }
+
+    if (!event?.event_id) {
+      setError("This security event does not have an event ID.");
+      return;
+    }
+
+    try {
+      setError("");
+
+      const response = await axios.patch(
+        `${API_URL}/security-events/${encodeURIComponent(event.event_id)}/${action}`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      const updatedAlert = response.data?.alert;
+
+      if (updatedAlert) {
+        setEvents((current) =>
+          current.map((item) =>
+            item.id === updatedAlert.id ? updatedAlert : item
+          )
+        );
+      } else {
+        await loadEvents({ silent: true });
+      }
+    } catch (err) {
+      console.error(`Security alert ${action} error:`, err);
+
+      if (err.response?.status === 401) {
+        localStorage.removeItem("token");
+        setError("Your session has expired. Please log in again.");
+      } else if (err.response?.data?.detail) {
+        setError(err.response.data.detail);
+      } else {
+        setError(`Unable to ${action} security alert.`);
+      }
+    }
+  };
+
+  const alertStatusClass = (status) => {
+    const normalized = String(status || "UNKNOWN").toUpperCase();
+
+    if (normalized === "UNKNOWN") {
+      return "border-gray-500/20 bg-gray-500/10 text-gray-400";
+    }
+
+    if (normalized === "RESOLVED") {
+      return "border-green-500/20 bg-green-500/10 text-green-400";
+    }
+
+    if (normalized === "ACKNOWLEDGED") {
+      return "border-yellow-500/20 bg-yellow-500/10 text-yellow-300";
+    }
+
+    return "border-red-500/20 bg-red-500/10 text-red-400";
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <p className="text-xs uppercase tracking-[0.2em] text-red-500">
+            SIEM
+          </p>
+          <h1 className="mt-2 text-3xl font-bold text-white">
+            Security Events
+          </h1>
+          <p className="mt-2 max-w-3xl text-sm text-gray-500">
+            Investigate persisted security telemetry collected from registered
+            endpoint and SOC data sources. Counters describe the filtered
+            rows within up to 500 returned events. Active Events counts records
+            explicitly marked ACTIVE; it is not a separate alert total.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadEvents({ silent: true })}
+          disabled={refreshing}
+          className="border border-white/10 bg-[#0d0d0d] px-4 py-2 text-xs font-semibold uppercase tracking-wider text-gray-300 transition hover:border-red-500/40 hover:text-white disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <LogStat label="Events" value={filteredEvents.length} />
+        <LogStat label="High Risk" value={highRisk} critical={highRisk > 0} />
+        <LogStat label="MITRE Mapped" value={mitreMapped} />
+        <LogStat label="Active Events" value={activeEvents} />
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d] p-5">
+        <div className="grid gap-4 lg:grid-cols-[2fr_1fr_1fr_1fr]">
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search source, event, message, target, MITRE..."
+            className="border border-white/10 bg-[#080808] px-4 py-3 text-sm text-gray-300 outline-none placeholder:text-gray-700 focus:border-red-500/40"
+          />
+
+          <select
+            value={severity}
+            onChange={(event) => setSeverity(event.target.value)}
+            className="border border-white/10 bg-[#080808] px-4 py-3 text-sm text-gray-300 outline-none focus:border-red-500/40"
+          >
+            <option value="all">All Severities</option>
+            <option value="CRITICAL">Critical</option>
+            <option value="HIGH">High</option>
+            <option value="ERROR">Error</option>
+            <option value="MEDIUM">Medium</option>
+            <option value="LOW">Low</option>
+            <option value="INFO">Info</option>
+          </select>
+
+          <select
+            value={source}
+            onChange={(event) => setSource(event.target.value)}
+            className="border border-white/10 bg-[#080808] px-4 py-3 text-sm text-gray-300 outline-none focus:border-red-500/40"
+          >
+            <option value="all">All Sources</option>
+            {sources.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+
+          <select
+            value={eventType}
+            onChange={(event) => setEventType(event.target.value)}
+            className="border border-white/10 bg-[#080808] px-4 py-3 text-sm text-gray-300 outline-none focus:border-red-500/40"
+          >
+            <option value="all">All Event Types</option>
+            {eventTypes.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-[10px] uppercase tracking-wider text-gray-600">
+          <span>
+            {loading ? "Loading persisted events..." : `${filteredEvents.length} events shown`}
+          </span>
+          <span>
+            Last updated: {lastUpdated ? formatTimestampIST(lastUpdated) : "—"}
+          </span>
+        </div>
+      </div>
+
+      <div className="overflow-x-auto border border-white/10 bg-[#0d0d0d]">
+        <table className="w-full min-w-[1450px] text-left text-sm">
+          <thead className="border-b border-white/10 bg-[#0a0a0a] text-[10px] uppercase tracking-wider text-gray-600">
+            <tr>
+              <th className="px-5 py-4">Time</th>
+              <th className="px-5 py-4">Severity</th>
+              <th className="px-5 py-4">Source</th>
+              <th className="px-5 py-4">Event</th>
+              <th className="px-5 py-4">Target</th>
+              <th className="px-5 py-4">MITRE</th>
+              <th className="px-5 py-4">Tactic</th>
+              <th className="px-5 py-4">Confidence</th>
+              <th className="px-5 py-4">Status</th>
+              <th className="px-5 py-4">Evidence</th>
+            </tr>
+          </thead>
+
+          <tbody className="divide-y divide-white/5">
+            {filteredEvents.map((event) => {
+              const normalizedSeverity = String(event.severity || "").toUpperCase();
+              const normalizedStatus = String(
+                event.alert_status || "UNKNOWN"
+              ).toUpperCase();
+
+              const canAcknowledge =
+                ["ERROR", "HIGH", "CRITICAL"].includes(normalizedSeverity) &&
+                normalizedStatus === "ACTIVE";
+
+              const canResolve =
+                ["ERROR", "HIGH", "CRITICAL"].includes(normalizedSeverity) &&
+                normalizedStatus === "ACKNOWLEDGED";
+
+              return (
+                <tr
+                  key={event.id || event.event_id}
+                  className="transition hover:bg-white/[0.02]"
+                >
+                  <td className="whitespace-nowrap px-5 py-5 font-mono text-xs text-gray-600">
+                    {formatTimestampIST(event.timestamp)}
+                  </td>
+
+                  <td className="px-5 py-5">
+                    <LogLevel level={event.severity} />
+                  </td>
+
+                  <td className="px-5 py-5 text-gray-400">
+                    {event.source || "—"}
+                  </td>
+
+                  <td className="max-w-xs px-5 py-5 font-medium text-gray-300">
+                    {event.event_type || "—"}
+                    <p className="mt-1 text-xs font-normal text-gray-600">
+                      {event.message || "—"}
+                    </p>
+                  </td>
+
+                  <td className="max-w-xs px-5 py-5 text-gray-400">
+                    {event.target || "—"}
+                  </td>
+
+                  <td className="px-5 py-5">
+                    <span className="font-mono text-red-400">
+                      {event.mitre?.technique_id || "—"}
+                    </span>
+                    <p className="mt-1 max-w-[180px] text-xs text-gray-600">
+                      {event.mitre?.technique_name || "No MITRE mapping"}
+                    </p>
+                  </td>
+
+                  <td className="px-5 py-5 text-gray-400">
+                    {event.mitre?.tactic || "—"}
+                  </td>
+
+                  <td className="px-5 py-5">
+                    <span className="text-xs uppercase text-yellow-500">
+                      {event.mitre?.confidence || "—"}
+                    </span>
+                  </td>
+
+                  <td className="px-5 py-5">
+                    <div className="flex flex-col items-start gap-2">
+                      <span
+                        className={`inline-flex rounded-md border px-2 py-1 text-[9px] font-semibold uppercase ${alertStatusClass(normalizedStatus)}`}
+                      >
+                        {normalizedStatus}
+                      </span>
+
+                      {canAcknowledge && (
+                        <button
+                          type="button"
+                          onClick={() => acknowledgeOrResolve(event, "acknowledge")}
+                          className="rounded-md border border-yellow-500/20 px-2 py-1 text-[9px] font-semibold uppercase text-yellow-300 transition hover:border-yellow-400/40 hover:bg-yellow-500/10"
+                        >
+                          Acknowledge
+                        </button>
+                      )}
+
+                      {canResolve && (
+                        <button
+                          type="button"
+                          onClick={() => acknowledgeOrResolve(event, "resolve")}
+                          className="rounded-md border border-green-500/20 px-2 py-1 text-[9px] font-semibold uppercase text-green-400 transition hover:border-green-400/40 hover:bg-green-500/10"
+                        >
+                          Resolve
+                        </button>
+                      )}
+                    </div>
+                  </td>
+
+                  <td className="w-64 max-w-xs px-5 py-5 align-top text-xs leading-5 text-gray-600">
+                    {event.mitre?.evidence ? (
+                      <details className="max-w-xs">
+                        <summary className="cursor-pointer break-words text-gray-400">
+                          {event.mitre.evidence.length > 120
+                            ? `${event.mitre.evidence.slice(0, 120)}… View full evidence`
+                            : event.mitre.evidence}
+                        </summary>
+                        <p className="mt-2 whitespace-normal break-words [overflow-wrap:anywhere]">
+                          {event.mitre.evidence}
+                        </p>
+                      </details>
+                    ) : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+
+        {!loading && filteredEvents.length === 0 && (
+          <div className="px-6 py-12 text-center">
+            <p className="text-sm text-gray-500">
+              {search.trim() || severity !== "all" || source !== "all" || eventType !== "all"
+                ? "No persisted security events match the current filters."
+                : "No persisted security events are currently available."}
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+// ==================================================
+// AUTHENTICATION LOGS
+// ==================================================
+function AuthenticationLogs() {
+  const [events, setEvents] = useState([]);
+  const [search, setSearch] = useState("");
+  const [eventType, setEventType] = useState("all");
+  const [severity, setSeverity] = useState("all");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+
+  const authenticationTypes = new Set([
+    "authentication_session",
+    "authentication_failure",
+    "invalid_user",
+    "account_creation",
+    "account_modification",
+    "password_change",
+  ]);
+
+  const loadAuthenticationLogs = async ({ silent = false } = {}) => {
+    try {
+      if (silent) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Authentication token is not available.");
+      }
+
+      const params = new URLSearchParams({ limit: "500" });
+      authenticationTypes.forEach((type) => {
+        params.append("event_type", type);
+      });
+
+      const response = await fetch(
+        `${API_URL}/security-events?${params.toString()}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Authentication logs request failed (${response.status}).`);
+      }
+
+      const data = await response.json();
+      const rows = Array.isArray(data) ? data : [];
+
+      setEvents(rows);
+
+      setLastUpdated(new Date());
+    } catch (err) {
+      console.error("Authentication Logs fetch error:", err);
+      setError(err?.message || "Unable to load authentication logs.");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadAuthenticationLogs();
+
+    const interval = setInterval(() => {
+      loadAuthenticationLogs({ silent: true });
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const eventTypes = [...new Set(
+    events
+      .map((event) => event?.event_type)
+      .filter(Boolean)
+  )].sort();
+
+  const filteredEvents = events.filter((event) => {
+    const type = event?.event_type || "";
+    const haystack = [
+      event?.message,
+      event?.source,
+      event?.target,
+      event?.event_type,
+      event?.mitre?.technique_id,
+      event?.mitre?.technique_name,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    const matchesSearch =
+      !search.trim() ||
+      haystack.includes(search.trim().toLowerCase());
+
+    const matchesType =
+      eventType === "all" || type === eventType;
+
+    const matchesSeverity =
+      severity === "all" ||
+      String(event?.severity || "").toUpperCase() === severity;
+
+    return matchesSearch && matchesType && matchesSeverity;
+  });
+
+  const successfulSessions = events.filter(
+    (event) => event?.event_type === "authentication_session"
+  ).length;
+
+  const failedAuthentication = events.filter(
+    (event) =>
+      event?.event_type === "authentication_failure" ||
+      event?.event_type === "invalid_user"
+  ).length;
+
+  const accountChanges = events.filter(
+    (event) =>
+      event?.event_type === "account_creation" ||
+      event?.event_type === "account_modification" ||
+      event?.event_type === "password_change"
+  ).length;
+
+  const highRisk = events.filter((event) =>
+    ["CRITICAL", "HIGH"].includes(
+      String(event?.severity || "").toUpperCase()
+    )
+  ).length;
+
+  const formatEventType = (value) =>
+    String(value || "—")
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+
+  const formatTime = (value) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+
+    return date.toLocaleString("en-IN", {
+      dateStyle: "medium",
+      timeStyle: "medium",
+    });
+  };
+
+  const severityClass = (value) => {
+    const normalized = String(value || "").toUpperCase();
+
+    if (normalized === "CRITICAL") {
+      return "border-red-500/30 bg-red-500/10 text-red-300";
+    }
+
+    if (normalized === "HIGH") {
+      return "border-orange-500/30 bg-orange-500/10 text-orange-300";
+    }
+
+    if (normalized === "MEDIUM") {
+      return "border-yellow-500/30 bg-yellow-500/10 text-yellow-300";
+    }
+
+    return "border-gray-700 bg-gray-900 text-gray-300";
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-white">
+            Authentication Logs
+          </h1>
+          <p className="mt-1 text-sm text-gray-400">
+            Authentication and account activity derived from persisted endpoint security telemetry.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadAuthenticationLogs({ silent: true })}
+          disabled={refreshing}
+          className="border border-white/10 bg-white/[0.03] px-4 py-2 text-sm text-gray-200 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+        {[
+          ["Authentication Events", events.length],
+          ["Successful Sessions", successfulSessions],
+          ["Failed / Invalid", failedAuthentication],
+          ["Account Changes", accountChanges],
+          ["Critical / High", highRisk],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            className="border border-white/10 bg-[#0d0d0d] p-5"
+          >
+            <p className="text-[10px] uppercase tracking-wider text-gray-500">
+              {label}
+            </p>
+            <p className="mt-2 text-2xl font-semibold text-white">
+              {value}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d] p-5">
+        <div className="mb-4">
+          <h2 className="text-sm font-semibold text-white">
+            Authentication Activity
+          </h2>
+          <p className="mt-1 text-xs text-gray-500">
+            Only persisted authentication, account, and password telemetry is shown. No synthetic events are generated.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
+          <input
+            type="text"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search authentication activity..."
+            className="border border-white/10 bg-black px-3 py-2 text-sm text-gray-200 outline-none placeholder:text-gray-600 focus:border-white/20"
+          />
+
+          <select
+            value={eventType}
+            onChange={(event) => setEventType(event.target.value)}
+            className="border border-white/10 bg-black px-3 py-2 text-sm text-gray-200 outline-none"
+          >
+            <option value="all">All event types</option>
+            {eventTypes.map((type) => (
+              <option key={type} value={type}>
+                {formatEventType(type)}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={severity}
+            onChange={(event) => setSeverity(event.target.value)}
+            className="border border-white/10 bg-black px-3 py-2 text-sm text-gray-200 outline-none"
+          >
+            <option value="all">All severities</option>
+            <option value="CRITICAL">Critical</option>
+            <option value="HIGH">High</option>
+            <option value="MEDIUM">Medium</option>
+            <option value="LOW">Low</option>
+            <option value="INFO">Info</option>
+          </select>
+
+          <div className="flex items-center justify-end text-xs text-gray-500">
+            {lastUpdated
+              ? `Updated ${formatTime(lastUpdated)}`
+              : "Not updated yet"}
+          </div>
+        </div>
+      </div>
+
+      <div className="overflow-hidden border border-white/10 bg-[#0d0d0d]">
+        <div className="overflow-x-auto">
+          <table className="min-w-[1100px] w-full text-left">
+            <thead className="border-b border-white/10 bg-white/[0.02]">
+              <tr className="text-[10px] uppercase tracking-wider text-gray-500">
+                <th className="px-5 py-4">Time</th>
+                <th className="px-5 py-4">Severity</th>
+                <th className="px-5 py-4">Event</th>
+                <th className="px-5 py-4">Source</th>
+                <th className="px-5 py-4">Target</th>
+                <th className="px-5 py-4">Message</th>
+              </tr>
+            </thead>
+
+            <tbody className="divide-y divide-white/5">
+              {filteredEvents.map((event) => (
+                <tr key={event.id || event.event_id} className="align-top">
+                  <td className="whitespace-nowrap px-5 py-4 text-xs text-gray-400">
+                    {formatTime(event.timestamp)}
+                  </td>
+
+                  <td className="px-5 py-4">
+                    <span
+                      className={`inline-flex border px-2 py-1 text-[10px] uppercase tracking-wider ${severityClass(event.severity)}`}
+                    >
+                      {event.severity || "INFO"}
+                    </span>
+                  </td>
+
+                  <td className="px-5 py-4 text-sm text-gray-200">
+                    {formatEventType(event.event_type)}
+                  </td>
+
+                  <td className="px-5 py-4 text-xs text-gray-400">
+                    {event.source || "—"}
+                  </td>
+
+                  <td className="px-5 py-4 text-xs text-gray-400">
+                    {event.target || "—"}
+                  </td>
+
+                  <td className="max-w-xl px-5 py-4 text-xs leading-5 text-gray-400">
+                    {event.message || "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {!loading && filteredEvents.length === 0 && (
+            <div className="px-6 py-12 text-center">
+              <p className="text-sm text-gray-500">
+                {search.trim() || eventType !== "all" || severity !== "all"
+                  ? "No persisted authentication events match the current filters."
+                  : "No persisted authentication events are currently available."}
+              </p>
+            </div>
+          )}
+
+          {loading && (
+            <div className="px-6 py-12 text-center text-sm text-gray-500">
+              Loading authentication logs...
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ==================================================
+// NETWORK LOGS
+// ==================================================
+function NetworkLogs() {
+  const [events, setEvents] = useState([]);
+  const [search, setSearch] = useState("");
+  const [eventType, setEventType] = useState("all");
+  const [severity, setSeverity] = useState("all");
+  const [protocol, setProtocol] = useState("all");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+
+  const loadNetworkLogs = async ({ silent = false } = {}) => {
+    try {
+      if (silent) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Authentication token is not available.");
+      }
+
+      const params = new URLSearchParams({ limit: "500" });
+      ["network_connection_attempt", "network_detection"].forEach((type) => {
+        params.append("event_type", type);
+      });
+
+      const response = await fetch(
+        `${API_URL}/security-events?${params.toString()}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Network logs request failed (${response.status}).`);
+      }
+
+      const data = await response.json();
+      const rows = Array.isArray(data) ? data : [];
+
+      setEvents(rows);
+
+      setLastUpdated(new Date());
+    } catch (err) {
+      console.error("Network Logs fetch error:", err);
+      setError(err?.message || "Unable to load network logs.");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadNetworkLogs();
+
+    const interval = setInterval(() => {
+      loadNetworkLogs({ silent: true });
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const eventTypes = [...new Set(
+    events
+      .map((event) => event?.event_type)
+      .filter(Boolean)
+  )].sort();
+
+  const protocols = [...new Set(
+    events
+      .map((event) => event?.network?.protocol)
+      .filter(Boolean)
+      .map((value) => String(value).toUpperCase())
+  )].sort();
+
+  const filteredEvents = events.filter((event) => {
+    const network = event?.network || {};
+
+    const haystack = [
+      event?.message,
+      event?.source,
+      event?.target,
+      event?.event_type,
+      event?.severity,
+      network.source_ip,
+      network.destination_ip,
+      network.source_port,
+      network.destination_port,
+      network.protocol,
+      event?.mitre?.technique_id,
+      event?.mitre?.technique_name,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    const matchesSearch =
+      !search.trim() ||
+      haystack.includes(search.trim().toLowerCase());
+
+    const matchesType =
+      eventType === "all" || event?.event_type === eventType;
+
+    const matchesSeverity =
+      severity === "all" ||
+      String(event?.severity || "").toUpperCase() === severity;
+
+    const matchesProtocol =
+      protocol === "all" ||
+      String(network.protocol || "").toUpperCase() === protocol;
+
+    return (
+      matchesSearch &&
+      matchesType &&
+      matchesSeverity &&
+      matchesProtocol
+    );
+  });
+
+  const detections = events.filter(
+    (event) => event?.event_type === "network_detection"
+  ).length;
+
+  const sourceIps = new Set(
+    events
+      .map((event) => event?.network?.source_ip)
+      .filter(Boolean)
+  ).size;
+
+  const destinationIps = new Set(
+    events
+      .map((event) => event?.network?.destination_ip)
+      .filter(Boolean)
+  ).size;
+
+  const highRisk = events.filter((event) =>
+    ["CRITICAL", "HIGH"].includes(
+      String(event?.severity || "").toUpperCase()
+    )
+  ).length;
+
+  const formatEventType = (value) =>
+    String(value || "—")
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+
+  const formatTime = (value) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+
+    return date.toLocaleString("en-IN", {
+      dateStyle: "medium",
+      timeStyle: "medium",
+    });
+  };
+
+  const severityClass = (value) => {
+    const normalized = String(value || "").toUpperCase();
+
+    if (normalized === "CRITICAL") {
+      return "border-red-500/30 bg-red-500/10 text-red-300";
+    }
+
+    if (normalized === "HIGH") {
+      return "border-orange-500/30 bg-orange-500/10 text-orange-300";
+    }
+
+    if (normalized === "MEDIUM") {
+      return "border-yellow-500/30 bg-yellow-500/10 text-yellow-300";
+    }
+
+    return "border-gray-700 bg-gray-900 text-gray-300";
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-white">
+            Network Logs
+          </h1>
+          <p className="mt-1 text-sm text-gray-400">
+            Network connection and detection telemetry derived from persisted security events.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadNetworkLogs({ silent: true })}
+          disabled={refreshing}
+          className="border border-white/10 bg-white/[0.03] px-4 py-2 text-sm text-gray-200 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+        {[
+          ["Network Events", events.length],
+          ["Detections", detections],
+          ["Source IPs", sourceIps],
+          ["Destination IPs", destinationIps],
+          ["Critical / High", highRisk],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            className="border border-white/10 bg-[#0d0d0d] p-5"
+          >
+            <p className="text-[10px] uppercase tracking-wider text-gray-500">
+              {label}
+            </p>
+            <p className="mt-2 text-2xl font-semibold text-white">
+              {value}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d] p-5">
+        <div className="mb-4">
+          <h2 className="text-sm font-semibold text-white">
+            Network Activity
+          </h2>
+          <p className="mt-1 text-xs text-gray-500">
+            Only persisted network connection and detection telemetry is shown. No synthetic events are generated.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-5">
+          <input
+            type="text"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search IP, port, protocol, event..."
+            className="border border-white/10 bg-black px-3 py-2 text-sm text-gray-200 outline-none placeholder:text-gray-600 focus:border-white/20"
+          />
+
+          <select
+            value={eventType}
+            onChange={(event) => setEventType(event.target.value)}
+            className="border border-white/10 bg-black px-3 py-2 text-sm text-gray-200 outline-none"
+          >
+            <option value="all">All event types</option>
+            {eventTypes.map((type) => (
+              <option key={type} value={type}>
+                {formatEventType(type)}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={protocol}
+            onChange={(event) => setProtocol(event.target.value)}
+            className="border border-white/10 bg-black px-3 py-2 text-sm text-gray-200 outline-none"
+          >
+            <option value="all">All protocols</option>
+            {protocols.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={severity}
+            onChange={(event) => setSeverity(event.target.value)}
+            className="border border-white/10 bg-black px-3 py-2 text-sm text-gray-200 outline-none"
+          >
+            <option value="all">All severities</option>
+            <option value="CRITICAL">Critical</option>
+            <option value="HIGH">High</option>
+            <option value="MEDIUM">Medium</option>
+            <option value="LOW">Low</option>
+            <option value="INFO">Info</option>
+          </select>
+
+          <div className="flex items-center justify-end text-xs text-gray-500">
+            {lastUpdated
+              ? `Updated ${formatTime(lastUpdated)}`
+              : "Not updated yet"}
+          </div>
+        </div>
+      </div>
+
+      <div className="overflow-hidden border border-white/10 bg-[#0d0d0d]">
+        <div className="overflow-x-auto">
+          <table className="min-w-[1250px] w-full text-left">
+            <thead className="border-b border-white/10 bg-white/[0.02]">
+              <tr className="text-[10px] uppercase tracking-wider text-gray-500">
+                <th className="px-5 py-4">Time</th>
+                <th className="px-5 py-4">Severity</th>
+                <th className="px-5 py-4">Source</th>
+                <th className="px-5 py-4">Destination</th>
+                <th className="px-5 py-4">Protocol</th>
+                <th className="px-5 py-4">Event</th>
+                <th className="px-5 py-4">Message</th>
+              </tr>
+            </thead>
+
+            <tbody className="divide-y divide-white/5">
+              {filteredEvents.map((event) => {
+                const network = event?.network || {};
+                const source =
+                  network.source_ip
+                    ? `${network.source_ip}${network.source_port ? `:${network.source_port}` : ""}`
+                    : "—";
+                const destination =
+                  network.destination_ip
+                    ? `${network.destination_ip}${network.destination_port ? `:${network.destination_port}` : ""}`
+                    : event?.target || "—";
+
+                return (
+                  <tr
+                    key={event.id || event.event_id}
+                    className="align-top"
+                  >
+                    <td className="whitespace-nowrap px-5 py-4 text-xs text-gray-400">
+                      {formatTime(event.timestamp)}
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <span
+                        className={`inline-flex border px-2 py-1 text-[10px] uppercase tracking-wider ${severityClass(event.severity)}`}
+                      >
+                        {event.severity || "INFO"}
+                      </span>
+                    </td>
+
+                    <td className="px-5 py-4 font-mono text-xs text-gray-300">
+                      {source}
+                    </td>
+
+                    <td className="px-5 py-4 font-mono text-xs text-gray-300">
+                      {destination}
+                    </td>
+
+                    <td className="px-5 py-4 text-xs text-gray-400">
+                      {network.protocol || "—"}
+                    </td>
+
+                    <td className="px-5 py-4 text-sm text-gray-200">
+                      {formatEventType(event.event_type)}
+                    </td>
+
+                    <td className="max-w-xl px-5 py-4 text-xs leading-5 text-gray-400">
+                      {event.message || "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+
+          {!loading && filteredEvents.length === 0 && (
+            <div className="px-6 py-12 text-center">
+              <p className="text-sm text-gray-500">
+                {search.trim() ||
+                eventType !== "all" ||
+                protocol !== "all" ||
+                severity !== "all"
+                  ? "No persisted network events match the current filters."
+                  : "No persisted network events are currently available."}
+              </p>
+            </div>
+          )}
+
+          {loading && (
+            <div className="px-6 py-12 text-center text-sm text-gray-500">
+              Loading network logs...
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ==================================================
+// SIEM APPLICATION LOGS
+// ==================================================
+function ApplicationLogs() {
+  const [logs, setLogs] = useState([]);
+  const [search, setSearch] = useState("");
+  const [severityFilter, setSeverityFilter] = useState("ALL");
+  const [methodFilter, setMethodFilter] = useState("ALL");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+
+  const loadApplicationLogs = async ({ silent = false } = {}) => {
+    try {
+      if (silent) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Authentication token is not available.");
+      }
+
+      const response = await fetch(`${API_URL}/logs/access?limit=500`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(
+          `Application logs request failed (${response.status}).`
+        );
+      }
+
+      const data = await response.json();
+
+      const records = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.logs)
+        ? data.logs
+        : [];
+
+      setLogs(records);
+      setLastUpdated(new Date());
+    } catch (err) {
+      console.error("Application Logs fetch error:", err);
+      setError(err?.message || "Unable to load application logs.");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadApplicationLogs();
+
+    const interval = setInterval(() => {
+      loadApplicationLogs({ silent: true });
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const normalizedSearch = search.trim().toLowerCase();
+
+  const filteredLogs = logs.filter((log) => {
+    const level = String(log?.level || "").toUpperCase();
+    const method = String(log?.method || "").toUpperCase();
+    const statusCode = Number(log?.status_code || 0);
+
+    if (severityFilter !== "ALL" && level !== severityFilter) {
+      return false;
+    }
+
+    if (methodFilter !== "ALL" && method !== methodFilter) {
+      return false;
+    }
+
+    if (statusFilter !== "ALL") {
+      if (statusFilter === "2XX" && !(statusCode >= 200 && statusCode < 300)) {
+        return false;
+      }
+
+      if (statusFilter === "3XX" && !(statusCode >= 300 && statusCode < 400)) {
+        return false;
+      }
+
+      if (statusFilter === "4XX" && !(statusCode >= 400 && statusCode < 500)) {
+        return false;
+      }
+
+      if (statusFilter === "5XX" && !(statusCode >= 500 && statusCode < 600)) {
+        return false;
+      }
+    }
+
+    if (!normalizedSearch) {
+      return true;
+    }
+
+    return [
+      log?.timestamp,
+      log?.source,
+      log?.level,
+      log?.event,
+      log?.message,
+      log?.status_code,
+      log?.method,
+      log?.path,
+      log?.duration_ms,
+      log?.client_ip,
+    ]
+      .filter((value) => value !== null && value !== undefined)
+      .some((value) =>
+        String(value).toLowerCase().includes(normalizedSearch)
+      );
+  });
+
+  const totalRequests = logs.length;
+  const successfulRequests = logs.filter((log) => {
+    const status = Number(log?.status_code || 0);
+    return status >= 200 && status < 400;
+  }).length;
+
+  const clientErrors = logs.filter((log) => {
+    const status = Number(log?.status_code || 0);
+    return status >= 400 && status < 500;
+  }).length;
+
+  const serverErrors = logs.filter((log) => {
+    const status = Number(log?.status_code || 0);
+    return status >= 500;
+  }).length;
+
+  const averageDuration = totalRequests
+    ? Math.round(
+        logs.reduce(
+          (total, log) => total + Number(log?.duration_ms || 0),
+          0
+        ) / totalRequests
+      )
+    : 0;
+
+  const uniquePaths = new Set(
+    logs
+      .map((log) => log?.path)
+      .filter(Boolean)
+  ).size;
+
+  const methods = Array.from(
+    new Set(
+      logs
+        .map((log) => String(log?.method || "").toUpperCase())
+        .filter(Boolean)
+    )
+  ).sort();
+
+  const severityBadge = (level) => {
+    const normalized = String(level || "").toUpperCase();
+
+    if (normalized === "ERROR") {
+      return "bg-red-500/10 text-red-400 border-red-500/30";
+    }
+
+    if (normalized === "WARN") {
+      return "bg-yellow-500/10 text-yellow-400 border-yellow-500/30";
+    }
+
+    return "bg-cyan-500/10 text-cyan-400 border-cyan-500/30";
+  };
+
+  const statusBadge = (statusCode) => {
+    const status = Number(statusCode || 0);
+
+    if (status >= 500) {
+      return "bg-red-500/10 text-red-400 border-red-500/30";
+    }
+
+    if (status >= 400) {
+      return "bg-yellow-500/10 text-yellow-400 border-yellow-500/30";
+    }
+
+    if (status >= 300) {
+      return "bg-blue-500/10 text-blue-400 border-blue-500/30";
+    }
+
+    return "bg-emerald-500/10 text-emerald-400 border-emerald-500/30";
+  };
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+
+    return Number.isNaN(date.getTime())
+      ? "—"
+      : date.toLocaleString();
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div className="text-xs uppercase tracking-[0.18em] text-slate-500">
+            SIEM
+          </div>
+          <h1 className="mt-1 text-2xl font-semibold text-white">
+            Application Logs
+          </h1>
+          <p className="mt-1 text-sm text-slate-400">
+            Real-time persisted SOC Platform application access logs.
+          </p>
+        </div>
+
+        <button
+          onClick={() => loadApplicationLogs()}
+          className="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-6">
+        {[
+          ["Total Requests", totalRequests, "text-cyan-400"],
+          ["2xx / 3xx", successfulRequests, "text-emerald-400"],
+          ["4xx Errors", clientErrors, "text-yellow-400"],
+          ["5xx Errors", serverErrors, "text-red-400"],
+          ["Avg Response", `${averageDuration} ms`, "text-white"],
+          ["Unique Paths", uniquePaths, "text-white"],
+        ].map(([label, value, valueClass]) => (
+          <div
+            key={label}
+            className="rounded-xl border border-slate-800 bg-slate-900/60 p-5"
+          >
+            <div className="text-xs uppercase tracking-wide text-slate-500">
+              {label}
+            </div>
+            <div className={`mt-2 text-3xl font-semibold ${valueClass}`}>
+              {value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-4">
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search path, method, status, IP, message..."
+            className="min-w-0 rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-500"
+          />
+
+          <select
+            value={severityFilter}
+            onChange={(event) => setSeverityFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="ALL">All Severities</option>
+            <option value="INFO">Info</option>
+            <option value="WARN">Warning</option>
+            <option value="ERROR">Error</option>
+          </select>
+
+          <select
+            value={methodFilter}
+            onChange={(event) => setMethodFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="ALL">All Methods</option>
+            {methods.map((method) => (
+              <option key={method} value={method}>
+                {method}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="ALL">All Status Classes</option>
+            <option value="2XX">2xx Success</option>
+            <option value="3XX">3xx Redirect</option>
+            <option value="4XX">4xx Client Error</option>
+            <option value="5XX">5xx Server Error</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
+        <div className="border-b border-slate-800 px-5 py-4">
+          <h2 className="font-semibold text-white">Application Access Telemetry</h2>
+          <p className="mt-1 text-xs text-slate-500">
+            {filteredLogs.length} record{filteredLogs.length === 1 ? "" : "s"} shown
+            {lastUpdated ? ` · updated ${formatDate(lastUpdated)}` : ""}
+          </p>
+        </div>
+
+        {loading ? (
+          <div className="p-8 text-center text-sm text-slate-500">
+            Loading application logs...
+          </div>
+        ) : filteredLogs.length === 0 ? (
+          <div className="p-8 text-center text-sm text-slate-500">
+            No persisted application logs match the current filters.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-[1250px] w-full text-left text-sm">
+              <thead className="border-b border-slate-800 bg-slate-950/60 text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-4 py-3">Time</th>
+                  <th className="px-4 py-3">Level</th>
+                  <th className="px-4 py-3">Method</th>
+                  <th className="px-4 py-3">Path</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Duration</th>
+                  <th className="px-4 py-3">Client IP</th>
+                  <th className="px-4 py-3">Message</th>
+                </tr>
+              </thead>
+
+              <tbody className="divide-y divide-slate-800/80">
+                {filteredLogs.map((log) => (
+                  <tr key={log.id} className="hover:bg-white/[0.02]">
+                    <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-400">
+                      {formatDate(log.timestamp)}
+                    </td>
+
+                    <td className="px-4 py-3">
+                      <span
+                        className={`inline-flex rounded-full border px-2 py-1 text-[10px] font-medium uppercase ${severityBadge(
+                          log.level
+                        )}`}
+                      >
+                        {log.level || "INFO"}
+                      </span>
+                    </td>
+
+                    <td className="px-4 py-3 font-mono text-xs font-semibold text-cyan-300">
+                      {log.method || "—"}
+                    </td>
+
+                    <td className="max-w-[360px] truncate px-4 py-3 font-mono text-xs text-slate-200">
+                      {log.path || "—"}
+                    </td>
+
+                    <td className="px-4 py-3">
+                      <span
+                        className={`inline-flex rounded-full border px-2 py-1 text-[10px] font-medium ${statusBadge(
+                          log.status_code
+                        )}`}
+                      >
+                        {log.status_code || "—"}
+                      </span>
+                    </td>
+
+                    <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-300">
+                      {Number(log.duration_ms || 0)} ms
+                    </td>
+
+                    <td className="whitespace-nowrap px-4 py-3 font-mono text-xs text-slate-400">
+                      {log.client_ip || "—"}
+                    </td>
+
+                    <td className="max-w-[420px] px-4 py-3 text-xs leading-5 text-slate-400">
+                      {log.message || "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+// ==================================================
+// SIEM FIREWALL LOGS
+// ==================================================
+function FirewallLogs() {
+  const [rules, setRules] = useState([]);
+  const [search, setSearch] = useState("");
+  const [enabledFilter, setEnabledFilter] = useState("ALL");
+  const [directionFilter, setDirectionFilter] = useState("ALL");
+  const [actionFilter, setActionFilter] = useState("ALL");
+  const [presenceFilter, setPresenceFilter] = useState("CURRENT");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+
+  const loadFirewallLogs = async ({ silent = false } = {}) => {
+    try {
+      if (silent) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Authentication token is not available.");
+      }
+
+      const response = await fetch(`${API_URL}/client/firewall`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Firewall logs request failed (${response.status}).`);
+      }
+
+      const data = await response.json();
+      setRules(Array.isArray(data?.rules) ? data.rules : []);
+      setLastUpdated(new Date());
+    } catch (err) {
+      console.error("Firewall Logs fetch error:", err);
+      setError(err?.message || "Unable to load firewall logs.");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadFirewallLogs();
+
+    const interval = setInterval(() => {
+      loadFirewallLogs({ silent: true });
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const normalizedSearch = search.trim().toLowerCase();
+
+  const filteredRules = rules.filter((rule) => {
+    const enabledValue =
+      rule.enabled === true
+        ? "ENABLED"
+        : rule.enabled === false
+        ? "DISABLED"
+        : "UNKNOWN";
+
+    const direction = String(rule.direction || "").toUpperCase();
+    const action = String(rule.action || "").toUpperCase();
+
+    if (enabledFilter !== "ALL" && enabledValue !== enabledFilter) return false;
+    if (directionFilter !== "ALL" && direction !== directionFilter) return false;
+    if (actionFilter !== "ALL" && action !== actionFilter) return false;
+    if (presenceFilter === "CURRENT" && rule.is_present === false) return false;
+    if (presenceFilter === "REMOVED" && rule.is_present !== false) return false;
+
+    if (!normalizedSearch) return true;
+
+    return [
+      rule.rule_name,
+      rule.display_name,
+      rule.description,
+      rule.endpoint_id,
+      rule.hostname,
+      rule.ip_address,
+      rule.direction,
+      rule.action,
+      rule.profile,
+      rule.protocol,
+      rule.local_port,
+      rule.remote_port,
+      rule.local_address,
+      rule.remote_address,
+      rule.program,
+      rule.service_name,
+      rule.policy_store_source,
+    ]
+      .filter(Boolean)
+      .some((value) =>
+        String(value).toLowerCase().includes(normalizedSearch)
+      );
+  });
+
+  const currentRules = rules.filter((rule) => rule.is_present !== false);
+  const removedRules = rules.filter((rule) => rule.is_present === false);
+
+  const enabledCount = currentRules.filter((rule) => rule.enabled === true).length;
+  const disabledCount = currentRules.filter((rule) => rule.enabled === false).length;
+
+  const allowCount = currentRules.filter(
+    (rule) => String(rule.action || "").toLowerCase() === "allow"
+  ).length;
+
+  const blockCount = currentRules.filter((rule) => {
+    const action = String(rule.action || "").toLowerCase();
+    return action === "block" || action === "deny";
+  }).length;
+
+  const inboundCount = currentRules.filter(
+    (rule) => String(rule.direction || "").toUpperCase() === "INBOUND"
+  ).length;
+
+  const outboundCount = currentRules.filter(
+    (rule) => String(rule.direction || "").toUpperCase() === "OUTBOUND"
+  ).length;
+
+  const endpointCount = new Set(
+    currentRules.map((rule) => rule.endpoint_asset_id).filter(Boolean)
+  ).size;
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
+  };
+
+  const actionBadge = (action) => {
+    const normalized = String(action || "").toLowerCase();
+
+    if (normalized === "allow") {
+      return "bg-emerald-500/10 text-emerald-400 border-emerald-500/30";
+    }
+
+    if (normalized === "block" || normalized === "deny") {
+      return "bg-red-500/10 text-red-400 border-red-500/30";
+    }
+
+    return "bg-slate-500/10 text-slate-300 border-slate-500/30";
+  };
+
+  const enabledBadge = (enabled) => {
+    if (enabled === true) {
+      return "bg-emerald-500/10 text-emerald-400 border-emerald-500/30";
+    }
+
+    if (enabled === false) {
+      return "bg-red-500/10 text-red-400 border-red-500/30";
+    }
+
+    return "bg-slate-500/10 text-slate-300 border-slate-500/30";
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div className="text-xs uppercase tracking-[0.18em] text-slate-500">
+            SIEM
+          </div>
+          <h1 className="mt-1 text-2xl font-semibold text-white">
+            Firewall Logs
+          </h1>
+          <p className="mt-1 text-sm text-slate-400">
+            Persisted endpoint firewall telemetry from registered Windows agents.
+          </p>
+        </div>
+
+        <button
+          onClick={() => loadFirewallLogs()}
+          className="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        {[
+          ["Current Rules", currentRules.length, "text-white"],
+          ["Removed Rules", removedRules.length, "text-amber-400"],
+          ["Enabled", enabledCount, "text-emerald-400"],
+          ["Disabled", disabledCount, "text-red-400"],
+          ["Allow", allowCount, "text-cyan-400"],
+          ["Block / Deny", blockCount, "text-red-400"],
+          ["Inbound / Outbound", `${inboundCount} / ${outboundCount}`, "text-white"],
+          ["Endpoints", endpointCount, "text-white"],
+        ].map(([label, value, valueClass]) => (
+          <div
+            key={label}
+            className="rounded-xl border border-slate-800 bg-slate-900/60 p-5"
+          >
+            <div className="text-xs uppercase tracking-wide text-slate-500">
+              {label}
+            </div>
+            <div className={`mt-2 text-3xl font-semibold ${valueClass}`}>
+              {value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-5">
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search rule, endpoint, protocol, port, program..."
+            className="min-w-0 rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-500"
+          />
+
+          <select
+            value={presenceFilter}
+            onChange={(event) => setPresenceFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="CURRENT">Current Rules</option>
+            <option value="REMOVED">Removed Rules</option>
+            <option value="ALL">All Records</option>
+          </select>
+
+          <select
+            value={enabledFilter}
+            onChange={(event) => setEnabledFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="ALL">All States</option>
+            <option value="ENABLED">Enabled</option>
+            <option value="DISABLED">Disabled</option>
+            <option value="UNKNOWN">Unknown</option>
+          </select>
+
+          <select
+            value={directionFilter}
+            onChange={(event) => setDirectionFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="ALL">All Directions</option>
+            <option value="INBOUND">Inbound</option>
+            <option value="OUTBOUND">Outbound</option>
+          </select>
+
+          <select
+            value={actionFilter}
+            onChange={(event) => setActionFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="ALL">All Actions</option>
+            <option value="ALLOW">Allow</option>
+            <option value="BLOCK">Block</option>
+            <option value="DENY">Deny</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
+        <div className="border-b border-slate-800 px-5 py-4">
+          <h2 className="font-semibold text-white">Firewall Telemetry</h2>
+          <p className="mt-1 text-xs text-slate-500">
+            {filteredRules.length} record{filteredRules.length === 1 ? "" : "s"} shown
+            {lastUpdated ? ` · updated ${formatDate(lastUpdated)}` : ""}
+          </p>
+        </div>
+
+        {loading ? (
+          <div className="p-10 text-center text-sm text-slate-500">
+            Loading firewall telemetry...
+          </div>
+        ) : filteredRules.length === 0 ? (
+          <div className="p-10 text-center">
+            <div className="text-sm font-medium text-slate-300">
+              No firewall telemetry recorded
+            </div>
+            <div className="mt-2 text-xs text-slate-500">
+              Firewall records appear here only after a registered endpoint
+              reports a firewall snapshot. No synthetic records are generated.
+            </div>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-[1600px] w-full text-left text-sm">
+              <thead className="border-b border-slate-800 bg-slate-950/70 text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-5 py-3">Rule</th>
+                  <th className="px-5 py-3">Endpoint</th>
+                  <th className="px-5 py-3">State</th>
+                  <th className="px-5 py-3">Presence</th>
+                  <th className="px-5 py-3">Direction</th>
+                  <th className="px-5 py-3">Action</th>
+                  <th className="px-5 py-3">Protocol</th>
+                  <th className="px-5 py-3">Ports</th>
+                  <th className="px-5 py-3">Addresses</th>
+                  <th className="px-5 py-3">Program / Service</th>
+                  <th className="px-5 py-3">Profile</th>
+                  <th className="px-5 py-3">Last Seen</th>
+                </tr>
+              </thead>
+
+              <tbody className="divide-y divide-slate-800">
+                {filteredRules.map((rule) => (
+                  <tr key={rule.id} className="hover:bg-slate-800/30">
+                    <td className="px-5 py-4">
+                      <div className="font-medium text-white">
+                        {rule.display_name || rule.rule_name || "—"}
+                      </div>
+                      {rule.display_name && rule.rule_name && (
+                        <div className="mt-1 text-xs text-slate-500">
+                          {rule.rule_name}
+                        </div>
+                      )}
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <div className="text-slate-200">
+                        {rule.hostname || rule.endpoint_id || "—"}
+                      </div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        {rule.ip_address || "IP unavailable"}
+                      </div>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <span
+                        className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${enabledBadge(
+                          rule.enabled
+                        )}`}
+                      >
+                        {rule.enabled === true
+                          ? "Enabled"
+                          : rule.enabled === false
+                          ? "Disabled"
+                          : "Unknown"}
+                      </span>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      {rule.is_present === false ? (
+                        <div>
+                          <span className="inline-flex rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-300">
+                            Removed
+                          </span>
+                          {rule.removed_at && (
+                            <div className="mt-1 whitespace-nowrap text-[10px] text-slate-500">
+                              {formatDate(rule.removed_at)}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="inline-flex rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-300">
+                          Present
+                        </span>
+                      )}
+                    </td>
+
+                    <td className="px-5 py-4 text-slate-300">
+                      {rule.direction || "—"}
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <span
+                        className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${actionBadge(
+                          rule.action
+                        )}`}
+                      >
+                        {rule.action || "Unknown"}
+                      </span>
+                    </td>
+
+                    <td className="px-5 py-4 font-mono text-xs text-slate-300">
+                      {rule.protocol || "—"}
+                    </td>
+
+                    <td className="px-5 py-4 text-xs text-slate-300">
+                      <div>Local: {rule.local_port || "Any"}</div>
+                      <div className="mt-1 text-slate-500">
+                        Remote: {rule.remote_port || "Any"}
+                      </div>
+                    </td>
+
+                    <td className="max-w-[280px] px-5 py-4 text-xs text-slate-400">
+                      <div className="truncate" title={rule.local_address || ""}>
+                        Local: {rule.local_address || "Any"}
+                      </div>
+                      <div
+                        className="mt-1 truncate"
+                        title={rule.remote_address || ""}
+                      >
+                        Remote: {rule.remote_address || "Any"}
+                      </div>
+                    </td>
+
+                    <td className="max-w-[300px] px-5 py-4">
+                      <div
+                        className="truncate text-xs text-slate-300"
+                        title={rule.program || ""}
+                      >
+                        {rule.program || "Any program"}
+                      </div>
+                      <div
+                        className="mt-1 truncate text-xs text-slate-500"
+                        title={rule.service_name || ""}
+                      >
+                        {rule.service_name || "Any service"}
+                      </div>
+                    </td>
+
+                    <td className="px-5 py-4 text-xs text-slate-300">
+                      {rule.profile || "—"}
+                    </td>
+
+                    <td className="px-5 py-4 whitespace-nowrap text-xs text-slate-400">
+                      {formatDate(rule.last_seen)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 // ==================================================
 // LOG STAT
 // ==================================================
+function DNSLogs() {
+  const [events, setEvents] = useState([]);
+  const [search, setSearch] = useState("");
+  const [eventTypeFilter, setEventTypeFilter] = useState("ALL");
+  const [severityFilter, setSeverityFilter] = useState("ALL");
+  const [queryTypeFilter, setQueryTypeFilter] = useState("ALL");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+
+  const loadDNSLogs = async ({ silent = false } = {}) => {
+    try {
+      if (silent) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Authentication token is not available.");
+      }
+
+      const params = new URLSearchParams({ limit: "500" });
+      params.append("event_type", "dns_query");
+      params.append("event_type", "dns_detection");
+
+      const response = await fetch(
+        `${API_URL}/security-events?${params.toString()}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`DNS logs request failed (${response.status}).`);
+      }
+
+      const data = await response.json();
+      const records = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.events)
+        ? data.events
+        : Array.isArray(data?.items)
+        ? data.items
+        : [];
+
+      setEvents(
+        records.filter(
+          (event) =>
+            event?.event_type === "dns_query" ||
+            event?.event_type === "dns_detection"
+        )
+      );
+      setLastUpdated(new Date());
+    } catch (err) {
+      console.error("DNS Logs fetch error:", err);
+      setError(err?.message || "Unable to load DNS logs.");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadDNSLogs();
+
+    const interval = setInterval(() => {
+      loadDNSLogs({ silent: true });
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const normalizedSearch = search.trim().toLowerCase();
+
+  const getDNS = (event) => event?.dns || {};
+
+  const filteredEvents = events.filter((event) => {
+    const dns = getDNS(event);
+    const severity = String(event?.severity || "").toUpperCase();
+    const eventType = String(event?.event_type || "").toLowerCase();
+    const queryType = String(dns?.query_type || "").toUpperCase();
+
+    if (eventTypeFilter !== "ALL" && eventType !== eventTypeFilter) {
+      return false;
+    }
+
+    if (severityFilter !== "ALL" && severity !== severityFilter) {
+      return false;
+    }
+
+    if (queryTypeFilter !== "ALL" && queryType !== queryTypeFilter) {
+      return false;
+    }
+
+    if (!normalizedSearch) {
+      return true;
+    }
+
+    return [
+      event?.event_type,
+      event?.severity,
+      event?.source,
+      event?.target,
+      event?.message,
+      event?.mitre?.technique_id,
+      event?.mitre?.technique_name,
+      dns?.query_name,
+      dns?.query_type,
+      dns?.source_ip,
+      dns?.destination_ip,
+      dns?.source_port,
+      dns?.destination_port,
+      dns?.protocol,
+    ]
+      .filter((value) => value !== null && value !== undefined)
+      .some((value) =>
+        String(value).toLowerCase().includes(normalizedSearch)
+      );
+  });
+
+  const queryCount = events.filter(
+    (event) => event?.event_type === "dns_query"
+  ).length;
+
+  const detectionCount = events.filter(
+    (event) => event?.event_type === "dns_detection"
+  ).length;
+
+  const uniqueDomains = new Set(
+    events
+      .map((event) => getDNS(event)?.query_name)
+      .filter(Boolean)
+      .map((value) => String(value).toLowerCase())
+  ).size;
+
+  const uniqueDNSServers = new Set(
+    events
+      .map((event) => getDNS(event)?.destination_ip)
+      .filter(Boolean)
+  ).size;
+
+  const criticalHighCount = events.filter((event) => {
+    const severity = String(event?.severity || "").toUpperCase();
+    return severity === "CRITICAL" || severity === "HIGH";
+  }).length;
+
+  const severityBadge = (severity) => {
+    const normalized = String(severity || "").toUpperCase();
+
+    if (normalized === "CRITICAL") {
+      return "bg-red-500/10 text-red-400 border-red-500/30";
+    }
+
+    if (normalized === "HIGH") {
+      return "bg-orange-500/10 text-orange-400 border-orange-500/30";
+    }
+
+    if (normalized === "MEDIUM") {
+      return "bg-yellow-500/10 text-yellow-400 border-yellow-500/30";
+    }
+
+    if (normalized === "LOW") {
+      return "bg-blue-500/10 text-blue-400 border-blue-500/30";
+    }
+
+    return "bg-slate-500/10 text-slate-300 border-slate-500/30";
+  };
+
+  const eventBadge = (eventType) => {
+    if (eventType === "dns_detection") {
+      return "bg-red-500/10 text-red-400 border-red-500/30";
+    }
+
+    return "bg-cyan-500/10 text-cyan-400 border-cyan-500/30";
+  };
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+
+    return Number.isNaN(date.getTime())
+      ? "—"
+      : date.toLocaleString();
+  };
+
+  const formatQueryType = (value) => {
+    const type = String(value || "").toUpperCase();
+
+    const names = {
+      "1": "A",
+      "2": "NS",
+      "5": "CNAME",
+      "6": "SOA",
+      "12": "PTR",
+      "15": "MX",
+      "16": "TXT",
+      "28": "AAAA",
+      "33": "SRV",
+      "255": "ANY",
+    };
+
+    return names[type] ? `${names[type]} (${type})` : type || "—";
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div className="text-xs uppercase tracking-[0.18em] text-slate-500">
+            SIEM
+          </div>
+          <h1 className="mt-1 text-2xl font-semibold text-white">
+            DNS Logs
+          </h1>
+          <p className="mt-1 text-sm text-slate-400">
+            Real-time persisted DNS query and detection telemetry.
+          </p>
+        </div>
+
+        <button
+          onClick={() => loadDNSLogs()}
+          className="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+        {[
+          ["DNS Queries", queryCount, "text-cyan-400"],
+          ["Detections", detectionCount, "text-red-400"],
+          ["Unique Domains", uniqueDomains, "text-white"],
+          ["DNS Servers", uniqueDNSServers, "text-white"],
+          ["Critical / High", criticalHighCount, "text-orange-400"],
+        ].map(([label, value, valueClass]) => (
+          <div
+            key={label}
+            className="rounded-xl border border-slate-800 bg-slate-900/60 p-5"
+          >
+            <div className="text-xs uppercase tracking-wide text-slate-500">
+              {label}
+            </div>
+            <div className={`mt-2 text-3xl font-semibold ${valueClass}`}>
+              {value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-4">
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search domain, IP, DNS server, event, message..."
+            className="min-w-0 rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-500"
+          />
+
+          <select
+            value={eventTypeFilter}
+            onChange={(event) => setEventTypeFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="ALL">All Event Types</option>
+            <option value="dns_query">DNS Query</option>
+            <option value="dns_detection">DNS Detection</option>
+          </select>
+
+          <select
+            value={severityFilter}
+            onChange={(event) => setSeverityFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="ALL">All Severities</option>
+            <option value="CRITICAL">Critical</option>
+            <option value="HIGH">High</option>
+            <option value="MEDIUM">Medium</option>
+            <option value="LOW">Low</option>
+            <option value="INFO">Info</option>
+          </select>
+
+          <select
+            value={queryTypeFilter}
+            onChange={(event) => setQueryTypeFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="ALL">All Query Types</option>
+            <option value="1">A</option>
+            <option value="28">AAAA</option>
+            <option value="5">CNAME</option>
+            <option value="15">MX</option>
+            <option value="16">TXT</option>
+            <option value="12">PTR</option>
+            <option value="33">SRV</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
+        <div className="border-b border-slate-800 px-5 py-4">
+          <h2 className="font-semibold text-white">DNS Telemetry</h2>
+          <p className="mt-1 text-xs text-slate-500">
+            {filteredEvents.length} record{filteredEvents.length === 1 ? "" : "s"} shown
+            {lastUpdated ? ` · updated ${formatDate(lastUpdated)}` : ""}
+          </p>
+        </div>
+
+        {loading ? (
+          <div className="p-8 text-center text-sm text-slate-500">
+            Loading DNS telemetry...
+          </div>
+        ) : filteredEvents.length === 0 ? (
+          <div className="p-8 text-center text-sm text-slate-500">
+            No persisted DNS telemetry matches the current filters.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-[1100px] w-full text-left text-sm">
+              <thead className="border-b border-slate-800 bg-slate-950/60 text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-4 py-3">Time</th>
+                  <th className="px-4 py-3">Severity</th>
+                  <th className="px-4 py-3">Query</th>
+                  <th className="px-4 py-3">Type</th>
+                  <th className="px-4 py-3">Source</th>
+                  <th className="px-4 py-3">DNS Server</th>
+                  <th className="px-4 py-3">Event</th>
+                  <th className="px-4 py-3">Message</th>
+                </tr>
+              </thead>
+
+              <tbody className="divide-y divide-slate-800/80">
+                {filteredEvents.map((event) => {
+                  const dns = getDNS(event);
+
+                  return (
+                    <tr key={event.id} className="hover:bg-white/[0.02]">
+                      <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-400">
+                        {formatDate(event.timestamp || event.created_at)}
+                      </td>
+
+                      <td className="px-4 py-3">
+                        <span
+                          className={`inline-flex rounded-full border px-2 py-1 text-[10px] font-medium uppercase ${severityBadge(
+                            event.severity
+                          )}`}
+                        >
+                          {event.severity || "INFO"}
+                        </span>
+                      </td>
+
+                      <td className="max-w-[260px] truncate px-4 py-3 font-medium text-white">
+                        {dns.query_name || "—"}
+                      </td>
+
+                      <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-300">
+                        {formatQueryType(dns.query_type)}
+                      </td>
+
+                      <td className="px-4 py-3 text-xs text-slate-300">
+                        <div>{dns.source_ip || "—"}</div>
+                        <div className="text-slate-600">
+                          {dns.source_port ? `:${dns.source_port}` : ""}
+                        </div>
+                      </td>
+
+                      <td className="px-4 py-3 text-xs text-slate-300">
+                        <div>{dns.destination_ip || "—"}</div>
+                        <div className="text-slate-600">
+                          {dns.destination_port ? `:${dns.destination_port}` : ""}
+                        </div>
+                      </td>
+
+                      <td className="px-4 py-3">
+                        <span
+                          className={`inline-flex rounded-full border px-2 py-1 text-[10px] font-medium ${eventBadge(
+                            event.event_type
+                          )}`}
+                        >
+                          {event.event_type === "dns_detection"
+                            ? "Detection"
+                            : "Query"}
+                        </span>
+                      </td>
+
+                      <td className="max-w-[320px] truncate px-4 py-3 text-xs text-slate-400">
+                        {event.message || "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function LogStat({
   label,
   value,
@@ -11999,6 +16051,78 @@ function MitreAttack() {
   const [mitreTechniqueDetailError, setMitreTechniqueDetailError] = useState("");
   const [vaptFindings, setVaptFindings] = useState([]);
 
+  const [overviewCatalogue, setOverviewCatalogue] = useState(null);
+  const [overviewLoading, setOverviewLoading] = useState(true);
+  const [overviewError, setOverviewError] = useState("");
+  const [overviewRefresh, setOverviewRefresh] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+
+    setOverviewLoading(true);
+    setOverviewError("");
+    setOverviewCatalogue(null);
+
+    (async () => {
+      try {
+        const token = localStorage.getItem("token");
+        if (!token) throw new Error("Please log in again.");
+
+        const response = await axios.get(
+          `${API_URL}/mitre/reference-catalogue`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+            signal: controller.signal,
+            timeout: 30000,
+          }
+        );
+
+        if (!Array.isArray(response.data?.records)) {
+          throw new Error("Unexpected catalogue response.");
+        }
+
+        if (active) setOverviewCatalogue(response.data);
+      } catch (error) {
+        if (active && !controller.signal.aborted) {
+          const detail = error.response?.data?.detail;
+          setOverviewError(
+            typeof detail === "string"
+              ? detail
+              : error.message || "Unable to load the local catalogue."
+          );
+        }
+      } finally {
+        if (active) setOverviewLoading(false);
+      }
+    })();
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [overviewRefresh]);
+
+  const overviewRecords = overviewCatalogue?.records || [];
+  const overviewCounts = {
+    tactics: overviewRecords.filter(
+      item => item.type === "x-mitre-tactic"
+    ).length,
+    techniques: overviewRecords.filter(
+      item => item.type === "attack-pattern" && !item.is_subtechnique
+    ).length,
+    subtechniques: overviewRecords.filter(
+      item => item.type === "attack-pattern" && item.is_subtechnique
+    ).length,
+    groups: overviewRecords.filter(
+      item => item.type === "intrusion-set"
+    ).length,
+    software: overviewRecords.filter(
+      item => ["malware", "tool"].includes(item.type)
+    ).length,
+  };
+
+
   useEffect(() => {
     let cancelled = false;
 
@@ -12099,13 +16223,9 @@ function MitreAttack() {
   );
 
   const sections = [
-    { id: "overview", label: "Overview" },
-    { id: "tactics", label: "Tactics" },
-    { id: "techniques", label: "Techniques" },
-    { id: "mapping", label: "VAPT → ATT&CK Mapping" },
-    { id: "evidence", label: "Evidence" },
-    { id: "remediation", label: "Remediation" },
-  ];
+        { id: "overview", label: "Overview" },
+        { id: "mapping", label: "VAPT → ATT&CK Mapping" }
+      ];
 
   return (
     <div className="space-y-5">
@@ -12119,8 +16239,7 @@ function MitreAttack() {
               Enterprise Attack Framework
             </h1>
             <p className="mt-2 max-w-3xl text-xs leading-5 text-gray-500">
-              Analyze adversary behavior through tactics, techniques,
-              sub-techniques, VAPT mappings, evidence, and remediation.
+              Review the local Enterprise ATT&CK catalogue and VAPT findings mapping status.
             </p>
           </div>
 
@@ -12153,544 +16272,87 @@ function MitreAttack() {
       </div>
 
       {activeSection === "overview" && (
-        <>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="border border-white/10 bg-[#0d0d0d] p-5">
-              <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                Domain
+        <div className="space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-4 border border-white/10 bg-[#0d0d0d] p-5">
+            <div>
+              <p className="text-xs font-semibold text-white">
+                Enterprise ATT&CK · Local Reference Catalogue
               </p>
-              <p className="mt-2 text-lg font-bold text-white">Enterprise</p>
-            </div>
-
-            <div className="border border-white/10 bg-[#0d0d0d] p-5">
-              <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                Tactics
+              <p className="mt-2 text-xs text-gray-400">
+                Dataset: {overviewCatalogue?.dataset || "Not loaded"}
               </p>
-              <p className="mt-2 text-lg font-bold text-white">
-                {MITRE_TACTICS.length}
+              <p className="mt-2 text-xs text-gray-500">
+                Totals exclude revoked and deprecated records.
+                Reference records do not establish activity in your environment.
               </p>
             </div>
-
-            <div className="border border-white/10 bg-[#0d0d0d] p-5">
-              <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                Selected Tactic
-              </p>
-              <p className="mt-2 text-lg font-bold text-red-400">
-                {selectedTactic.name}
-              </p>
-            </div>
-
-            <div className="border border-white/10 bg-[#0d0d0d] p-5">
-              <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                Framework
-              </p>
-              <p className="mt-2 text-lg font-bold text-white">ATT&CK v19</p>
-            </div>
+            <button
+              type="button"
+              onClick={() => setOverviewRefresh(value => value + 1)}
+              disabled={overviewLoading}
+              className="border border-white/10 px-4 py-2 text-xs text-white disabled:opacity-40"
+            >
+              {overviewLoading ? "Loading..." : "Refresh Catalogue"}
+            </button>
           </div>
 
-          <div className="border border-white/10 bg-[#0d0d0d] p-6">
-            <div className="mb-5">
-              <p className="text-[10px] uppercase tracking-wider text-red-400">
-                ATT&CK Workflow
-              </p>
-              <p className="mt-2 text-xs leading-5 text-gray-500">
-                VAPT findings can later be mapped to ATT&CK techniques and
-                supported with evidence and remediation guidance.
-              </p>
-            </div>
+          {overviewError && (
+            <p role="alert" className="border border-red-600/30 p-4 text-sm text-red-400">
+              {overviewError}
+            </p>
+          )}
 
-            <div className="grid gap-3 md:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+            {[
+              ["Active Tactics", overviewCounts.tactics],
+              ["Active Techniques", overviewCounts.techniques],
+              ["Active Sub-Techniques", overviewCounts.subtechniques],
+              ["Active Groups", overviewCounts.groups],
+              ["Active Software", overviewCounts.software],
+            ].map(([label, count]) => (
+              <div key={label} className="border border-white/10 bg-[#0d0d0d] p-5">
+                <p className="text-[10px] uppercase tracking-wider text-gray-400">
+                  {label}
+                </p>
+                <p className="mt-3 text-2xl font-bold text-white">
+                  {overviewLoading ? "Loading..." : overviewCatalogue ? count : "Unavailable"}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <p className="text-xs text-gray-500">
+            Techniques and sub-techniques are counted separately.
+            Software includes malware and tools.
+          </p>
+
+          <div className="border border-white/10 bg-[#0d0d0d] p-6">
+            <p className="text-xs uppercase tracking-wider text-red-400">
+              ATT&CK Workflow
+            </p>
+            <p className="mt-3 text-xs leading-6 text-gray-400">
+              Review observed behavior, associate supported evidence with an
+              applicable technique, and document defensive actions.
+              VAPT findings without a stored technique mapping remain unmapped.
+            </p>
+            <div className="mt-5 grid gap-3 md:grid-cols-3">
               {[
-                ["01", "Identify Behavior", "Select the observed adversary behavior."],
-                ["02", "Map Technique", "Associate evidence with the applicable ATT&CK technique."],
-                ["03", "Remediate", "Record defensive actions and supporting evidence."],
+                ["01", "Review Behavior", "Review collected findings and event evidence."],
+                ["02", "Assess Mapping", "Use evidence to assess the applicable ATT&CK technique."],
+                ["03", "Document Response", "Record defensive actions and supporting evidence."],
               ].map(([number, title, description]) => (
-                <div
-                  key={number}
-                  className="border border-white/10 bg-black/20 p-4"
-                >
-                  <span className="text-xs font-bold text-red-500">
-                    {number}
-                  </span>
+                <div key={number} className="border border-white/10 bg-black/20 p-4">
+                  <span className="text-xs font-bold text-red-500">{number}</span>
                   <p className="mt-3 text-xs font-semibold uppercase tracking-wider text-white">
                     {title}
                   </p>
-                  <p className="mt-2 text-[10px] leading-4 text-gray-600">
+                  <p className="mt-2 text-xs leading-5 text-gray-400">
                     {description}
                   </p>
                 </div>
               ))}
             </div>
           </div>
-        </>
-      )}
-
-      {activeSection === "tactics" && (
-        <div className="grid gap-5 lg:grid-cols-[1.2fr_0.8fr]">
-          <div className="border border-white/10 bg-[#0d0d0d] p-5">
-            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <p className="text-[10px] uppercase tracking-wider text-red-400">
-                  Enterprise Tactics
-                </p>
-                <p className="mt-1 text-[10px] text-gray-600">
-                  Select a tactic to inspect its ATT&CK coverage.
-                </p>
-              </div>
-
-              <input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search tactics..."
-                className="border border-white/10 bg-black px-3 py-2 text-xs text-white outline-none placeholder:text-gray-700 focus:border-red-600"
-              />
-            </div>
-
-            <div className="grid gap-2 sm:grid-cols-2">
-              {filteredTactics.map((tactic) => (
-                <button
-                  key={tactic.id}
-                  type="button"
-                  onClick={() => setSelectedTactic(tactic)}
-                  className={`border p-4 text-left transition ${
-                    selectedTactic.id === tactic.id
-                      ? "border-red-600 bg-red-600/10"
-                      : "border-white/10 hover:border-red-600/50"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[9px] font-bold text-red-500">
-                      {tactic.id}
-                    </span>
-                    <span className="text-[9px] text-gray-600">
-                      {tactic.count} techniques
-                    </span>
-                  </div>
-                  <p className="mt-3 text-xs font-semibold uppercase tracking-wider text-white">
-                    {tactic.name}
-                  </p>
-                  <p className="mt-2 text-[10px] leading-4 text-gray-600">
-                    {tactic.description}
-                  </p>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="border border-red-600/30 bg-[#0d0d0d] p-5">
-            <p className="text-[10px] uppercase tracking-wider text-red-400">
-              Selected Tactic
-            </p>
-            <p className="mt-3 text-xl font-bold text-white">
-              {selectedTactic.name}
-            </p>
-            <p className="mt-2 text-[10px] text-gray-600">
-              {selectedTactic.id}
-            </p>
-            <p className="mt-5 text-xs leading-5 text-gray-400">
-              {selectedTactic.description}
-            </p>
-
-            <div className="mt-6 border-t border-white/10 pt-5">
-              <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                Technique Coverage
-              </p>
-              <p className="mt-2 text-3xl font-bold text-red-500">
-                {selectedTactic.count}
-              </p>
-              <p className="mt-1 text-[10px] text-gray-600">
-                techniques in the current Enterprise matrix
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {activeSection === "techniques" && (
-        <div className="border border-white/10 bg-[#0d0d0d] p-5">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-            <div>
-              <p className="text-[10px] uppercase tracking-wider text-red-400">
-                Techniques
-              </p>
-              <h2 className="mt-2 text-xl font-bold uppercase tracking-wider text-white">
-                MITRE ATT&CK Techniques
-              </h2>
-              <p className="mt-2 text-xs leading-5 text-gray-500">
-                Official Enterprise ATT&CK techniques and sub-techniques from the
-                connected MITRE dataset.
-              </p>
-            </div>
-
-            <input
-              type="text"
-              value={mitreTechniqueSearch}
-              onChange={(event) => setMitreTechniqueSearch(event.target.value)}
-              placeholder="Search techniques..."
-              className="w-full border border-white/10 bg-black px-3 py-2 text-xs text-white outline-none transition placeholder:text-gray-700 focus:border-red-600 lg:w-72"
-            />
-          </div>
-
-          {mitreLoading && (
-            <div className="mt-5 border border-white/10 p-5 text-xs text-gray-500">
-              Loading MITRE ATT&CK techniques...
-            </div>
-          )}
-
-          {!mitreLoading && mitreError && (
-            <div className="mt-5 border border-red-600/30 bg-red-600/5 p-5">
-              <p className="text-[10px] uppercase tracking-wider text-red-400">
-                MITRE ATT&CK Error
-              </p>
-              <p className="mt-2 text-xs leading-5 text-gray-500">
-                {mitreError}
-              </p>
-            </div>
-          )}
-
-          {!mitreLoading && !mitreError && (
-            <>
-              <div className="mt-5 overflow-x-auto border border-white/10">
-                <table className="w-full min-w-[900px] text-left text-xs">
-                  <thead className="border-b border-white/10 bg-black/30 text-[9px] uppercase tracking-wider text-gray-600">
-                    <tr>
-                      <th className="px-4 py-3">ID</th>
-                      <th className="px-4 py-3">Technique</th>
-                      <th className="px-4 py-3">Type</th>
-                      <th className="px-4 py-3">Tactic</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {mitreTechniques
-                      .filter((technique) => {
-                        const selectedTacticName = selectedTactic.name.toLowerCase();
-                        const matchesTactic = Array.isArray(technique.tactics)
-                          ? technique.tactics.some(
-                              (tactic) =>
-                                tactic?.toLowerCase() === selectedTacticName
-                            )
-                          : false;
-
-                        const searchValue = mitreTechniqueSearch
-                          .trim()
-                          .toLowerCase();
-
-                        const matchesSearch =
-                          !searchValue ||
-                          `${technique.id} ${technique.name} ${technique.description}`
-                            .toLowerCase()
-                            .includes(searchValue);
-
-                        return searchValue ? matchesSearch : matchesTactic;
-                      })
-                      .map((technique) => (
-                        <tr
-                          key={technique.id}
-                          onClick={() => openMitreTechnique(technique)}
-                          className="cursor-pointer border-b border-white/5 transition hover:bg-red-600/5"
-                        >
-                          <td className="px-4 py-3 font-semibold text-red-400">
-                            {technique.id}
-                          </td>
-                          <td className="px-4 py-3">
-                            <button
-                              type="button"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                openMitreTechnique(technique);
-                              }}
-                              className="text-left font-semibold text-white transition hover:text-red-400"
-                            >
-                              {technique.name}
-                            </button>
-                            <p className="mt-1 max-w-2xl text-[10px] leading-4 text-gray-600">
-                              {technique.description || "No description available."}
-                            </p>
-                          </td>
-                          <td className="px-4 py-3 text-gray-500">
-                            {technique.is_subtechnique
-                              ? "Sub-technique"
-                              : "Technique"}
-                          </td>
-                          <td className="px-4 py-3 text-gray-500">
-                            {Array.isArray(technique.tactics) &&
-                            technique.tactics.length > 0
-                              ? technique.tactics.join(", ")
-                              : "—"}
-                          </td>
-                        </tr>
-                      ))}
-
-                    {mitreTechniques.filter((technique) => {
-                      const selectedTacticName = selectedTactic.name.toLowerCase();
-                      const matchesTactic = Array.isArray(technique.tactics)
-                        ? technique.tactics.some(
-                            (tactic) =>
-                              tactic?.toLowerCase() === selectedTacticName
-                          )
-                        : false;
-                      const searchValue = mitreTechniqueSearch.trim().toLowerCase();
-                      const matchesSearch =
-                        !searchValue ||
-                        `${technique.id} ${technique.name} ${technique.description}`
-                          .toLowerCase()
-                          .includes(searchValue);
-                      return searchValue ? matchesSearch : matchesTactic;
-                    }).length === 0 && (
-                      <tr>
-                        <td
-                          colSpan="4"
-                          className="px-4 py-8 text-center text-xs text-gray-600"
-                        >
-                          No techniques found for the selected tactic and search.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-
-              {selectedMitreTechnique && (
-                <div className="mt-5 border border-red-600/30 bg-[#0d0d0d] p-5">
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <p className="text-[10px] uppercase tracking-wider text-red-400">
-                        Technique Details
-                      </p>
-                      <h3 className="mt-2 text-xl font-bold text-white">
-                        {selectedMitreTechnique.name}
-                      </h3>
-                      <p className="mt-1 text-xs font-semibold text-red-400">
-                        {selectedMitreTechnique.id}
-                      </p>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedMitreTechnique(null);
-                        setMitreTechniqueDetailError("");
-                      }}
-                      className="border border-white/10 px-3 py-2 text-[9px] font-semibold uppercase tracking-wider text-gray-500 transition hover:border-red-600 hover:text-white"
-                    >
-                      Close
-                    </button>
-                  </div>
-
-                  {mitreTechniqueDetailLoading && (
-                    <p className="mt-5 text-xs text-gray-500">
-                      Loading technique details...
-                    </p>
-                  )}
-
-                  {!mitreTechniqueDetailLoading && (
-                    <>
-                      {mitreTechniqueDetailError && (
-                        <div className="mt-5 border border-red-600/30 bg-red-600/5 p-4">
-                          <p className="text-[10px] uppercase tracking-wider text-red-400">
-                            Detail Request Error
-                          </p>
-                          <p className="mt-2 text-xs text-gray-500">
-                            {mitreTechniqueDetailError}
-                          </p>
-                        </div>
-                      )}
-
-                      <div className="mt-5 grid gap-3 sm:grid-cols-3">
-                        <div className="border border-white/10 p-4">
-                          <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                            Type
-                          </p>
-                          <p className="mt-2 text-xs font-semibold text-white">
-                            {selectedMitreTechnique.is_subtechnique
-                              ? "Sub-technique"
-                              : "Technique"}
-                          </p>
-                        </div>
-
-                        <div className="border border-white/10 p-4">
-                          <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                            Tactic
-                          </p>
-                          <p className="mt-2 text-xs font-semibold text-white">
-                            {Array.isArray(selectedMitreTechnique.tactics) &&
-                            selectedMitreTechnique.tactics.length > 0
-                              ? selectedMitreTechnique.tactics.join(", ")
-                              : "—"}
-                          </p>
-                        </div>
-
-                        <div className="border border-white/10 p-4">
-                          <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                            ATT&CK Version
-                          </p>
-                          <p className="mt-2 text-xs font-semibold text-white">
-                            {selectedMitreTechnique.version || "—"}
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="mt-5 border-t border-white/10 pt-5">
-                        <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                          Description
-                        </p>
-
-                        <p className="mt-3 text-xs leading-6 text-gray-400">
-                          {selectedMitreTechnique.description ||
-                            "No description available."}
-                        </p>
-                      </div>
-
-                      <div className="mt-6 border-t border-white/10 pt-5">
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                              Procedure Examples
-                            </p>
-
-                            <p className="mt-1 text-[10px] text-gray-700">
-                              Documented MITRE ATT&CK procedure examples
-                            </p>
-                          </div>
-
-                          <span className="border border-white/10 bg-black/30 px-2 py-1 text-[9px] font-semibold text-gray-500">
-                            {Array.isArray(selectedMitreTechnique.procedures)
-                              ? selectedMitreTechnique.procedures.length
-                              : 0}
-                          </span>
-                        </div>
-
-                        <div className="mt-4 space-y-2">
-                          {Array.isArray(selectedMitreTechnique.procedures) &&
-                          selectedMitreTechnique.procedures.length > 0 ? (
-                            selectedMitreTechnique.procedures.map((procedure, index) => (
-                              <div
-                                key={`${procedure.source_ref || "procedure"}-${index}`}
-                                className="border border-white/10 bg-black/20 p-4"
-                              >
-                                <div className="flex items-start gap-3">
-                                  <span className="text-[9px] font-bold text-red-500">
-                                    {String(index + 1).padStart(3, "0")}
-                                  </span>
-
-                                  <p className="text-[10px] leading-5 text-gray-400">
-                                    {procedure.description ||
-                                      "No procedure description available."}
-                                  </p>
-                                </div>
-                              </div>
-                            ))
-                          ) : (
-                            <div className="border border-white/10 p-4 text-[10px] text-gray-600">
-                              No documented procedure examples available.
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="mt-6 border-t border-white/10 pt-5">
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                              Detection
-                            </p>
-
-                            <p className="mt-1 text-[10px] text-gray-700">
-                              MITRE detection relationships
-                            </p>
-                          </div>
-
-                          <span className="border border-white/10 bg-black/30 px-2 py-1 text-[9px] font-semibold text-gray-500">
-                            {Array.isArray(selectedMitreTechnique.detections)
-                              ? selectedMitreTechnique.detections.length
-                              : 0}
-                          </span>
-                        </div>
-
-                        <div className="mt-4 space-y-2">
-                          {Array.isArray(selectedMitreTechnique.detections) &&
-                          selectedMitreTechnique.detections.length > 0 ? (
-                            selectedMitreTechnique.detections.map((detection, index) => (
-                              <div
-                                key={`${detection.source_ref || "detection"}-${index}`}
-                                className="border border-white/10 bg-black/20 p-4"
-                              >
-                                <p className="text-[9px] font-semibold uppercase tracking-wider text-red-400">
-                                  Detection Strategy {index + 1}
-                                </p>
-
-                                <p className="mt-2 text-[10px] leading-5 text-gray-400">
-                                  {detection.description ||
-                                    "Detection strategy relationship available. Detailed description is not provided in the relationship."}
-                                </p>
-
-                                <p className="mt-3 break-all text-[9px] text-gray-700">
-                                  {detection.source_ref || "—"}
-                                </p>
-                              </div>
-                            ))
-                          ) : (
-                            <div className="border border-white/10 p-4 text-[10px] text-gray-600">
-                              No detection relationships available.
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="mt-6 border-t border-white/10 pt-5">
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                              Mitigations
-                            </p>
-
-                            <p className="mt-1 text-[10px] text-gray-700">
-                              MITRE ATT&CK mitigation guidance
-                            </p>
-                          </div>
-
-                          <span className="border border-white/10 bg-black/30 px-2 py-1 text-[9px] font-semibold text-gray-500">
-                            {Array.isArray(selectedMitreTechnique.mitigations)
-                              ? selectedMitreTechnique.mitigations.length
-                              : 0}
-                          </span>
-                        </div>
-
-                        <div className="mt-4 space-y-2">
-                          {Array.isArray(selectedMitreTechnique.mitigations) &&
-                          selectedMitreTechnique.mitigations.length > 0 ? (
-                            selectedMitreTechnique.mitigations.map((mitigation, index) => (
-                              <div
-                                key={`${mitigation.source_ref || "mitigation"}-${index}`}
-                                className="border border-white/10 bg-black/20 p-4"
-                              >
-                                <p className="text-[9px] font-semibold uppercase tracking-wider text-red-400">
-                                  Mitigation {index + 1}
-                                </p>
-
-                                <p className="mt-2 text-[10px] leading-5 text-gray-400">
-                                  {mitigation.description ||
-                                    "No mitigation description available."}
-                                </p>
-
-                                <p className="mt-3 break-all text-[9px] text-gray-700">
-                                  {mitigation.source_ref || "—"}
-                                </p>
-                              </div>
-                            ))
-                          ) : (
-                            <div className="border border-white/10 p-4 text-[10px] text-gray-600">
-                              No mitigation relationships available.
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </div>
-              )}
-            </>
-          )}
         </div>
       )}
 
@@ -12803,223 +16465,9 @@ function MitreAttack() {
         </div>
       )}
 
-      {activeSection === "evidence" && (
-        <div className="space-y-5">
-          <div className="border border-white/10 bg-[#0d0d0d] p-8">
-            <p className="text-[10px] uppercase tracking-wider text-red-400">
-              Evidence
-            </p>
 
-            <h2 className="mt-3 text-xl font-bold uppercase tracking-wider text-white">
-              MITRE ATT&CK Evidence
-            </h2>
 
-            {!selectedMitreTechnique ? (
-              <p className="mt-4 text-xs leading-5 text-gray-500">
-                Select a MITRE ATT&CK technique from the Techniques section to
-                view its documented evidence context.
-              </p>
-            ) : (
-              <>
-                <div className="mt-5 grid gap-3 sm:grid-cols-3">
-                  <div className="border border-white/10 bg-black/20 p-4">
-                    <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                      Technique
-                    </p>
-                    <p className="mt-2 text-xs font-semibold text-red-400">
-                      {selectedMitreTechnique.id}
-                    </p>
-                    <p className="mt-1 text-xs text-white">
-                      {selectedMitreTechnique.name}
-                    </p>
-                  </div>
 
-                  <div className="border border-white/10 bg-black/20 p-4">
-                    <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                      Tactic
-                    </p>
-                    <p className="mt-2 text-xs font-semibold text-white">
-                      {Array.isArray(selectedMitreTechnique.tactics) &&
-                      selectedMitreTechnique.tactics.length > 0
-                        ? selectedMitreTechnique.tactics.join(", ")
-                        : "—"}
-                    </p>
-                  </div>
-
-                  <div className="border border-white/10 bg-black/20 p-4">
-                    <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                      Evidence Sources
-                    </p>
-                    <p className="mt-2 text-xs font-semibold text-white">
-                      {(Array.isArray(selectedMitreTechnique.procedures)
-                        ? selectedMitreTechnique.procedures.length
-                        : 0) +
-                        (Array.isArray(selectedMitreTechnique.detections)
-                          ? selectedMitreTechnique.detections.length
-                          : 0)}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="mt-6 border-t border-white/10 pt-5">
-                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                    Documented Procedure Examples
-                  </p>
-
-                  <div className="mt-4 space-y-3">
-                    {Array.isArray(selectedMitreTechnique.procedures) &&
-                    selectedMitreTechnique.procedures.length > 0 ? (
-                      selectedMitreTechnique.procedures.map(
-                        (procedure, index) => (
-                          <div
-                            key={`${procedure.source_ref || "procedure"}-${index}`}
-                            className="border border-white/10 bg-black/20 p-4"
-                          >
-                            <div className="flex items-start gap-3">
-                              <span className="text-[9px] font-bold text-red-500">
-                                {String(index + 1).padStart(3, "0")}
-                              </span>
-
-                              <div className="min-w-0">
-                                <p className="text-xs leading-5 text-gray-300">
-                                  {procedure.description ||
-                                    "No procedure description available."}
-                                </p>
-
-                                {procedure.source_ref && (
-                                  <p className="mt-3 break-all text-[9px] text-gray-700">
-                                    Source: {procedure.source_ref}
-                                  </p>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        )
-                      )
-                    ) : (
-                      <div className="border border-white/10 p-4 text-[10px] text-gray-600">
-                        No documented procedure examples are available for
-                        this technique in the connected MITRE dataset.
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="mt-6 border-t border-white/10 pt-5">
-                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                    Detection Relationships
-                  </p>
-
-                  <div className="mt-4 space-y-3">
-                    {Array.isArray(selectedMitreTechnique.detections) &&
-                    selectedMitreTechnique.detections.length > 0 ? (
-                      selectedMitreTechnique.detections.map(
-                        (detection, index) => (
-                          <div
-                            key={`${detection.source_ref || "detection"}-${index}`}
-                            className="border border-white/10 bg-black/20 p-4"
-                          >
-                            <p className="text-[9px] font-semibold uppercase tracking-wider text-red-400">
-                              Detection Strategy {index + 1}
-                            </p>
-
-                            <p className="mt-2 text-xs leading-5 text-gray-300">
-                              {detection.description ||
-                                "Detection relationship available."}
-                            </p>
-
-                            {detection.source_ref && (
-                              <p className="mt-3 break-all text-[9px] text-gray-700">
-                                Source: {detection.source_ref}
-                              </p>
-                            )}
-                          </div>
-                        )
-                      )
-                    ) : (
-                      <div className="border border-white/10 p-4 text-[10px] text-gray-600">
-                        No detection relationships are available for this
-                        technique in the connected MITRE dataset.
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
-      {activeSection === "remediation" && (
-        <div className="space-y-5">
-          <div className="border border-white/10 bg-[#0d0d0d] p-8">
-            <p className="text-[10px] uppercase tracking-wider text-red-400">
-              Remediation
-            </p>
-
-            <h2 className="mt-3 text-xl font-bold uppercase tracking-wider text-white">
-              MITRE ATT&CK Remediation
-            </h2>
-
-            {!selectedMitreTechnique ? (
-              <p className="mt-4 text-xs leading-5 text-gray-500">
-                Select a MITRE ATT&CK technique from the Techniques section to
-                view its remediation guidance.
-              </p>
-            ) : (
-              <>
-                <div className="mt-5 border border-white/10 bg-black/20 p-4">
-                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                    Selected Technique
-                  </p>
-                  <p className="mt-2 text-xs font-semibold text-red-400">
-                    {selectedMitreTechnique.id}
-                  </p>
-                  <p className="mt-1 text-sm text-white">
-                    {selectedMitreTechnique.name}
-                  </p>
-                </div>
-
-                <div className="mt-6 space-y-3">
-                  {Array.isArray(selectedMitreTechnique.mitigations) &&
-                  selectedMitreTechnique.mitigations.length > 0 ? (
-                    selectedMitreTechnique.mitigations.map(
-                      (mitigation, index) => (
-                        <div
-                          key={`${mitigation.source_ref || "mitigation"}-${index}`}
-                          className="border border-white/10 bg-black/20 p-5"
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <p className="text-[9px] font-semibold uppercase tracking-wider text-red-400">
-                              Mitigation {index + 1}
-                            </p>
-
-                            {mitigation.source_ref && (
-                              <span className="break-all text-[9px] text-gray-700">
-                                {mitigation.source_ref}
-                              </span>
-                            )}
-                          </div>
-
-                          <p className="mt-3 text-xs leading-6 text-gray-300">
-                            {mitigation.description ||
-                              "No mitigation description available."}
-                          </p>
-                        </div>
-                      )
-                    )
-                  ) : (
-                    <div className="border border-white/10 p-4 text-[10px] text-gray-600">
-                      No mitigation relationships are available for this
-                      technique in the connected MITRE dataset.
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -24798,11 +28246,331 @@ function TelegramConnection() {
 }
 
 // ==================================================
+// CVE DATABASE
+// ==================================================
+function CVEDatabase({
+  title = "CVE Database",
+  sectionLabel = "Vulnerability Management",
+} = {}) {
+  const [cveId, setCveId] = useState("");
+  const [cve, setCve] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const lookupCVE = async (event) => {
+    event?.preventDefault();
+
+    const normalized = cveId.trim().toUpperCase();
+
+    if (!/^CVE-\d{4}-\d{4,}$/.test(normalized)) {
+      setError("Enter a valid CVE ID, for example CVE-2021-44228.");
+      setCve(null);
+      return;
+    }
+
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      setError("Authentication token not found. Please log in again.");
+      setCve(null);
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+    setCve(null);
+
+    try {
+      const response = await axios.get(
+        `${API_URL}/cve/${encodeURIComponent(normalized)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setCve(response.data);
+    } catch (err) {
+      const detail =
+        err?.response?.data?.detail ||
+        "Unable to retrieve CVE information from NVD.";
+      setError(detail);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const severityClass = (severity) => {
+    const value = String(severity || "").toUpperCase();
+
+    if (value === "CRITICAL") return "text-red-400";
+    if (value === "HIGH") return "text-orange-400";
+    if (value === "MEDIUM") return "text-yellow-400";
+    if (value === "LOW") return "text-green-400";
+
+    return "text-gray-400";
+  };
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <p className="text-[10px] uppercase tracking-[0.25em] text-red-400">
+          {sectionLabel}
+        </p>
+        <h1 className="mt-2 text-2xl font-semibold text-white">
+          {title}
+        </h1>
+        <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-500">
+          Search the National Vulnerability Database for real-time CVE
+          intelligence, including CVSS, CWE, affected products and references.
+        </p>
+      </div>
+
+      <form
+        onSubmit={lookupCVE}
+        className="border border-white/10 bg-black/20 p-5"
+      >
+        <div className="flex flex-col gap-3 md:flex-row">
+          <input
+            type="text"
+            value={cveId}
+            onChange={(event) => setCveId(event.target.value)}
+            placeholder="CVE-2021-44228"
+            className="min-w-0 flex-1 border border-white/10 bg-black/40 px-4 py-3 text-sm text-white outline-none transition placeholder:text-gray-700 focus:border-red-500/50"
+          />
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="border border-red-600/40 bg-red-600/10 px-6 py-3 text-xs font-semibold uppercase tracking-wider text-red-300 transition hover:bg-red-600/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {loading ? "Searching NVD..." : "Search CVE"}
+          </button>
+        </div>
+
+        {error && (
+          <div className="mt-4 border border-red-500/20 bg-red-500/5 px-4 py-3 text-xs text-red-300">
+            {error}
+          </div>
+        )}
+      </form>
+
+      {!cve && !loading && !error && (
+        <div className="border border-white/10 bg-black/20 p-10 text-center">
+          <p className="text-sm text-gray-400">
+            Enter a CVE identifier to retrieve vulnerability intelligence.
+          </p>
+          <p className="mt-2 text-xs text-gray-600">
+            Data source: National Vulnerability Database (NVD)
+          </p>
+        </div>
+      )}
+
+      {loading && (
+        <div className="border border-white/10 bg-black/20 p-10 text-center">
+          <p className="text-sm text-gray-400">
+            Querying the NVD API...
+          </p>
+        </div>
+      )}
+
+      {cve && (
+        <div className="space-y-5">
+          <div className="border border-white/10 bg-black/20 p-5">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-red-400">
+                  CVE Identifier
+                </p>
+                <h2 className="mt-2 text-xl font-semibold text-white">
+                  {cve.cve_id}
+                </h2>
+              </div>
+
+              <div className="flex flex-wrap gap-3">
+                <div className="border border-white/10 bg-black/20 px-4 py-3">
+                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                    CVSS
+                  </p>
+                  <p className="mt-1 text-lg font-semibold text-white">
+                    {cve.cvss?.score ?? "—"}
+                  </p>
+                </div>
+
+                <div className="border border-white/10 bg-black/20 px-4 py-3">
+                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                    Severity
+                  </p>
+                  <p
+                    className={`mt-1 text-sm font-semibold ${severityClass(
+                      cve.cvss?.severity
+                    )}`}
+                  >
+                    {cve.cvss?.severity || "—"}
+                  </p>
+                </div>
+
+                <div className="border border-white/10 bg-black/20 px-4 py-3">
+                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                    Version
+                  </p>
+                  <p className="mt-1 text-sm font-semibold text-white">
+                    {cve.cvss?.version || "—"}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="border border-white/10 bg-black/20 p-5">
+            <p className="text-[10px] uppercase tracking-wider text-red-400">
+              Description
+            </p>
+            <p className="mt-3 text-sm leading-7 text-gray-300">
+              {cve.description || "No English description was returned by NVD."}
+            </p>
+          </div>
+
+          <div className="grid gap-5 lg:grid-cols-2">
+            <div className="border border-white/10 bg-black/20 p-5">
+              <p className="text-[10px] uppercase tracking-wider text-red-400">
+                CVSS Details
+              </p>
+
+              <div className="mt-4 space-y-3">
+                <div>
+                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                    Vector
+                  </p>
+                  <p className="mt-1 break-all text-xs text-gray-300">
+                    {cve.cvss?.vector || "—"}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                    CWE
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {(Array.isArray(cve.cwe) ? cve.cwe : []).map((cwe) => (
+                      <span
+                        key={cwe}
+                        className="border border-white/10 bg-black/30 px-2 py-1 text-[10px] text-gray-300"
+                      >
+                        {cwe}
+                      </span>
+                    ))}
+                    {(!Array.isArray(cve.cwe) || cve.cwe.length === 0) && (
+                      <span className="text-xs text-gray-600">
+                        No CWE mapping returned.
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="border border-white/10 bg-black/20 p-5">
+              <p className="text-[10px] uppercase tracking-wider text-red-400">
+                Timeline & Source
+              </p>
+
+              <div className="mt-4 space-y-3">
+                <div>
+                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                    Published
+                  </p>
+                  <p className="mt-1 text-xs text-gray-300">
+                    {cve.published || "—"}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                    Last Modified
+                  </p>
+                  <p className="mt-1 text-xs text-gray-300">
+                    {cve.last_modified || "—"}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-[9px] uppercase tracking-wider text-gray-600">
+                    Source
+                  </p>
+                  <p className="mt-1 text-xs font-semibold text-white">
+                    {cve.source || "NVD"}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="border border-white/10 bg-black/20 p-5">
+            <p className="text-[10px] uppercase tracking-wider text-red-400">
+              Affected Products
+            </p>
+
+            {Array.isArray(cve.affected_products) &&
+            cve.affected_products.length > 0 ? (
+              <div className="mt-4 max-h-72 space-y-2 overflow-y-auto">
+                {cve.affected_products.map((product, index) => (
+                  <div
+                    key={`${product}-${index}`}
+                    className="break-all border border-white/5 bg-black/20 px-3 py-2 text-[10px] leading-5 text-gray-400"
+                  >
+                    {product}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-3 text-xs text-gray-600">
+                No affected product information was returned by NVD.
+              </p>
+            )}
+          </div>
+
+          <div className="border border-white/10 bg-black/20 p-5">
+            <p className="text-[10px] uppercase tracking-wider text-red-400">
+              References
+            </p>
+
+            {Array.isArray(cve.references) && cve.references.length > 0 ? (
+              <div className="mt-4 space-y-2">
+                {cve.references.map((reference, index) => (
+                  <a
+                    key={`${reference}-${index}`}
+                    href={reference}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block break-all text-xs leading-5 text-blue-400 underline underline-offset-4"
+                  >
+                    {reference} ↗
+                  </a>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-3 text-xs text-gray-600">
+                No references were returned by NVD.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ==================================================
 // SECURITY FINDINGS
 // ==================================================
 function SecurityFindings() {
   const [findings, setFindings] = useState([]);
   const [stats, setStats] = useState(null);
+  const [severityAnalytics, setSeverityAnalytics] = useState(null);
+  const [toolAnalytics, setToolAnalytics] = useState(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(true);
 
   const [loading, setLoading] = useState(true);
   const [statsLoading, setStatsLoading] = useState(true);
@@ -24960,6 +28728,37 @@ function SecurityFindings() {
   };
 
   // ========================================================
+  // LOAD VULNERABILITY ANALYTICS
+  // ========================================================
+
+  const loadVulnerabilityAnalytics = async () => {
+    try {
+      setAnalyticsLoading(true);
+
+      const [severityResponse, toolResponse] = await Promise.all([
+        axios.get(
+          `${API_URL}/security-findings/stats/by-severity`,
+          getConfig()
+        ),
+        axios.get(
+          `${API_URL}/security-findings/stats/by-tool`,
+          getConfig()
+        ),
+      ]);
+
+      setSeverityAnalytics(severityResponse.data);
+      setToolAnalytics(toolResponse.data);
+    } catch (err) {
+      console.error(
+        "Vulnerability analytics load error:",
+        err
+      );
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  };
+
+  // ========================================================
   // INITIAL LOAD
   // ========================================================
 
@@ -24968,6 +28767,7 @@ function SecurityFindings() {
       await Promise.all([
         loadFindings(),
         loadStats(),
+        loadVulnerabilityAnalytics(),
       ]);
     };
 
@@ -25360,6 +29160,100 @@ function SecurityFindings() {
           }
           subtitle="CVSS score"
         />
+      </div>
+
+      {/* ==================================================
+          VULNERABILITY ANALYTICS
+      ================================================== */}
+
+      <div className="mt-8 grid gap-6 xl:grid-cols-2">
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <div className="mb-5">
+            <p className="text-xs uppercase tracking-[0.2em] text-gray-500">
+              Findings by Severity
+            </p>
+            <p className="mt-1 text-sm text-gray-600">
+              Persisted security findings grouped by severity.
+            </p>
+          </div>
+
+          {analyticsLoading ? (
+            <p className="text-sm text-gray-500">
+              Loading severity analytics...
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {(severityAnalytics?.severities || []).map((item) => (
+                <div
+                  key={item.severity}
+                  className="flex items-center justify-between border-b border-white/5 pb-3"
+                >
+                  <span className="text-sm text-gray-400">
+                    {item.severity}
+                  </span>
+                  <span className="text-sm font-semibold text-white">
+                    {item.findings}
+                  </span>
+                </div>
+              ))}
+
+              <div className="flex items-center justify-between pt-2">
+                <span className="text-xs uppercase tracking-wider text-gray-600">
+                  Total
+                </span>
+                <span className="text-sm font-bold text-red-400">
+                  {severityAnalytics?.total_findings ?? 0}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <div className="mb-5">
+            <p className="text-xs uppercase tracking-[0.2em] text-gray-500">
+              Findings by Security Tool
+            </p>
+            <p className="mt-1 text-sm text-gray-600">
+              Persisted findings grouped by the tool that discovered them.
+            </p>
+          </div>
+
+          {analyticsLoading ? (
+            <p className="text-sm text-gray-500">
+              Loading tool analytics...
+            </p>
+          ) : toolAnalytics?.tools?.length ? (
+            <div className="space-y-3">
+              {toolAnalytics.tools.map((item) => (
+                <div
+                  key={item.tool}
+                  className="flex items-center justify-between border-b border-white/5 pb-3"
+                >
+                  <span className="text-sm text-gray-400">
+                    {item.tool}
+                  </span>
+                  <span className="text-sm font-semibold text-white">
+                    {item.findings}
+                  </span>
+                </div>
+              ))}
+
+              <div className="flex items-center justify-between pt-2">
+                <span className="text-xs uppercase tracking-wider text-gray-600">
+                  Total
+                </span>
+                <span className="text-sm font-bold text-red-400">
+                  {toolAnalytics.total_findings ?? 0}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-gray-600">
+              No tool findings available.
+            </p>
+          )}
+        </div>
       </div>
 
       {/* ==================================================
@@ -26328,53 +30222,99 @@ function AuditTrail() {
 // SERVER CONFIGURATION
 // ==================================================
 function ServerConfiguration() {
-  const [configuration, setConfiguration] = useState(null);
+  const [configurations, setConfigurations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const loadConfiguration = async () => {
+  const loadConfigurations = async () => {
     try {
       setLoading(true);
       setError("");
 
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Your session has expired. Please login again.");
+      }
+
       const response = await axios.get(
-        `${API_URL}/server/configuration`
+        `${API_URL}/client/server-configuration`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
       );
 
-      setConfiguration(response.data);
+      setConfigurations(
+        Array.isArray(response.data?.configurations)
+          ? response.data.configurations
+          : []
+      );
     } catch (err) {
       console.error("Server configuration error:", err);
 
-      if (err.response?.data?.detail) {
-        setError(err.response.data.detail);
-      } else {
-        setError(
-          "Unable to load server configuration."
-        );
-      }
+      setError(
+        err.response?.data?.detail ||
+        err.message ||
+        "Unable to load server configuration."
+      );
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadConfiguration();
+    loadConfigurations();
 
-    const interval = setInterval(() => {
-      loadConfiguration();
-    }, 5000);
+    const interval = setInterval(loadConfigurations, 15000);
 
     return () => clearInterval(interval);
   }, []);
 
-  const cpu = configuration?.cpu_usage_percent ?? 0;
-  const memory = configuration?.memory_usage_percent ?? 0;
-  const disk = configuration?.disk_usage_percent ?? 0;
+  const onlineCount = configurations.filter(
+    (configuration) =>
+      ["online", "up", "alive"].includes(
+        String(configuration.endpoint_status || "").toLowerCase()
+      )
+  ).length;
 
-  const usageClass = (value) => {
-    if (value >= 90) return "text-red-500";
-    if (value >= 75) return "text-yellow-500";
-    return "text-green-500";
+  const averageDiskUsage = configurations.length
+    ? configurations.reduce(
+        (total, configuration) =>
+          total + Number(configuration.disk_usage_percent || 0),
+        0
+      ) / configurations.length
+    : 0;
+
+  const averageMemory = configurations.length
+    ? configurations.reduce(
+        (total, configuration) =>
+          total + Number(configuration.memory_total_gb || 0),
+        0
+      ) / configurations.length
+    : 0;
+
+  const getStatusLabel = (status) => {
+    const normalized = String(status || "").toLowerCase();
+
+    if (["online", "up", "alive"].includes(normalized)) return "ONLINE";
+    if (["offline", "down", "dead"].includes(normalized)) return "OFFLINE";
+    return "UNKNOWN";
+  };
+
+  const getStatusClass = (status) => {
+    const normalized = String(status || "").toLowerCase();
+
+    if (["online", "up", "alive"].includes(normalized)) {
+      return "text-green-500";
+    }
+
+    if (["offline", "down", "dead"].includes(normalized)) {
+      return "text-red-500";
+    }
+
+    return "text-yellow-500";
   };
 
   return (
@@ -26382,7 +30322,7 @@ function ServerConfiguration() {
       <div className="flex flex-col justify-between gap-5 md:flex-row md:items-end">
         <div>
           <p className="text-xs uppercase tracking-[0.3em] text-red-500">
-            Security Workspace
+            Server Security
           </p>
 
           <h1 className="mt-2 text-3xl font-bold">
@@ -26390,30 +30330,18 @@ function ServerConfiguration() {
           </h1>
 
           <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-500">
-            View the server configuration currently exposed to the SOC
-            Platform backend.
+            View persisted configuration and security-relevant properties
+            reported directly by registered endpoints.
           </p>
         </div>
 
         <button
-          onClick={loadConfiguration}
+          onClick={loadConfigurations}
           disabled={loading}
           className="border border-white/10 px-5 py-3 text-xs text-gray-400 transition hover:border-red-600 hover:text-white disabled:opacity-50"
         >
           {loading ? "Refreshing..." : "Refresh Configuration"}
         </button>
-      </div>
-
-      <div className="mt-6 border border-yellow-600/20 bg-yellow-600/5 px-5 py-4">
-        <p className="text-xs uppercase tracking-wider text-yellow-500">
-          VPS Connection Status
-        </p>
-
-        <p className="mt-1 text-sm leading-6 text-gray-500">
-          Live VPS metrics are not connected yet. The values below describe
-          the machine running the SOC Platform backend, not the remote VPS
-          hosting the customer website.
-        </p>
       </div>
 
       {error && (
@@ -26424,127 +30352,175 @@ function ServerConfiguration() {
 
       <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <AdminStat
-          title="Server Status"
-          value={loading ? "—" : configuration?.server_status || "—"}
-          subtitle="Backend host status"
+          title="Endpoints"
+          value={loading ? "—" : configurations.length}
+          subtitle="With configuration telemetry"
+        />
+
+        <AdminStat
+          title="Online"
+          value={loading ? "—" : onlineCount}
+          subtitle="Current endpoint status"
           status
         />
 
         <AdminStat
-          title="CPU Usage"
-          value={loading ? "—" : `${cpu}%`}
-          subtitle="Current CPU utilization"
+          title="Avg Disk Usage"
+          value={loading ? "—" : `${averageDiskUsage.toFixed(1)}%`}
+          subtitle="Across reported endpoints"
         />
 
         <AdminStat
-          title="Memory Usage"
-          value={loading ? "—" : `${memory}%`}
-          subtitle="Current RAM utilization"
-        />
-
-        <AdminStat
-          title="Disk Usage"
-          value={loading ? "—" : `${disk}%`}
-          subtitle="Root filesystem utilization"
+          title="Avg Memory"
+          value={loading ? "—" : `${averageMemory.toFixed(2)} GB`}
+          subtitle="Installed physical memory"
         />
       </div>
 
-      <div className="mt-8 grid gap-6 xl:grid-cols-2">
-        <div className="border border-white/10 bg-[#0d0d0d]">
-          <div className="border-b border-white/10 px-6 py-5">
-            <p className="text-sm font-semibold">
-              System Information
-            </p>
-          </div>
+      <div className="mt-8 border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-6 py-5">
+          <p className="text-sm font-semibold">
+            Endpoint Server Configuration
+          </p>
 
-          <div className="grid gap-5 p-6 md:grid-cols-2">
-            {[
-              ["Hostname", configuration?.hostname],
-              ["IP Address", configuration?.ip_address],
-              ["Operating System", configuration?.operating_system],
-              ["OS Version", configuration?.os_version],
-              ["Architecture", configuration?.architecture],
-              ["Processor", configuration?.processor],
-              ["Server Uptime", configuration?.uptime],
-              [
-                "Last Checked",
-                configuration?.last_checked
-                  ? new Date(configuration.last_checked).toLocaleString()
-                  : null,
-              ],
-            ].map(([label, value]) => (
-              <div key={label}>
-                <p className="text-[10px] uppercase tracking-wider text-gray-600">
-                  {label}
-                </p>
-
-                <p className="mt-2 text-sm text-gray-300 break-all">
-                  {loading ? "—" : value || "Unknown"}
-                </p>
-              </div>
-            ))}
-          </div>
+          <p className="mt-1 text-xs text-gray-600">
+            Persisted configuration snapshots collected from registered
+            endpoints. Automatically refreshed every 15 seconds.
+          </p>
         </div>
 
-        <div className="border border-white/10 bg-[#0d0d0d]">
-          <div className="border-b border-white/10 px-6 py-5">
-            <p className="text-sm font-semibold">
-              Resource Utilization
+        {loading && configurations.length === 0 ? (
+          <div className="px-6 py-12 text-center text-sm text-gray-600">
+            Loading server configuration...
+          </div>
+        ) : configurations.length === 0 ? (
+          <div className="px-6 py-12 text-center">
+            <p className="text-sm text-gray-400">
+              No server configuration telemetry has been received yet.
             </p>
-
-            <p className="mt-1 text-xs text-gray-600">
-              Automatically refreshed every 5 seconds.
+            <p className="mt-2 text-xs text-gray-600">
+              Register an endpoint and run the Server Configuration collector
+              to populate this view.
             </p>
           </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1500px] text-left">
+              <thead>
+                <tr className="border-b border-white/10 text-[10px] uppercase tracking-wider text-gray-600">
+                  <th className="px-6 py-4">Endpoint</th>
+                  <th className="px-6 py-4">Status</th>
+                  <th className="px-6 py-4">Operating System</th>
+                  <th className="px-6 py-4">Processor</th>
+                  <th className="px-6 py-4">Memory</th>
+                  <th className="px-6 py-4">Disk</th>
+                  <th className="px-6 py-4">Uptime</th>
+                  <th className="px-6 py-4">Environment</th>
+                  <th className="px-6 py-4">Power Plan</th>
+                  <th className="px-6 py-4">Last Seen</th>
+                </tr>
+              </thead>
 
-          <div className="space-y-7 p-6">
-            {[
-              ["CPU", cpu],
-              ["Memory", memory],
-              ["Disk", disk],
-            ].map(([label, value]) => (
-              <div key={label}>
-                <div className="flex items-center justify-between">
-                  <span className="text-xs uppercase tracking-wider text-gray-500">
-                    {label}
-                  </span>
+              <tbody>
+                {configurations.map((configuration) => (
+                  <tr
+                    key={configuration.id}
+                    className="border-b border-white/5 transition hover:bg-white/[0.02]"
+                  >
+                    <td className="px-6 py-5">
+                      <p className="text-sm font-medium text-gray-200">
+                        {configuration.hostname || "Unknown"}
+                      </p>
 
-                  <span className={`text-sm font-semibold ${usageClass(value)}`}>
-                    {loading ? "—" : `${value}%`}
-                  </span>
-                </div>
+                      <p className="mt-1 text-xs text-gray-600 break-all">
+                        {configuration.ip_address ||
+                          configuration.endpoint_id ||
+                          "No address recorded"}
+                      </p>
+                    </td>
 
-                <div className="mt-3 h-2 bg-white/10">
-                  <div
-                    className="h-full bg-red-600 transition-all duration-500"
-                    style={{
-                      width: `${Math.min(Math.max(value, 0), 100)}%`,
-                    }}
-                  />
-                </div>
-              </div>
-            ))}
+                    <td className="px-6 py-5">
+                      <span
+                        className={`text-xs font-semibold ${getStatusClass(
+                          configuration.endpoint_status
+                        )}`}
+                      >
+                        {getStatusLabel(configuration.endpoint_status)}
+                      </span>
+                    </td>
+
+                    <td className="px-6 py-5">
+                      <p className="text-sm text-gray-300">
+                        {configuration.os_name || "Unknown"}
+                      </p>
+
+                      <p className="mt-1 text-xs text-gray-600">
+                        {configuration.os_version || "Version unknown"} ·{" "}
+                        {configuration.architecture || "Architecture unknown"}
+                      </p>
+                    </td>
+
+                    <td className="max-w-[260px] px-6 py-5">
+                      <p className="text-sm text-gray-400">
+                        {configuration.processor || "Unknown"}
+                      </p>
+                    </td>
+
+                    <td className="px-6 py-5">
+                      <p className="text-sm text-gray-300">
+                        {configuration.memory_total_gb != null
+                          ? `${Number(configuration.memory_total_gb).toFixed(2)} GB`
+                          : "Unknown"}
+                      </p>
+                    </td>
+
+                    <td className="px-6 py-5">
+                      <p className="text-sm text-gray-300">
+                        {configuration.disk_total_gb != null
+                          ? `${Number(configuration.disk_total_gb).toFixed(2)} GB`
+                          : "Unknown"}
+                      </p>
+
+                      <p className="mt-1 text-xs text-gray-600">
+                        {configuration.disk_free_gb != null
+                          ? `${Number(configuration.disk_free_gb).toFixed(2)} GB free`
+                          : "Free space unknown"}
+                        {" · "}
+                        {configuration.disk_usage_percent != null
+                          ? `${Number(configuration.disk_usage_percent).toFixed(1)}% used`
+                          : "Usage unknown"}
+                      </p>
+                    </td>
+
+                    <td className="px-6 py-5 text-sm text-gray-400">
+                      {configuration.uptime || "Unknown"}
+                    </td>
+
+                    <td className="px-6 py-5">
+                      <p className="text-sm text-gray-400">
+                        {configuration.domain_or_workgroup || "Unknown"}
+                      </p>
+
+                      <p className="mt-1 text-xs text-gray-600">
+                        {configuration.timezone || "Timezone unknown"}
+                      </p>
+                    </td>
+
+                    <td className="max-w-[300px] px-6 py-5 text-xs text-gray-500">
+                      {configuration.power_plan || "Unknown"}
+                    </td>
+
+                    <td className="px-6 py-5 text-xs text-gray-500">
+                      {configuration.last_seen
+                        ? new Date(`${configuration.last_seen}Z`).toLocaleString()
+                        : "Unknown"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        </div>
-      </div>
-
-      <div className="mt-6 border border-white/10 bg-[#0d0d0d] p-6">
-        <p className="text-xs uppercase tracking-[0.2em] text-red-500">
-          VPS Integration
-        </p>
-
-        <p className="mt-2 text-sm leading-6 text-gray-500">
-          To display the actual website-hosting VPS CPU, memory, disk,
-          processes and network metrics, an authorized VPS monitoring agent
-          or authenticated server connection must be configured.
-        </p>
-
-        <div className="mt-5 flex items-center gap-3 text-xs">
-          <span className="h-2 w-2 rounded-full bg-yellow-500" />
-          <span className="text-yellow-500">
-            VPS agent not connected
-          </span>
-        </div>
+        )}
       </div>
     </div>
   );
@@ -26555,6 +30531,474 @@ function ServerConfiguration() {
 // ==================================================
 // SECURITY COPILOT
 // ==================================================
+
+// ==================================================
+// REMEDIATION
+// ==================================================
+function Remediation() {
+  const [issues, setIssues] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [selectedIssue, setSelectedIssue] = useState(null);
+  const [updateStatus, setUpdateStatus] = useState("");
+  const [updateResolution, setUpdateResolution] = useState("");
+  const [updatingIssue, setUpdatingIssue] = useState(false);
+  const [updateError, setUpdateError] = useState("");
+
+  const loadRemediation = async () => {
+    try {
+      setLoading(true);
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error(
+          "Your session has expired. Please login again."
+        );
+      }
+
+      const response = await axios.get(
+        `${API_URL}/client/remediation`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setIssues(
+        Array.isArray(response.data?.issues)
+          ? response.data.issues
+          : []
+      );
+    } catch (err) {
+      console.error(
+        "Remediation load error:",
+        err
+      );
+
+      if (err.response?.status === 401) {
+        setError(
+          "Your session has expired. Please login again."
+        );
+      } else {
+        setError(
+          err.response?.data?.detail ||
+          err.message ||
+          "Unable to load remediation issues."
+        );
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateRemediation = async () => {
+    if (!selectedIssue?.issue_id) return;
+
+    try {
+      setUpdatingIssue(true);
+      setUpdateError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error(
+          "Your session has expired. Please login again."
+        );
+      }
+
+      await axios.put(
+        `${API_URL}/client/remediation/${encodeURIComponent(selectedIssue.issue_id)}`,
+        {
+          status: updateStatus,
+          resolution: updateResolution.trim() || null,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      await loadRemediation();
+
+      const refreshed = await axios.get(
+        `${API_URL}/client/remediation`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      const refreshedIssue = (
+        Array.isArray(refreshed.data?.issues)
+          ? refreshed.data.issues
+          : []
+      ).find(
+        (issue) => issue.issue_id === selectedIssue.issue_id
+      );
+
+      setSelectedIssue(refreshedIssue || null);
+      setUpdateStatus(refreshedIssue?.status || "");
+      setUpdateResolution(refreshedIssue?.resolution || "");
+    } catch (err) {
+      console.error(
+        "Remediation update error:",
+        err
+      );
+
+      setUpdateError(
+        err.response?.data?.detail ||
+        err.message ||
+        "Unable to update remediation issue."
+      );
+    } finally {
+      setUpdatingIssue(false);
+    }
+  };
+
+  useEffect(() => {
+    loadRemediation();
+  }, []);
+
+  const countByStatus = (status) =>
+    issues.filter(
+      (issue) =>
+        String(issue.status || "").toUpperCase() === status
+    ).length;
+
+  const countBySeverity = (severity) =>
+    issues.filter(
+      (issue) =>
+        String(issue.severity || "").toUpperCase() === severity
+    ).length;
+
+  const severityClass = (severity) => {
+    const value = String(severity || "").toUpperCase();
+
+    if (value === "CRITICAL") return "text-red-400";
+    if (value === "HIGH") return "text-orange-400";
+    if (value === "MEDIUM") return "text-yellow-400";
+    if (value === "LOW") return "text-green-400";
+
+    return "text-gray-400";
+  };
+
+  const statusClass = (status) => {
+    const value = String(status || "").toUpperCase();
+
+    if (value === "RESOLVED") return "text-green-400";
+    if (value === "IN_PROGRESS") return "text-yellow-400";
+    if (value === "ASSIGNED") return "text-blue-400";
+    if (value === "NOT_RESOLVED") return "text-red-400";
+    if (value === "TICKET_RAISED") return "text-orange-400";
+
+    return "text-gray-400";
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.25em] text-red-400">
+            Vulnerability Management
+          </p>
+          <h1 className="mt-2 text-2xl font-semibold text-white">
+            Remediation
+          </h1>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-500">
+            Track persisted vulnerability remediation issues, ownership,
+            severity and resolution status from your security assessments.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={loadRemediation}
+          disabled={loading}
+          className="border border-white/10 bg-black/30 px-4 py-2 text-xs font-medium uppercase tracking-wider text-gray-300 transition hover:border-red-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {loading ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
+        {[
+          ["Total", issues.length, "text-white"],
+          ["Open", countByStatus("OPEN"), "text-gray-300"],
+          ["Assigned", countByStatus("ASSIGNED"), "text-blue-400"],
+          ["In Progress", countByStatus("IN_PROGRESS"), "text-yellow-400"],
+          ["Resolved", countByStatus("RESOLVED"), "text-green-400"],
+          ["Critical", countBySeverity("CRITICAL"), "text-red-400"],
+        ].map(([label, value, className]) => (
+          <div
+            key={label}
+            className="border border-white/10 bg-black/20 p-4"
+          >
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              {label}
+            </p>
+            <p className={`mt-2 text-2xl font-semibold ${className}`}>
+              {value}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <div className="border border-white/10 bg-black/20 p-5">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-white">
+              Remediation Issues
+            </h2>
+            <p className="mt-1 text-xs text-gray-600">
+              {issues.length} persisted issue{issues.length === 1 ? "" : "s"}
+            </p>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="py-12 text-center text-sm text-gray-500">
+            Loading remediation data...
+          </div>
+        ) : issues.length === 0 ? (
+          <div className="py-12 text-center">
+            <p className="text-sm text-gray-400">
+              No remediation issues found.
+            </p>
+            <p className="mt-2 text-xs text-gray-600">
+              Issues created from your persisted reports will appear here.
+            </p>
+          </div>
+        ) : (
+          <div className="mt-5 overflow-x-auto">
+            <table className="w-full min-w-[900px] text-left">
+              <thead>
+                <tr className="border-b border-white/10 text-[10px] uppercase tracking-wider text-gray-600">
+                  <th className="px-3 py-3">Issue</th>
+                  <th className="px-3 py-3">Severity</th>
+                  <th className="px-3 py-3">Status</th>
+                  <th className="px-3 py-3">Assessment</th>
+                  <th className="px-3 py-3">Report</th>
+                  <th className="px-3 py-3">Updated</th>
+                  <th className="px-3 py-3">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {issues.map((issue) => (
+                  <tr
+                    key={issue.issue_id || issue.id}
+                    className="border-b border-white/5 text-xs text-gray-400"
+                  >
+                    <td className="px-3 py-4">
+                      <p className="max-w-[320px] font-medium text-gray-200">
+                        {issue.title || "Untitled issue"}
+                      </p>
+                      <p className="mt-1 text-[10px] text-gray-600">
+                        {issue.issue_id || "—"}
+                      </p>
+                    </td>
+
+                    <td className={`px-3 py-4 font-medium ${severityClass(issue.severity)}`}>
+                      {issue.severity || "—"}
+                    </td>
+
+                    <td className={`px-3 py-4 font-medium ${statusClass(issue.status)}`}>
+                      {String(issue.status || "—").replaceAll("_", " ")}
+                    </td>
+
+                    <td className="px-3 py-4">
+                      {issue.assessment_id ?? "—"}
+                    </td>
+
+                    <td className="px-3 py-4">
+                      {issue.report_id || "—"}
+                    </td>
+
+                    <td className="px-3 py-4">
+                      {issue.updated_at
+                        ? new Date(issue.updated_at).toLocaleString()
+                        : "—"}
+                    </td>
+
+                    <td className="px-3 py-4">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedIssue(issue);
+                          setUpdateStatus(issue.status || "OPEN");
+                          setUpdateResolution(issue.resolution || "");
+                          setUpdateError("");
+                        }}
+                        className="border border-white/10 px-3 py-1.5 text-[10px] uppercase tracking-wider text-gray-400 transition hover:border-red-500/40 hover:text-white"
+                      >
+                        View
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {selectedIssue && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+          <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto border border-white/10 bg-[#0a0a0a] p-6">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-red-400">
+                  {selectedIssue.issue_id || "Remediation Issue"}
+                </p>
+                <h2 className="mt-2 text-xl font-semibold text-white">
+                  {selectedIssue.title || "Untitled issue"}
+                </h2>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setSelectedIssue(null)}
+                className="text-gray-500 transition hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="mt-6 grid gap-4 md:grid-cols-3">
+              <div className="border border-white/10 p-4">
+                <p className="text-[10px] uppercase tracking-wider text-gray-600">
+                  Severity
+                </p>
+                <p className={`mt-2 text-sm font-semibold ${severityClass(selectedIssue.severity)}`}>
+                  {selectedIssue.severity || "—"}
+                </p>
+              </div>
+
+              <div className="border border-white/10 p-4">
+                <p className="text-[10px] uppercase tracking-wider text-gray-600">
+                  Status
+                </p>
+                <select
+                  value={updateStatus}
+                  onChange={(e) => {
+                    setUpdateStatus(e.target.value);
+                    setUpdateError("");
+                  }}
+                  className="mt-2 w-full border border-white/10 bg-black px-3 py-2 text-sm font-semibold text-white outline-none focus:border-red-500/50"
+                >
+                  <option value="OPEN">OPEN</option>
+                  <option value="IN_PROGRESS">IN PROGRESS</option>
+                  <option value="RESOLVED">RESOLVED</option>
+                  <option value="NOT_RESOLVED">NOT RESOLVED</option>
+                </select>
+                <p className={`mt-2 text-[10px] uppercase tracking-wider ${statusClass(updateStatus)}`}>
+                  Current: {String(updateStatus || "—").replaceAll("_", " ")}
+                </p>
+              </div>
+
+              <div className="border border-white/10 p-4">
+                <p className="text-[10px] uppercase tracking-wider text-gray-600">
+                  Assessment
+                </p>
+                <p className="mt-2 text-sm font-semibold text-white">
+                  {selectedIssue.assessment_id ?? "—"}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-6 space-y-5">
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-gray-600">
+                  Description
+                </p>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-gray-300">
+                  {selectedIssue.description || "No description provided."}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-gray-600">
+                  Resolution
+                </p>
+                <textarea
+                  value={updateResolution}
+                  onChange={(e) => {
+                    setUpdateResolution(e.target.value);
+                    setUpdateError("");
+                  }}
+                  rows={5}
+                  placeholder="Enter remediation or resolution details..."
+                  className="mt-2 w-full resize-y border border-white/10 bg-black px-3 py-3 text-sm leading-6 text-gray-300 outline-none placeholder:text-gray-700 focus:border-red-500/50"
+                />
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-gray-600">
+                    Assigned To
+                  </p>
+                  <p className="mt-2 text-sm text-gray-300">
+                    {selectedIssue.assigned_to_name || "Unassigned"}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-gray-600">
+                    Support Ticket
+                  </p>
+                  <p className="mt-2 text-sm text-gray-300">
+                    {selectedIssue.ticket_code || "No ticket"}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {updateError && (
+              <div className="mt-5 border border-red-500/20 bg-red-500/5 px-4 py-3 text-xs leading-5 text-red-400">
+                {updateError}
+              </div>
+            )}
+
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setSelectedIssue(null)}
+                disabled={updatingIssue}
+                className="border border-white/10 px-4 py-2 text-xs uppercase tracking-wider text-gray-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Close
+              </button>
+
+              <button
+                type="button"
+                onClick={updateRemediation}
+                disabled={
+                  updatingIssue ||
+                  !updateStatus ||
+                  (updateStatus === "RESOLVED" && !updateResolution.trim())
+                }
+                className="border border-red-500/40 bg-red-500/10 px-4 py-2 text-xs uppercase tracking-wider text-red-400 transition hover:border-red-500 hover:bg-red-500/20 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {updatingIssue ? "Saving..." : "Save Update"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SecurityCopilot({ username }) {
   const [messages, setMessages] = useState([
     {
@@ -26634,8 +31078,11 @@ function SecurityCopilot({ username }) {
       const detail = err.response?.data?.detail;
 
       setError(
-        detail ||
-          "Unable to connect to Security Copilot. Please check that the SOC Platform backend is running."
+        typeof detail === "string"
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item) => item.msg || "Invalid request").join("; ")
+            : "Unable to connect to Security Copilot. Please check that the SOC Platform backend is running."
       );
 
       setMessages((prev) => [
@@ -26696,6 +31143,7 @@ function SecurityCopilot({ username }) {
         <button
           type="button"
           onClick={clearChat}
+          disabled={sending}
           className="border border-white/10 px-5 py-3 text-xs text-gray-400 transition hover:border-red-600 hover:text-white"
         >
           Clear Chat
@@ -26706,7 +31154,7 @@ function SecurityCopilot({ username }) {
       <div className="mt-6 border border-red-600/20 bg-red-600/5 px-5 py-4">
         <div className="flex items-start gap-3">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center bg-red-600/10 text-sm font-semibold text-red-500">
-            AI
+            SOC
           </div>
 
           <div>
@@ -26716,7 +31164,9 @@ function SecurityCopilot({ username }) {
 
             <p className="mt-1 text-xs leading-5 text-gray-500">
               Questions about your SOC data are answered using records
-              associated with your authenticated account.
+              associated with your authenticated account. Responses use
+              predefined rules and stored records. Each question is handled
+              independently; the conversation is kept only in this page.
             </p>
           </div>
         </div>
@@ -26867,7 +31317,7 @@ function SecurityCopilot({ username }) {
             <CopilotContextCard
               label="Reports"
               value={context?.total_reports ?? "—"}
-              detail="Generated reports"
+              detail="Stored VAPT report runs"
             />
 
             <CopilotContextCard
@@ -26922,8 +31372,86 @@ function CopilotContextCard({ label, value, detail }) {
 // ==================================================
 // INCIDENT MANAGEMENT
 // ==================================================
-function IncidentManagement() {
+function IncidentManagement({ view = "incidents" }) {
   const [incidents, setIncidents] = useState([]);
+  const requestSequence = useIncidentRequestRef(0);
+  const paginated = !["incidents-sla", "incidents-playbooks"].includes(view);
+  const [serverSummary, setServerSummary] = useState(null);
+  const [pageInfo, setPageInfo] = useState({ total: 0, next: null });
+  const [pageSelection, setPageSelection] = useState({ key: "", offset: 0 });
+  const [incidentSearch, setIncidentSearch] = useState("");
+  const [incidentSeverity, setIncidentSeverity] = useState("ALL");
+  const [incidentStatus, setIncidentStatus] = useState("ALL");
+
+  const filterKey = JSON.stringify([
+    view, incidentSearch.trim(), incidentSeverity, incidentStatus
+  ]);
+  const pageOffset = pageSelection.key === filterKey ? pageSelection.offset : 0;
+  const incidentPageSize = 25;
+  const summaryCounts = (paginated && serverSummary) || {
+    Total: incidents.length,
+    Active: incidents.filter(item =>
+      !["RESOLVED", "CLOSED"].includes(
+        String(item.status || "").toUpperCase()
+      )
+    ).length,
+    Critical: incidents.filter(item =>
+      String(item.severity || "").toUpperCase() === "CRITICAL"
+    ).length,
+    Closed: incidents.filter(item =>
+      String(item.status || "").toUpperCase() === "CLOSED"
+    ).length,
+  };
+  const availableStatuses = [...new Set(incidents.map(item =>
+    String(item.status || "OPEN").toUpperCase()
+  ))].sort();
+
+  const pageTitle = {
+    "incidents": "Incident Management",
+    "incidents-active": "Active Incidents",
+    "incidents-critical": "Critical Incidents",
+    "incidents-closed": "Closed Incidents",
+    "incidents-investigation": "Investigation",
+    "incidents-cases": "Case Management",
+    "incidents-assignments": "Assignments",
+    "incidents-evidence": "Evidence",
+    "incidents-timeline": "Incident Timeline",
+  }[view] || "Incident Management";
+
+  const visibleIncidents = incidents.filter((incident) => {
+    if (paginated) return true;
+    const status = String(incident.status || "OPEN").toUpperCase();
+    const severity = String(incident.severity || "").toUpperCase();
+    if (incidentSeverity !== "ALL" && severity !== incidentSeverity) return false;
+    if (incidentStatus !== "ALL" && status !== incidentStatus) return false;
+
+    const query = incidentSearch.trim().toLowerCase();
+    const searchable = [
+      incident.incident_id, incident.title, incident.source,
+      incident.target, incident.event_type,
+      incident.mitre?.technique_id, incident.case?.assigned_to,
+      incident.raw_event?.group_value,
+      incident.raw_event?.trigger_event?.source_ip,
+      incident.raw_event?.trigger_event?.destination_ip,
+    ].filter(value => value != null).join(" ").toLowerCase();
+    if (query && !searchable.includes(query)) return false;
+    if (view === "incidents-investigation") {
+      return Boolean(incident.case) && status === "IN_PROGRESS";
+    }
+    if (view === "incidents-cases" || view === "incidents-assignments") {
+      return Boolean(incident.case);
+    }
+    if (view === "incidents-active") {
+      return !["RESOLVED", "CLOSED"].includes(status);
+    }
+    if (view === "incidents-critical") {
+      return String(incident.severity || "").toUpperCase() === "CRITICAL";
+    }
+    if (view === "incidents-closed") {
+      return status === "CLOSED";
+    }
+    return true;
+  });
   const [selectedIncident, setSelectedIncident] = useState(null);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -26933,32 +31461,185 @@ function IncidentManagement() {
   const [caseAction, setCaseAction] = useState("");
   const [resolutionText, setResolutionText] = useState("");
   const [assignmentText, setAssignmentText] = useState("");
+  const [eligibleAssignees, setEligibleAssignees] = useState([]);
+  const [assigneesLoading, setAssigneesLoading] = useState(true);
+  const [assigneesError, setAssigneesError] = useState("");
   const [investigationNotes, setInvestigationNotes] = useState("");
   const [caseError, setCaseError] = useState("");
+  const [historyState, setHistoryState] = useState({
+    incidentId: null, rows: [], next: null, loading: false, error: "",
+  });
 
-  const loadIncidents = async () => {
+  const incidentAuthConfig = () => {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      throw new Error("Your session has expired. Please log in again.");
+    }
+    return {
+      headers: { Authorization: `Bearer ${token}` },
+    };
+  };
+
+  const loadIncidents = async (silent = false) => {
+    const sequence = ++requestSequence.current;
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       setError("");
 
-      const response = await axios.get(`${API_URL}/incidents/`);
+      const response = await axios.get(`${API_URL}/incidents/`, {
+        ...incidentAuthConfig(),
+        params: {
+          include_case: true,
+          compact: true,
+          include_unmapped_network: true,
+          utc_timestamps: true,
+          ...(paginated ? {
+            page_size: incidentPageSize,
+            offset: pageOffset,
+            include_summary: true,
+            search: incidentSearch.trim(),
+            severity: incidentSeverity,
+            status: incidentStatus,
+            incident_view: ({
+              "incidents-active": "active",
+              "incidents-critical": "critical",
+              "incidents-closed": "closed",
+              "incidents-investigation": "investigation",
+              "incidents-cases": "cases",
+              "incidents-assignments": "assignments",
+            })[view] || "all",
+          } : {}),
+        },
+        timeout: 15000,
+      });
+
+      if (sequence !== requestSequence.current) return;
+      if (!Array.isArray(response.data?.incidents)) {
+        throw new Error("Unexpected incident API response.");
+      }
+      if (paginated) {
+        const data = response.data;
+        if (!Number.isInteger(data.total) || !data.summary ||
+            !["Total", "Active", "Critical", "Closed"].every(
+              key => Number.isInteger(data.summary[key])
+            )) {
+          throw new Error("Unexpected incident API response.");
+        }
+        setServerSummary(data.summary);
+        setPageInfo({ total: data.total, next: data.next_offset ?? null });
+        if (pageOffset > 0 && !data.incidents.length) {
+          setPageSelection({ key: filterKey, offset: 0 });
+          return;
+        }
+      }
       setIncidents(
         Array.isArray(response.data?.incidents)
-          ? response.data.incidents
+          ? response.data.incidents.map((incident) => ({
+              ...incident,
+              alert_status: incident.status,
+              status: incident.case?.status || incident.status,
+            }))
           : []
       );
     } catch (err) {
+      if (sequence !== requestSequence.current) return;
       console.error("Incident list load error:", err);
 
       if (err.response?.data?.detail) {
         setError(err.response.data.detail);
       } else {
-        setError("Unable to load incidents.");
+        setError(
+          err.code === "ECONNABORTED"
+            ? "Incident request timed out. Please refresh."
+            : err.message === "Unexpected incident API response."
+              ? err.message
+              : "Unable to load incidents. Please check your connection and session."
+        );
       }
     } finally {
-      setLoading(false);
+      if (sequence === requestSequence.current) setLoading(false);
     }
   };
+
+  const loadIncidentHistory = async (incidentId, beforeId = null) => {
+    setHistoryState(previous => ({
+      incidentId,
+      rows: beforeId && previous.incidentId === incidentId ? previous.rows : [],
+      next: null,
+      loading: true,
+      error: "",
+    }));
+    try {
+      const response = await axios.get(
+        `${API_URL}/incidents/${encodeURIComponent(incidentId)}/history`,
+        {
+          ...incidentAuthConfig(),
+          timeout: 15000,
+          params: { limit: 100, ...(beforeId ? { before_id: beforeId } : {}) },
+        }
+      );
+      if (!Array.isArray(response.data?.history)) {
+        throw new Error("Unexpected history response.");
+      }
+      setHistoryState(previous => {
+        if (previous.incidentId !== incidentId) return previous;
+        const combined = beforeId
+          ? [...previous.rows, ...response.data.history]
+          : response.data.history;
+        return {
+          incidentId,
+          rows: [...new Map(combined.map(item => [item.id, item])).values()],
+          next: response.data.next_before_id ?? null,
+          loading: false,
+          error: "",
+        };
+      });
+    } catch {
+      setHistoryState(previous =>
+        previous.incidentId === incidentId
+          ? { ...previous, loading: false,
+              error: "Unable to load case history. Please retry." }
+          : previous
+      );
+    }
+  };
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+
+    const loadAssignees = async () => {
+      try {
+        const response = await axios.get(
+          `${API_URL}/incidents/eligible-assignees`,
+          {
+            ...incidentAuthConfig(),
+            timeout: 15000,
+            signal: controller.signal,
+          }
+        );
+        if (!Array.isArray(response.data?.assignees)) {
+          throw new Error("Unexpected assignee response.");
+        }
+        if (active) {
+          setEligibleAssignees(response.data.assignees);
+          setAssigneesError("");
+        }
+      } catch {
+        if (active) {
+          setAssigneesError("Unable to load eligible analysts. Reopen this page to retry.");
+        }
+      } finally {
+        if (active) setAssigneesLoading(false);
+      }
+    };
+
+    void loadAssignees();
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   const loadIncidentDetails = async (incidentId) => {
     try {
@@ -26966,11 +31647,19 @@ function IncidentManagement() {
       setError("");
 
       const response = await axios.get(
-        `${API_URL}/incidents/${encodeURIComponent(incidentId)}`
+        `${API_URL}/incidents/${encodeURIComponent(incidentId)}?include_unmapped_network=true&utc_timestamps=true`,
+        incidentAuthConfig()
       );
 
       setSelectedIncident(response.data);
       setCaseData(response.data?.case || null);
+      if (view === "incidents-timeline" && response.data?.case) {
+        void loadIncidentHistory(incidentId);
+      } else {
+        setHistoryState({
+          incidentId, rows: [], next: null, loading: false, error: "",
+        });
+      }
       setAssignmentText(response.data?.case?.assigned_to || "");
       setInvestigationNotes(response.data?.case?.investigation_notes || "");
       setCaseError("");
@@ -27000,12 +31689,13 @@ function IncidentManagement() {
       setCaseError("");
 
       if (!caseData) {
-        await axios.post(`${API_URL}/incidents/${incidentId}/case`);
+        await axios.post(`${API_URL}/incidents/${incidentId}/case?include_unmapped_network=true`, {}, incidentAuthConfig());
       }
 
       const response = await axios.patch(
         `${API_URL}/incidents/${incidentId}/case/start`,
-        {}
+        {},
+        incidentAuthConfig()
       );
 
       setCaseData(response.data?.case || null);
@@ -27037,7 +31727,8 @@ function IncidentManagement() {
 
       const response = await axios.patch(
         `${API_URL}/incidents/${incidentId}/case/contain`,
-        {}
+        {},
+        incidentAuthConfig()
       );
 
       setCaseData(response.data?.case || null);
@@ -27074,8 +31765,9 @@ function IncidentManagement() {
       setCaseError("");
 
       const response = await axios.patch(
-        `${API_URL}/incidents/${incidentId}/case/resolve?resolution=${encodeURIComponent(trimmedResolution)}`,
-        {}
+        `${API_URL}/incidents/${incidentId}/case/resolve`,
+        { resolution: trimmedResolution },
+        incidentAuthConfig()
       );
 
       setCaseData(response.data?.case || null);
@@ -27107,7 +31799,8 @@ function IncidentManagement() {
 
       const response = await axios.patch(
         `${API_URL}/incidents/${incidentId}/case/close`,
-        {}
+        {},
+        incidentAuthConfig()
       );
 
       setCaseData(response.data?.case || null);
@@ -27145,7 +31838,8 @@ function IncidentManagement() {
 
       const response = await axios.patch(
         `${API_URL}/incidents/${incidentId}/case/assign?assigned_to=${encodeURIComponent(analyst)}`,
-        {}
+        {},
+        incidentAuthConfig()
       );
 
       setCaseData(response.data?.case || null);
@@ -27184,8 +31878,9 @@ function IncidentManagement() {
       setCaseError("");
 
       const response = await axios.patch(
-        `${API_URL}/incidents/${incidentId}/case/notes?notes=${encodeURIComponent(notes)}`,
-        {}
+        `${API_URL}/incidents/${incidentId}/case/notes`,
+        { notes },
+        incidentAuthConfig()
       );
 
       setCaseData(response.data?.case || null);
@@ -27207,8 +31902,28 @@ function IncidentManagement() {
   };
 
   useEffect(() => {
-    loadIncidents();
-  }, []);
+    let stopped = false;
+    let timer;
+    setLoading(true);
+    setError("");
+    setIncidents([]);
+    setPageInfo({ total: 0, next: null });
+
+    const poll = async (silent) => {
+      await loadIncidents(silent);
+      if (!stopped) {
+        timer = window.setTimeout(() => poll(true), 5000);
+      }
+    };
+
+    // Brief debounce for search changes; subsequent polls wait for completion.
+    timer = window.setTimeout(() => poll(false), 300);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+      requestSequence.current += 1;
+    };
+  }, [view, incidentSearch, incidentSeverity, incidentStatus, pageOffset]);
 
   const severityClass = (severity) => {
     const value = String(severity || "").toUpperCase();
@@ -27280,13 +31995,382 @@ function IncidentManagement() {
     }
   };
 
+  if (view === "incidents-playbooks") {
+    const steps = [
+      {
+        title: "1. Validate the detection",
+        text: "Review rule NET-001, its configured threshold and window, the matching-event count, and saved TCP connection evidence. A rule match requires investigation; it does not alone confirm malicious activity.",
+      },
+      {
+        title: "2. Identify the source and target",
+        text: "Identify the source host, destination assets, destination ports, and asset owners using authorized inventory and telemetry. Check whether the source is a registered scanner.",
+      },
+      {
+        title: "3. Check authorized activity",
+        text: "Compare the detection time and targets with approved vulnerability scans, maintenance, and testing. Record supporting approvals or the absence of confirmation.",
+      },
+      {
+        title: "4. Establish scope",
+        text: "Review related alerts and available network records for additional targets, ports, repeated scans, and subsequent connection attempts. Record the evidence and any gaps.",
+      },
+      {
+        title: "5. Record the investigation",
+        text: "Assign the case to the intended analyst and save findings with evidence references. Distinguish observed facts from assumptions.",
+      },
+      {
+        title: "6. Coordinate containment if required",
+        text: "Follow the organization’s response process for any authorized blocking or isolation. The current Contain Incident action records a case status; it does not execute network blocking or host isolation.",
+      },
+      {
+        title: "7. Verify and resolve",
+        text: "Verify the outcome using available telemetry. Document the disposition, actions actually performed, and remaining risk before using the existing resolution workflow.",
+      },
+      {
+        title: "8. Close and review",
+        text: "Close the case after resolution and review. Record detection-tuning proposals separately; do not suppress future detections solely because one scan was authorized.",
+      },
+    ];
+
+    return (
+      <div>
+        <h1 className="text-2xl font-bold text-white">Incident Playbooks</h1>
+        <p className="mt-2 text-xs leading-6 text-gray-400">
+          Port-scan investigation guide · NET-001 · Manual workflow
+        </p>
+
+        <section className="mt-5 rounded-lg border border-white/10 bg-[#0b1014] p-5">
+          <h2 className="text-sm font-semibold text-white">Port Scan Investigation</h2>
+          <p className="mt-2 text-xs leading-6 text-gray-400">
+            Use this guide alongside the saved incident evidence.
+            Steps describe work to perform; they are not records of completed actions.
+          </p>
+          <div className="mt-5 grid gap-4 xl:grid-cols-2">
+            {steps.map(step => (
+              <article key={step.title}
+                className="rounded-md border border-white/10 p-4">
+                <h3 className="text-sm font-semibold text-white">{step.title}</h3>
+                <p className="mt-2 text-xs leading-6 text-gray-400">{step.text}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  if (view === "incidents-sla") {
+    // Development policy: elapsed hours, continuously from detection time.
+    const policy = {
+      CRITICAL: [0.25, 4],
+      HIGH: [1, 24],
+      MEDIUM: [4, 72],
+      LOW: [24, 168],
+    };
+    const now = Date.now();
+
+    const parseTime = (value) => {
+      if (typeof value !== "string") return null;
+      const text = value.trim();
+      if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(text)) return null;
+      const normalized = text
+        .replace(/(\.\d{3})\d+/, "$1")
+        .replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
+      const parsed = Date.parse(normalized);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+
+    const duration = (milliseconds) => {
+      const minutes = Math.ceil(Math.abs(milliseconds) / 60000);
+      const days = Math.floor(minutes / 1440);
+      const hours = Math.floor((minutes % 1440) / 60);
+      return `${days ? `${days}d ` : ""}${hours}h ${minutes % 60}m`;
+    };
+
+    const measure = (startTime, hours, completedValue) => {
+      if (startTime === null || !hours || startTime > now) {
+        return { text: "Unavailable", breached: false, known: false };
+      }
+      const deadline = startTime + hours * 3600000;
+      const deadlineText = new Date(deadline).toLocaleString();
+      if (completedValue) {
+        const completed = parseTime(completedValue);
+        if (completed === null || completed < startTime || completed > now) {
+          return { text: "Invalid completion time", breached: false, known: false };
+        }
+        const breached = completed > deadline;
+        return {
+          text: `${breached ? "Completed late" : "Met"} · due ${deadlineText}`,
+          breached, known: true,
+        };
+      }
+      const remaining = deadline - now;
+      return {
+        text: `${remaining < 0 ? "Overdue by" : "Due in"} ${duration(remaining)} · ${deadlineText}`,
+        breached: remaining < 0, known: true,
+      };
+    };
+
+    const rows = incidents.map((incident) => {
+      const severity = String(incident.severity || "").toUpperCase();
+      // ERROR is treated as HIGH for this development policy.
+      const targets = policy[severity === "ERROR" ? "HIGH" : severity];
+      const detected = parseTime(incident.timestamp);
+      const terminalStatus = ["RESOLVED", "CLOSED"].includes(
+        String(incident.status || "").toUpperCase()
+      );
+      const response =
+        terminalStatus && !incident.case?.investigation_started_at
+          ? {
+              text: "Response not recorded — compliance unknown",
+              breached: false,
+              known: false,
+            }
+          : measure(
+              detected, targets?.[0],
+              incident.case?.investigation_started_at
+            );
+      const resolution = measure(
+        detected, targets?.[1],
+        incident.case?.resolved_at || incident.resolved_at
+      );
+      return { incident, response, resolution };
+    });
+
+    return (
+      <div>
+        <div className="mb-6 flex items-center justify-between gap-4">
+          <h1 className="text-2xl font-bold text-white">SLA Management</h1>
+          <button type="button" onClick={() => loadIncidents()}
+            disabled={loading}
+            className="rounded-md border border-white/10 px-4 py-2 text-xs text-gray-300 disabled:opacity-50">
+            {loading ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
+
+        <section className="mb-5 rounded-lg border border-white/10 bg-[#0b1014] p-5">
+          <h2 className="text-sm font-semibold text-white">Development SLA Policy</h2>
+          <p className="mt-2 text-xs leading-6 text-gray-400">
+            Continuous elapsed time from detection. Investigation start measures
+            response; case resolution or the saved alert resolution measures
+            resolution. ERROR uses HIGH targets. Historical detections are included.
+          </p>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {Object.entries(policy).map(([severity, targets]) => (
+              <div key={severity} className="rounded border border-white/10 p-3 text-xs text-gray-300">
+                <p className="font-semibold text-white">{severity}</p>
+                <p className="mt-2">Response: {duration(targets[0] * 3600000)}</p>
+                <p className="mt-1">Resolution: {duration(targets[1] * 3600000)}</p>
+              </div>
+            ))}
+          </div>
+          <p className="mt-4 text-xs text-gray-400">
+            {rows.length} loaded detections · {rows.filter(row =>
+              row.response.breached || row.resolution.breached
+            ).length} with at least one missed target · {rows.filter(row =>
+              !row.response.known || !row.resolution.known
+            ).length} with unavailable calculations
+          </p>
+        </section>
+
+        {error && <p role="alert" className="mb-4 text-sm text-red-400">{error}</p>}
+
+        <section className="overflow-x-auto rounded-lg border border-white/10 bg-[#0b1014]">
+          <table className="w-full text-left text-xs">
+            <thead className="border-b border-white/10 text-gray-400">
+              <tr>
+                {["Incident", "Severity", "Case / Alert Status", "Response SLA", "Resolution SLA"].map(label =>
+                  <th key={label} className="px-4 py-4">{label}</th>
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(({ incident, response, resolution }) => (
+                <tr key={incident.incident_id} className="border-b border-white/5">
+                  <td className="px-4 py-4 text-white">{incident.incident_id}</td>
+                  <td className="px-4 py-4 text-gray-300">{incident.severity}</td>
+                  <td className="px-4 py-4 text-gray-300">{incident.status}</td>
+                  {[response, resolution].map((result, index) => (
+                    <td key={index} className={`px-4 py-4 ${
+                      !result.known ? "text-gray-500" :
+                      result.breached ? "text-red-400" : "text-green-400"
+                    }`}>{result.text}</td>
+                  ))}
+                </tr>
+              ))}
+              {!rows.length && (
+                <tr><td colSpan={5} className="px-4 py-10 text-center text-gray-500">
+                  {loading ? "Loading SLA records..." : "No eligible detections available."}
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </section>
+      </div>
+    );
+  }
+
+  if (
+    selectedIncident &&
+    ["incidents-evidence", "incidents-timeline"].includes(view)
+  ) {
+    const raw = selectedIncident.raw_event || {};
+    const evidence = Array.isArray(raw.evidence) ? raw.evidence : [];
+    const correlated = Array.isArray(raw.correlation?.events)
+      ? raw.correlation.events : [];
+    const savedEvents = evidence.length ? evidence : correlated;
+    const milestones = [
+      ["Detection recorded", selectedIncident.timestamp],
+      ["Case created", caseData?.created_at],
+      ["Investigation started", caseData?.investigation_started_at],
+      ["Marked contained", caseData?.contained_at],
+      ["Resolved", caseData?.resolved_at],
+      ["Closed", caseData?.closed_at],
+    ].filter(([, timestamp]) => Boolean(timestamp));
+
+    return (
+      <div>
+        <div className="mb-6 flex items-center justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-white">{pageTitle}</h1>
+            <p className="mt-2 text-xs text-gray-400">
+              {selectedIncident.incident_id} — {selectedIncident.title}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSelectedIncident(null)}
+            className="rounded-md border border-white/10 px-4 py-2 text-xs text-gray-300"
+          >
+            Back to {pageTitle}
+          </button>
+        </div>
+
+        {view === "incidents-evidence" ? (
+          <section className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+            <h2 className="text-sm font-semibold text-white">Saved Detection Evidence</h2>
+            <p className="mt-2 text-xs text-gray-400">
+              {savedEvents.length} saved event records. This view displays
+              stored evidence; it does not establish chain of custody.
+            </p>
+            <pre className="mt-4 max-h-[600px] overflow-auto whitespace-pre-wrap rounded-md border border-white/10 bg-black/30 p-4 text-xs text-gray-300">
+              {renderJson(
+                savedEvents.length
+                  ? savedEvents
+                  : selectedIncident.mitre?.evidence ||
+                    "No saved evidence available."
+              )}
+            </pre>
+          </section>
+        ) : (
+          <section className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+            <h2 className="text-sm font-semibold text-white">Saved Case Milestones</h2>
+            <p className="mt-2 text-xs text-gray-400">
+              Recorded lifecycle timestamps. Assignment changes and note edits
+              are not included in this milestone history.
+            </p>
+            <div className="mt-4 divide-y divide-white/10">
+              {milestones.map(([label, timestamp]) => (
+                <div key={label} className="grid gap-2 py-4 sm:grid-cols-2">
+                  <span className="text-sm text-gray-200">{label}</span>
+                  <code className="break-all text-xs text-gray-400">{timestamp}</code>
+                </div>
+              ))}
+            </div>
+            <p className="mt-4 text-xs text-gray-500">
+              Timestamps are shown in UTC with an explicit +00:00 offset.
+            </p>
+
+            <div className="mt-6 border-t border-white/10 pt-5">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-sm font-semibold text-white">
+                  Server-Recorded Action History
+                </h2>
+                {caseData && (
+                  <button type="button"
+                    disabled={historyState.loading}
+                    onClick={() => loadIncidentHistory(selectedIncident.incident_id)}
+                    className="rounded border border-white/10 px-3 py-2 text-xs text-gray-300 disabled:opacity-50">
+                    Refresh History
+                  </button>
+                )}
+              </div>
+              <p className="mt-2 text-xs text-gray-400">
+                Newest first. Recording began when incident history was enabled;
+                earlier actions have not been reconstructed.
+              </p>
+
+              {historyState.error && (
+                <p role="alert" className="mt-3 text-xs text-red-400">
+                  {historyState.error}
+                </p>
+              )}
+
+              <div className="mt-4 overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-white/10 text-gray-400">
+                    <tr>
+                      {["Time (UTC)", "Actor", "Action", "Resulting Status", "Assigned To"].map(label =>
+                        <th key={label} className="px-3 py-3">{label}</th>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {historyState.incidentId === selectedIncident.incident_id &&
+                      historyState.rows.map(item => (
+                        <tr key={item.id} className="border-b border-white/5 text-gray-300">
+                          <td className="px-3 py-3">{item.created_at}</td>
+                          <td className="px-3 py-3">{item.actor_username}</td>
+                          <td className="px-3 py-3">{item.action}</td>
+                          <td className="px-3 py-3">{item.case_status}</td>
+                          <td className="px-3 py-3">{item.assigned_to || "Unassigned"}</td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {!historyState.rows.length && !historyState.loading &&
+                !historyState.error && (
+                <p className="mt-4 text-xs text-gray-500">
+                  {caseData ? "No recorded actions available." : "No persistent case exists for this detection."}
+                </p>
+              )}
+              {historyState.loading && (
+                <p role="status" className="mt-4 text-xs text-gray-400">Loading history...</p>
+              )}
+              {historyState.next && !historyState.loading && (
+                <button type="button"
+                  onClick={() => loadIncidentHistory(
+                    selectedIncident.incident_id, historyState.next
+                  )}
+                  className="mt-4 rounded border border-white/10 px-3 py-2 text-xs text-gray-300">
+                  Load Older Actions
+                </button>
+              )}
+            </div>
+          </section>
+        )}
+      </div>
+    );
+  }
+
   if (selectedIncident) {
-    const detection = selectedIncident.raw_event?.detection;
+    const rawIncident = selectedIncident.raw_event || {};
+    const detection = rawIncident.detection;
+    const isNetworkDetection =
+      selectedIncident.event_type === "network_detection";
+    const networkEvidence = Array.isArray(rawIncident.evidence)
+      ? rawIncident.evidence
+      : [];
+    const evidenceValue =
+      selectedIncident.mitre?.evidence ||
+      (networkEvidence.length ? networkEvidence : null);
     const correlation = selectedIncident.raw_event?.correlation;
     const triggerEvent = selectedIncident.raw_event?.trigger_event;
-    const correlationEvents = Array.isArray(correlation?.events)
-      ? correlation.events
-      : [];
+    const correlationEvents =
+      Array.isArray(correlation?.events) && correlation.events.length
+        ? correlation.events
+        : networkEvidence;
 
     return (
       <div>
@@ -27510,18 +32594,42 @@ function IncidentManagement() {
                     <p className="text-[9px] uppercase tracking-wider text-gray-600">
                       Analyst Assignment
                     </p>
-                    <input
+                    <select
+                      aria-label="Assigned analyst"
                       value={assignmentText}
                       onChange={(event) => setAssignmentText(event.target.value)}
-                      placeholder="Enter analyst identifier"
-                      className="mt-2 w-full rounded-md border border-white/10 bg-black/30 px-3 py-2 text-xs text-gray-200 outline-none transition placeholder:text-gray-600 focus:border-blue-500/40"
-                    />
+                      disabled={assigneesLoading || !!assigneesError || !!caseAction}
+                      className="mt-2 w-full rounded-md border border-white/10 bg-[#0b1014] px-3 py-2 text-xs text-gray-200 outline-none focus:border-blue-500/40 disabled:opacity-50"
+                    >
+                      <option value="">
+                        {assigneesLoading ? "Loading analysts..." : "Select an analyst"}
+                      </option>
+                      {assignmentText &&
+                        !eligibleAssignees.some(item => item.username === assignmentText) && (
+                        <option value={assignmentText} disabled>
+                          {assignmentText} (not currently eligible)
+                        </option>
+                      )}
+                      {eligibleAssignees.map(item => (
+                        <option key={item.username} value={item.username}>
+                          {item.username}
+                        </option>
+                      ))}
+                    </select>
+                    {assigneesError && (
+                      <p role="alert" className="mt-2 text-xs text-red-400">
+                        {assigneesError}
+                      </p>
+                    )}
                   </div>
 
                   <button
                     type="button"
                     onClick={assignIncident}
-                    disabled={!!caseAction || detailLoading || !assignmentText.trim()}
+                    disabled={!!caseAction || detailLoading || assigneesLoading ||
+                      !!assigneesError || !eligibleAssignees.some(
+                        item => item.username === assignmentText
+                      )}
                     className="rounded-md border border-blue-500/30 bg-blue-500/10 px-4 py-2 text-[10px] font-semibold text-blue-400 transition hover:bg-blue-500/20 hover:text-blue-300 disabled:opacity-50"
                   >
                     {caseAction === "assign" ? "Assigning..." : "Assign Analyst"}
@@ -27529,7 +32637,7 @@ function IncidentManagement() {
                 </div>
 
                 <p className="mt-2 text-[9px] text-gray-600">
-                  Use the SOC analyst identifier assigned to investigate this case.
+                  Select an eligible account within your client scope.
                 </p>
 
                 <div className="mt-5 border-t border-white/10 pt-5">
@@ -27721,7 +32829,9 @@ function IncidentManagement() {
               Detection Evidence
             </p>
             <pre className="mt-4 max-h-56 overflow-auto whitespace-pre-wrap rounded-md border border-white/10 bg-black/30 p-4 text-[11px] leading-5 text-gray-300">
-              {selectedIncident.mitre?.evidence || "No evidence available."}
+              {evidenceValue
+                ? renderJson(evidenceValue)
+                : "No evidence available."}
             </pre>
           </section>
 
@@ -27736,36 +32846,46 @@ function IncidentManagement() {
                   Detection Type
                 </p>
                 <p className="mt-1 text-xs text-gray-300">
-                  {detection?.detection_type || "—"}
+                  {detection?.detection_type ||
+                    rawIncident.rule_name || "—"}
                 </p>
               </div>
 
               <div>
                 <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                  Failure Count
+                  {isNetworkDetection ? "Matching Events" : "Failure Count"}
                 </p>
                 <p className="mt-1 text-xs text-gray-300">
-                  {detection?.failure_count ?? "—"}
+                  {isNetworkDetection
+                    ? (rawIncident.event_count ?? "—")
+                    : (detection?.failure_count ?? "—")}
                 </p>
               </div>
 
               <div>
                 <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                  Unique Users
+                  {isNetworkDetection ? "Threshold" : "Unique Users"}
                 </p>
                 <p className="mt-1 text-xs text-gray-300">
-                  {detection?.unique_user_count ?? "—"}
+                  {isNetworkDetection
+                    ? (rawIncident.threshold ?? "—")
+                    : (detection?.unique_user_count ?? "—")}
                 </p>
               </div>
 
               <div>
                 <p className="text-[9px] uppercase tracking-wider text-gray-600">
-                  Users
+                  {isNetworkDetection ? "Detection Window" : "Users"}
                 </p>
                 <p className="mt-1 break-words text-xs text-gray-300">
-                  {Array.isArray(detection?.usernames) && detection.usernames.length
-                    ? detection.usernames.join(", ")
-                    : "—"}
+                  {isNetworkDetection
+                    ? (rawIncident.window_seconds != null
+                        ? `${rawIncident.window_seconds} seconds`
+                        : "—")
+                    : (Array.isArray(detection?.usernames) &&
+                        detection.usernames.length
+                        ? detection.usernames.join(", ")
+                        : "—")}
                 </p>
               </div>
             </div>
@@ -27856,7 +32976,7 @@ function IncidentManagement() {
             Security Operations
           </p>
           <h1 className="mt-2 text-2xl font-bold text-white">
-            Incident Management
+            {pageTitle}
           </h1>
           <p className="mt-2 max-w-3xl text-xs leading-5 text-gray-500">
             Investigate security detections generated from the SOC security event pipeline.
@@ -27865,7 +32985,7 @@ function IncidentManagement() {
 
         <button
           type="button"
-          onClick={loadIncidents}
+          onClick={() => loadIncidents()}
           disabled={loading}
           className="rounded-md border border-white/10 px-4 py-2 text-[10px] text-gray-300 transition hover:border-red-500/40 hover:text-white disabled:opacity-50"
         >
@@ -27879,6 +32999,60 @@ function IncidentManagement() {
         </div>
       )}
 
+      <div className="mb-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {Object.entries(summaryCounts).map(([label, count]) => (
+          <div key={label} className="rounded-lg border border-white/10 bg-[#0b1014] p-4">
+            <p className="text-xs text-gray-400">{label} · all eligible incidents</p>
+            <p className="mt-2 text-2xl font-bold text-white">
+              {loading && !incidents.length ? "—" : count}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <div className="mb-5 grid gap-3 rounded-lg border border-white/10 bg-[#0b1014] p-4 md:grid-cols-4">
+        <label className="text-xs text-gray-400">
+          Search incidents
+          <input type="search" value={incidentSearch}
+            onChange={event => setIncidentSearch(event.target.value)}
+            placeholder="ID, detection, IP, analyst..."
+            className="mt-2 w-full rounded border border-white/10 bg-[#0b1014] px-3 py-2 text-gray-200" />
+        </label>
+        <label className="text-xs text-gray-400">
+          Severity
+          <select value={incidentSeverity}
+            onChange={event => setIncidentSeverity(event.target.value)}
+            className="mt-2 w-full rounded border border-white/10 bg-[#0b1014] px-3 py-2 text-gray-200">
+            {["ALL", "CRITICAL", "HIGH", "ERROR", "MEDIUM", "LOW", "INFO"].map(value =>
+              <option key={value} value={value}>{value}</option>
+            )}
+          </select>
+        </label>
+        <label className="text-xs text-gray-400">
+          Case / alert status
+          <select value={incidentStatus}
+            onChange={event => setIncidentStatus(event.target.value)}
+            className="mt-2 w-full rounded border border-white/10 bg-[#0b1014] px-3 py-2 text-gray-200">
+            <option value="ALL">ALL</option>
+            {[...new Set([
+              ...availableStatuses,
+              ...(incidentStatus === "ALL" ? [] : [incidentStatus]),
+            ])].sort().map(value =>
+              <option key={value} value={value}>{value}</option>
+            )}
+          </select>
+        </label>
+        <button type="button"
+          onClick={() => {
+            setIncidentSearch("");
+            setIncidentSeverity("ALL");
+            setIncidentStatus("ALL");
+          }}
+          className="self-end rounded border border-white/10 px-3 py-2 text-xs text-gray-300">
+          Clear Filters
+        </button>
+      </div>
+
       <section className="overflow-hidden rounded-lg border border-white/10 bg-[#0b1014]">
         <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
           <div>
@@ -27886,18 +33060,49 @@ function IncidentManagement() {
               Incident Investigation Queue
             </h2>
             <p className="mt-1 text-[9px] text-gray-600">
-              {incidents.length} incident records
+              {paginated
+                ? `${pageInfo.total} matching records · ${incidents.length} on this page`
+                : `${visibleIncidents.length} matching records · ${incidents.length} loaded overall`}
             </p>
           </div>
         </div>
+
+        {paginated && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+            <p className="text-xs text-gray-400" aria-live="polite">
+              {loading ? "Loading page..." : pageInfo.total
+                ? `${pageOffset + 1}–${pageOffset + incidents.length} of ${pageInfo.total}`
+                : "No matching records"}
+            </p>
+            <div className="flex gap-2">
+              <button type="button"
+                disabled={loading || pageOffset === 0}
+                onClick={() => setPageSelection({
+                  key: filterKey,
+                  offset: Math.max(0, pageOffset - incidentPageSize),
+                })}
+                className="rounded border border-white/10 px-3 py-2 text-xs text-gray-300 disabled:opacity-40">
+                Previous
+              </button>
+              <button type="button"
+                disabled={loading || pageInfo.next === null}
+                onClick={() => setPageSelection({
+                  key: filterKey, offset: pageInfo.next,
+                })}
+                className="rounded border border-white/10 px-3 py-2 text-xs text-gray-300 disabled:opacity-40">
+                Next
+              </button>
+            </div>
+          </div>
+        )}
 
         {loading ? (
           <div className="px-4 py-12 text-center text-xs text-gray-500">
             Loading incidents...
           </div>
-        ) : incidents.length === 0 ? (
+        ) : visibleIncidents.length === 0 ? (
           <div className="px-4 py-12 text-center text-xs text-gray-600">
-            No incidents available.
+            No incidents match this view.
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -27909,13 +33114,16 @@ function IncidentManagement() {
                   <th className="px-4 py-3">Status</th>
                   <th className="px-4 py-3">Detection</th>
                   <th className="px-4 py-3">MITRE</th>
+                  {view === "incidents-assignments" && (
+                    <th className="px-4 py-3">Assigned Analyst</th>
+                  )}
                   <th className="px-4 py-3">Source</th>
                   <th className="px-4 py-3">Time</th>
                   <th className="px-4 py-3"></th>
                 </tr>
               </thead>
               <tbody>
-                {incidents.map((incident) => (
+                {visibleIncidents.map((incident) => (
                   <tr
                     key={incident.incident_id}
                     className="border-b border-white/5 transition hover:bg-white/[0.02]"
@@ -27964,6 +33172,11 @@ function IncidentManagement() {
                       </p>
                     </td>
 
+                    {view === "incidents-assignments" && (
+                      <td className="px-4 py-4 text-[10px] text-gray-300">
+                        {incident.case?.assigned_to || "Unassigned"}
+                      </td>
+                    )}
                     <td className="px-4 py-4 text-[10px] text-gray-400">
                       {incident.source || "—"}
                     </td>
@@ -27981,7 +33194,15 @@ function IncidentManagement() {
                         disabled={detailLoading}
                         className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-[9px] font-semibold text-red-400 transition hover:bg-red-500/20 hover:text-red-300 disabled:opacity-50"
                       >
-                        {detailLoading ? "Loading..." : "Investigate"}
+                        {detailLoading
+                          ? "Loading..."
+                          : view === "incidents-evidence"
+                            ? "View Evidence"
+                            : view === "incidents-timeline"
+                              ? "View Timeline"
+                              : view === "incidents-assignments"
+                                ? "Manage Assignment"
+                                : "Investigate"}
                       </button>
                     </td>
                   </tr>
@@ -27999,7 +33220,7 @@ function IncidentManagement() {
 // ==================================================
 // CODE SECURITY
 // ==================================================
-function CodeSecurity() {
+function CodeSecurity({ title = "Code Security", sectionLabel = "Security Testing" } = {}) {
   const [selectedFile, setSelectedFile] = useState(null);
   const [job, setJob] = useState(null);
   const [scanning, setScanning] = useState(false);
@@ -28146,11 +33367,11 @@ function CodeSecurity() {
     <div className="space-y-6">
       <div>
         <p className="text-xs uppercase tracking-[0.3em] text-red-500">
-          Security Testing
+          {sectionLabel}
         </p>
 
         <h1 className="mt-2 text-3xl font-bold text-white">
-          Code Security
+          {title}
         </h1>
 
         <p className="mt-2 text-sm text-gray-500">
@@ -31020,6 +36241,14816 @@ function AccessValidationResults({ onBack }) {
             )}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function RiskOverview() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadOverview = async (silent = false) => {
+      try {
+        if (!silent && !cancelled) setLoading(true);
+
+        const token = localStorage.getItem("token");
+        if (!token) {
+          throw new Error("Your session has expired. Please log in again.");
+        }
+
+        const response = await axios.get(
+          `${API_URL}/vapt/risk-assessment/overview`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+
+        if (!cancelled) {
+          setData(response.data);
+          setLastUpdated(new Date());
+          setError("");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            err.response?.data?.detail ||
+            err.message ||
+            "Unable to load risk overview."
+          );
+        }
+      } finally {
+        if (!cancelled && !silent) setLoading(false);
+      }
+    };
+
+    loadOverview();
+    const timer = window.setInterval(() => loadOverview(true), 15000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [reloadKey]);
+
+  const metrics = data?.metrics || {};
+  const severity = metrics.severity || {};
+  const findingStatus = metrics.finding_status || {};
+  const runs = Array.isArray(data?.recent_risk_assessments)
+    ? data.recent_risk_assessments
+    : [];
+  const latest = data?.latest_completed_risk_assessment || null;
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleString();
+  };
+
+  const metricCards = [
+    ["Assessments", metrics.total_assessments ?? 0, "Persisted assessments"],
+    ["Findings", metrics.total_findings ?? 0, "Current scoped findings"],
+    ["Average CVSS", Number(metrics.average_cvss ?? 0).toFixed(2), "Scored findings"],
+    ["Highest CVSS", Number(metrics.highest_cvss ?? 0).toFixed(1), "Scored findings"],
+  ];
+
+  const severityCards = [
+    ["Critical", severity.critical ?? 0, "text-red-400"],
+    ["High", severity.high ?? 0, "text-orange-400"],
+    ["Medium", severity.medium ?? 0, "text-yellow-300"],
+    ["Low", severity.low ?? 0, "text-blue-300"],
+    ["Informational", severity.informational ?? 0, "text-gray-300"],
+    ["Other", severity.other ?? 0, "text-gray-400"],
+  ];
+
+  return (
+    <div className="min-h-full bg-black p-6 text-white">
+      <div className="mx-auto max-w-7xl">
+        <div className="mb-7 flex flex-wrap items-start justify-between gap-4 border-b border-white/10 pb-5">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-widest text-red-500">
+              SOC Overview
+            </p>
+            <h1 className="mt-2 text-2xl font-bold">Risk Overview</h1>
+            <p className="mt-2 text-sm text-gray-400">
+              Live summary of persisted assessments and security findings.
+            </p>
+            <p className="mt-2 text-xs text-gray-600">
+              Scope: {data?.scope || "Loading"} · Last refreshed: {formatDate(lastUpdated)}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setReloadKey((value) => value + 1)}
+            disabled={loading}
+            className="border border-white/15 px-4 py-2 text-xs text-gray-300 hover:border-red-500/50 disabled:opacity-50"
+          >
+            {loading ? "Loading…" : "Refresh now"}
+          </button>
+        </div>
+
+        {error && (
+          <div className="mb-5 border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300">
+            {error}
+          </div>
+        )}
+
+        {loading && !data ? (
+          <div className="border border-white/10 p-8 text-sm text-gray-400">
+            Loading risk data from the backend…
+          </div>
+        ) : data ? (
+          <>
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              {metricCards.map(([label, value, description]) => (
+                <div key={label} className="border border-white/10 bg-[#0b0b0b] p-5">
+                  <p className="text-xs text-gray-500">{label}</p>
+                  <p className="mt-3 text-3xl font-bold text-white">{value}</p>
+                  <p className="mt-2 text-xs text-gray-600">{description}</p>
+                </div>
+              ))}
+            </div>
+
+            <section className="mt-7">
+              <div className="mb-4">
+                <h2 className="text-lg font-semibold">Finding Severity</h2>
+                <p className="mt-1 text-xs text-gray-500">
+                  Calculated from persisted findings in your authenticated scope.
+                </p>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+                {severityCards.map(([label, value, color]) => (
+                  <div key={label} className="border border-white/10 bg-[#0b0b0b] p-4">
+                    <p className="text-xs text-gray-500">{label}</p>
+                    <p className={`mt-2 text-2xl font-bold ${color}`}>{value}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="mt-7 grid gap-5 xl:grid-cols-3">
+              <div className="border border-white/10 bg-[#0b0b0b] p-5 xl:col-span-1">
+                <h2 className="text-lg font-semibold">Latest Completed Risk Assessment</h2>
+                {latest ? (
+                  <>
+                    <p className="mt-5 text-xs text-gray-500">Overall risk</p>
+                    <p className="mt-1 text-2xl font-bold text-white">
+                      {latest.overall_risk || "Not classified"}
+                    </p>
+                    <p className="mt-4 text-xs text-gray-500">Assessment target</p>
+                    <p className="mt-1 break-all text-sm text-gray-300">
+                      {latest.target || `Assessment #${latest.assessment_id}`}
+                    </p>
+                    <div className="mt-5 grid grid-cols-2 gap-4">
+                      <div>
+                        <p className="text-xs text-gray-500">Findings in run</p>
+                        <p className="mt-1 text-xl font-semibold">
+                          {latest.total_findings ?? 0}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-gray-500">Highest CVSS</p>
+                        <p className="mt-1 text-xl font-semibold">
+                          {Number(latest.highest_cvss ?? 0).toFixed(1)}
+                        </p>
+                      </div>
+                    </div>
+                    <p className="mt-5 text-xs text-gray-500">
+                      Completed: {formatDate(latest.completed_at)}
+                    </p>
+                  </>
+                ) : (
+                  <div className="mt-5 border border-white/10 p-4">
+                    <p className="text-sm text-gray-300">
+                      No completed persisted risk assessment is available in this scope.
+                    </p>
+                    <p className="mt-2 text-xs text-gray-500">
+                      Current finding metrics are shown separately. Open VAPT Testing
+                      to run an assessment when authorized; this overview will not
+                      start one automatically.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              <div className="border border-white/10 bg-[#0b0b0b] p-5 xl:col-span-2">
+                <h2 className="text-lg font-semibold">Finding Status</h2>
+                <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {[
+                    ["Open", findingStatus.open ?? 0],
+                    ["In progress", findingStatus.in_progress ?? 0],
+                    ["Fixed", findingStatus.fixed ?? 0],
+                    ["Accepted", findingStatus.accepted ?? 0],
+                    ["False positive", findingStatus.false_positive ?? 0],
+                    ["Other", findingStatus.other ?? 0],
+                  ].map(([label, value]) => (
+                    <div key={label} className="border border-white/10 p-4">
+                      <p className="text-xs text-gray-500">{label}</p>
+                      <p className="mt-2 text-xl font-semibold">{value}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </section>
+
+            <section className="mt-7 border border-white/10 bg-[#0b0b0b]">
+              <div className="border-b border-white/10 p-5">
+                <h2 className="text-lg font-semibold">Recent Persisted Risk Assessments</h2>
+                <p className="mt-1 text-xs text-gray-500">
+                  Refreshes automatically every 15 seconds.
+                </p>
+              </div>
+
+              {runs.length === 0 ? (
+                <div className="p-6 text-sm text-gray-500">
+                  No persisted risk-assessment runs are available in this scope.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[760px] text-left text-sm">
+                    <thead className="border-b border-white/10 text-xs text-gray-500">
+                      <tr>
+                        <th className="px-5 py-3 font-medium">Assessment</th>
+                        <th className="px-5 py-3 font-medium">Status</th>
+                        <th className="px-5 py-3 font-medium">Overall risk</th>
+                        <th className="px-5 py-3 font-medium">Findings</th>
+                        <th className="px-5 py-3 font-medium">Highest CVSS</th>
+                        <th className="px-5 py-3 font-medium">Updated</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {runs.map((run) => (
+                        <tr
+                          key={run.assessment_run_id || `${run.assessment_id}-${run.created_at}`}
+                          className="border-b border-white/5 last:border-0"
+                        >
+                          <td className="px-5 py-4">
+                            <div className="text-white">
+                              {run.target || `Assessment #${run.assessment_id}`}
+                            </div>
+                            <div className="mt-1 text-xs text-gray-600">
+                              {run.assessment_run_id || "Persisted run"}
+                            </div>
+                          </td>
+                          <td className="px-5 py-4 text-gray-300">{run.status || "Unknown"}</td>
+                          <td className="px-5 py-4 text-gray-300">{run.overall_risk || "—"}</td>
+                          <td className="px-5 py-4 tabular-nums">{run.total_findings ?? 0}</td>
+                          <td className="px-5 py-4 tabular-nums">
+                            {Number(run.highest_cvss ?? 0).toFixed(1)}
+                          </td>
+                          <td className="px-5 py-4 text-xs text-gray-400">
+                            {formatDate(run.completed_at || run.updated_at || run.created_at)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+
+            <p className="mt-5 text-xs leading-5 text-gray-600">
+              {data.risk_data_note}
+            </p>
+          </>
+        ) : !error ? (
+          <div className="border border-white/10 p-8 text-sm text-gray-500">
+            No risk overview data is available.
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+
+function AssetDiscovery({ title = "Asset Discovery", sectionLabel = "Asset Management" } = {}) {
+  const [runs, setRuns] = useState([]);
+  const [assets, setAssets] = useState([]);
+  const [selectedAssessmentId, setSelectedAssessmentId] = useState("");
+  const [scanType, setScanType] = useState("quick");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const loadDiscovery = async (silent = false) => {
+    try {
+      if (!silent) setLoading(true);
+
+      const token = localStorage.getItem("token");
+      if (!token) {
+        throw new Error("No authentication token found.");
+      }
+
+      const headers = {
+        Authorization: `Bearer ${token}`,
+      };
+
+      const [discoveryResponse, inventoryResponse] = await Promise.all([
+        axios.get(`${API_URL}/client/asset-discovery`, { headers }),
+        axios.get(`${API_URL}/client/asset-inventory`, { headers }),
+      ]);
+
+      setRuns(
+        Array.isArray(discoveryResponse.data?.runs)
+          ? discoveryResponse.data.runs
+          : []
+      );
+
+      setAssets(
+        Array.isArray(inventoryResponse.data?.assets)
+          ? inventoryResponse.data.assets
+          : []
+      );
+
+      setError("");
+    } catch (err) {
+      console.error("Asset discovery load error:", err);
+
+      if (err.response?.status === 401) {
+        setError("Your session has expired. Please login again.");
+      } else if (err.response?.status === 403) {
+        setError("You are not authorized to view asset discovery.");
+      } else {
+        setError(
+          err.response?.data?.detail ||
+            err.message ||
+            "Unable to load asset discovery."
+        );
+      }
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadDiscovery();
+
+    const timer = window.setInterval(() => {
+      loadDiscovery(true);
+    }, 7000);
+
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const targetAssets = assets.filter(
+    (asset) =>
+      asset.asset_type === "Target Assessment" &&
+      !String(asset.target || "").startsWith("code://")
+  );
+
+  const selectedAsset = targetAssets.find(
+    (asset) => String(asset.assessment_id) === String(selectedAssessmentId)
+  );
+
+  const handleStartDiscovery = async () => {
+    if (!selectedAssessmentId) {
+      setError("Select a target assessment before starting discovery.");
+      return;
+    }
+
+    try {
+      setStarting(true);
+      setError("");
+      setMessage("");
+
+      const token = localStorage.getItem("token");
+      if (!token) {
+        throw new Error("No authentication token found.");
+      }
+
+      const response = await axios.post(
+        `${API_URL}/client/asset-discovery/run`,
+        {
+          assessment_id: Number(selectedAssessmentId),
+          scan_type: scanType,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setMessage(
+        response.data?.message ||
+          "Asset discovery started successfully."
+      );
+
+      await loadDiscovery(true);
+    } catch (err) {
+      console.error("Asset discovery start error:", err);
+
+      setError(
+        err.response?.data?.detail ||
+          err.message ||
+          "Unable to start asset discovery."
+      );
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const handleRefresh = async () => {
+    try {
+      setRefreshing(true);
+      setError("");
+      await loadDiscovery(true);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const statusClass = (status) => {
+    const normalized = String(status || "").toLowerCase();
+
+    if (["completed", "complete", "success"].includes(normalized)) {
+      return "border-green-500/20 bg-green-500/10 text-green-400";
+    }
+
+    if (
+      ["running", "queued", "pending", "in_progress", "in-progress"].includes(
+        normalized
+      )
+    ) {
+      return "border-yellow-500/20 bg-yellow-500/10 text-yellow-400";
+    }
+
+    if (
+      ["failed", "error", "cancelled", "canceled"].includes(normalized)
+    ) {
+      return "border-red-500/20 bg-red-500/10 text-red-400";
+    }
+
+    return "border-gray-500/20 bg-gray-500/10 text-gray-400";
+  };
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+
+    const parsed = new Date(value);
+
+    return Number.isNaN(parsed.getTime())
+      ? "—"
+      : parsed.toLocaleString();
+  };
+
+  const getResult = (run) =>
+    run && run.result && typeof run.result === "object"
+      ? run.result
+      : null;
+
+  const getHosts = (run) => {
+    const result = getResult(run);
+    return Array.isArray(result?.results?.hosts)
+      ? result.results.hosts
+      : [];
+  };
+
+  const getOpenPorts = (run) => {
+    const result = getResult(run);
+    return Array.isArray(result?.open_ports)
+      ? result.open_ports
+      : [];
+  };
+
+  const totalHosts = runs.reduce(
+    (sum, run) => sum + Number(run.host_count || 0),
+    0
+  );
+
+  const totalOpenPorts = runs.reduce(
+    (sum, run) => sum + Number(run.open_port_count || 0),
+    0
+  );
+
+  const activeRuns = runs.filter((run) =>
+    ["queued", "running"].includes(
+      String(run.status || "").toLowerCase()
+    )
+  ).length;
+
+  return (
+    <div className="min-h-full bg-black p-6 text-white">
+      <div className="mx-auto max-w-7xl">
+        <div className="mb-7 flex flex-wrap items-start justify-between gap-4 border-b border-white/10 pb-5">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-widest text-red-500">
+              {sectionLabel}
+            </p>
+
+            <h1 className="mt-2 text-2xl font-bold">
+              {title}
+            </h1>
+
+            <p className="mt-2 max-w-3xl text-sm text-gray-400">
+              Run authenticated, ownership-scoped Nmap discovery against
+              persisted target assessments and inspect the real discovery
+              results returned by the backend.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleRefresh}
+            disabled={refreshing || loading}
+            className="border border-white/15 px-4 py-2 text-xs text-gray-300 hover:border-red-500/50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {refreshing ? "Refreshing…" : "Refresh now"}
+          </button>
+        </div>
+
+        {error && (
+          <div className="mb-5 border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300">
+            {error}
+          </div>
+        )}
+
+        {message && !error && (
+          <div className="mb-5 border border-green-500/20 bg-green-500/5 p-4 text-sm text-green-300">
+            {message}
+          </div>
+        )}
+
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {[
+            ["Discovery Runs", runs.length, "Persisted discovery runs"],
+            ["Active Runs", activeRuns, "Queued or running"],
+            ["Hosts Discovered", totalHosts, "Across persisted runs"],
+            ["Open Ports", totalOpenPorts, "Across persisted runs"],
+          ].map(([label, value, description]) => (
+            <div
+              key={label}
+              className="border border-white/10 bg-[#0b0b0b] p-5"
+            >
+              <p className="text-xs text-gray-500">{label}</p>
+              <p className="mt-3 text-3xl font-bold text-white">
+                {value}
+              </p>
+              <p className="mt-2 text-xs text-gray-600">
+                {description}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        <section className="mt-7 border border-white/10 bg-[#0b0b0b]">
+          <div className="border-b border-white/10 p-5">
+            <h2 className="font-semibold text-white">
+              Start Discovery
+            </h2>
+            <p className="mt-1 text-xs text-gray-600">
+              Only target assessments are eligible. Code assessments are
+              intentionally excluded because Nmap discovery requires a
+              network-resolvable target.
+            </p>
+          </div>
+
+          <div className="grid gap-4 p-5 md:grid-cols-[1fr_220px_auto] md:items-end">
+            <div>
+              <label className="mb-2 block text-xs uppercase tracking-wider text-gray-500">
+                Target Assessment
+              </label>
+
+              <select
+                value={selectedAssessmentId}
+                onChange={(event) =>
+                  setSelectedAssessmentId(event.target.value)
+                }
+                disabled={starting || loading || targetAssets.length === 0}
+                className="w-full border border-white/10 bg-black px-3 py-3 text-sm text-gray-200 outline-none focus:border-red-500/50 disabled:opacity-50"
+              >
+                <option value="">
+                  {targetAssets.length === 0
+                    ? "No eligible target assessments"
+                    : "Select an assessment"}
+                </option>
+
+                {targetAssets.map((asset) => (
+                  <option
+                    key={asset.assessment_id}
+                    value={asset.assessment_id}
+                  >
+                    #{asset.assessment_id} — {asset.target}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-2 block text-xs uppercase tracking-wider text-gray-500">
+                Scan Type
+              </label>
+
+              <select
+                value={scanType}
+                onChange={(event) => setScanType(event.target.value)}
+                disabled={starting}
+                className="w-full border border-white/10 bg-black px-3 py-3 text-sm text-gray-200 outline-none focus:border-red-500/50 disabled:opacity-50"
+              >
+                <option value="quick">Quick</option>
+                <option value="service">Service</option>
+                <option value="detailed">Detailed</option>
+                <option value="comprehensive">Comprehensive</option>
+                <option value="api">API</option>
+              </select>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleStartDiscovery}
+              disabled={
+                starting ||
+                loading ||
+                !selectedAssessmentId ||
+                !selectedAsset
+              }
+              className="border border-red-500/40 bg-red-600/10 px-5 py-3 text-sm font-medium text-red-300 hover:bg-red-600/20 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {starting ? "Starting…" : "Start Discovery"}
+            </button>
+          </div>
+
+          {selectedAsset && (
+            <div className="border-t border-white/10 px-5 py-4 text-xs text-gray-500">
+              Selected target:{" "}
+              <span className="text-gray-300">
+                {selectedAsset.target}
+              </span>
+              {" · "}
+              Assessment #{selectedAsset.assessment_id}
+            </div>
+          )}
+        </section>
+
+        <section className="mt-7 border border-white/10 bg-[#0b0b0b]">
+          <div className="border-b border-white/10 p-5">
+            <h2 className="font-semibold text-white">
+              Discovery Runs
+            </h2>
+            <p className="mt-1 text-xs text-gray-600">
+              Results are read from persisted AssetDiscoveryRun records.
+              The page refreshes automatically while discovery is active.
+            </p>
+          </div>
+
+          {loading ? (
+            <div className="p-8 text-sm text-gray-400">
+              Loading discovery data from the backend…
+            </div>
+          ) : runs.length === 0 ? (
+            <div className="p-8 text-center text-sm text-gray-500">
+              No asset discovery runs have been recorded in your scope.
+            </div>
+          ) : (
+            <div className="divide-y divide-white/5">
+              {runs.map((run) => {
+                const hosts = getHosts(run);
+                const openPorts = getOpenPorts(run);
+
+                return (
+                  <div key={run.id} className="p-5">
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-3">
+                          <h3 className="font-medium text-gray-200">
+                            {run.target || "Unknown target"}
+                          </h3>
+
+                          <span
+                            className={`border px-2 py-1 text-[11px] uppercase ${statusClass(
+                              run.status
+                            )}`}
+                          >
+                            {run.status || "unknown"}
+                          </span>
+                        </div>
+
+                        <p className="mt-2 text-xs text-gray-600">
+                          Run #{run.id} · Assessment #
+                          {run.assessment_id} · {run.scan_type}
+                        </p>
+                      </div>
+
+                      <div className="text-right text-xs text-gray-600">
+                        <div>
+                          Started: {formatDate(run.started_at)}
+                        </div>
+                        <div className="mt-1">
+                          Completed: {formatDate(run.completed_at)}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                      <div className="border border-white/10 p-3">
+                        <p className="text-[11px] uppercase tracking-wider text-gray-600">
+                          Hosts
+                        </p>
+                        <p className="mt-1 text-lg font-semibold">
+                          {Number(run.host_count || 0)}
+                        </p>
+                      </div>
+
+                      <div className="border border-white/10 p-3">
+                        <p className="text-[11px] uppercase tracking-wider text-gray-600">
+                          Open Ports
+                        </p>
+                        <p className="mt-1 text-lg font-semibold">
+                          {Number(run.open_port_count || 0)}
+                        </p>
+                      </div>
+
+                      <div className="border border-white/10 p-3">
+                        <p className="text-[11px] uppercase tracking-wider text-gray-600">
+                          Job ID
+                        </p>
+                        <p className="mt-1 truncate text-xs text-gray-400">
+                          {run.job_id || "—"}
+                        </p>
+                      </div>
+                    </div>
+
+                    {hosts.length > 0 && (
+                      <div className="mt-5">
+                        <h4 className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
+                          Discovered Hosts
+                        </h4>
+
+                        <div className="overflow-x-auto border border-white/10">
+                          <table className="w-full min-w-[700px] text-left text-sm">
+                            <thead className="border-b border-white/10 text-xs uppercase tracking-wider text-gray-600">
+                              <tr>
+                                <th className="px-4 py-3">Address</th>
+                                <th className="px-4 py-3">Hostname</th>
+                                <th className="px-4 py-3">State</th>
+                                <th className="px-4 py-3">Ports</th>
+                              </tr>
+                            </thead>
+
+                            <tbody className="divide-y divide-white/5">
+                              {hosts.map((host, index) => {
+                                const addresses = Array.isArray(
+                                  host.addresses
+                                )
+                                  ? host.addresses
+                                  : [];
+
+                                const hostnames = Array.isArray(
+                                  host.hostnames
+                                )
+                                  ? host.hostnames
+                                  : [];
+
+                                const ports = Array.isArray(host.ports)
+                                  ? host.ports
+                                  : [];
+
+                                const addressText =
+                                  addresses
+                                    .map((item) =>
+                                      typeof item === "string"
+                                        ? item
+                                        : item?.addr
+                                    )
+                                    .filter(Boolean)
+                                    .join(", ") || "—";
+
+                                const hostnameText =
+                                  hostnames
+                                    .map((item) =>
+                                      typeof item === "string"
+                                        ? item
+                                        : item?.name
+                                    )
+                                    .filter(Boolean)
+                                    .join(", ") || "—";
+
+                                return (
+                                  <tr
+                                    key={`${run.id}-${index}`}
+                                    className="hover:bg-white/[0.02]"
+                                  >
+                                    <td className="px-4 py-3 font-medium text-gray-300">
+                                      {addressText}
+                                    </td>
+
+                                    <td className="px-4 py-3 text-gray-400">
+                                      {hostnameText}
+                                    </td>
+
+                                    <td className="px-4 py-3 text-gray-400">
+                                      {host.state || "unknown"}
+                                    </td>
+
+                                    <td className="px-4 py-3 text-gray-400">
+                                      {ports.length}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {openPorts.length > 0 && (
+                      <div className="mt-5">
+                        <h4 className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
+                          Open Ports
+                        </h4>
+
+                        <div className="flex flex-wrap gap-2">
+                          {openPorts.map((port, index) => {
+                            const portNumber =
+                              typeof port === "object"
+                                ? port.port ?? port.portid
+                                : port;
+
+                            const protocol =
+                              typeof port === "object"
+                                ? port.protocol || "tcp"
+                                : "tcp";
+
+                            const service =
+                              typeof port === "object"
+                                ? port.service ||
+                                  port.name ||
+                                  port.product ||
+                                  ""
+                                : "";
+
+                            return (
+                              <span
+                                key={`${run.id}-port-${index}`}
+                                className="border border-white/10 bg-black px-3 py-2 text-xs text-gray-300"
+                              >
+                                {protocol}/{portNumber}
+                                {service ? ` · ${service}` : ""}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {run.status &&
+                      ["failed", "error"].includes(
+                        String(run.status).toLowerCase()
+                      ) &&
+                      getResult(run)?.error && (
+                        <div className="mt-5 border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-300">
+                          {getResult(run).error}
+                        </div>
+                      )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+
+
+
+function InternalAttackSurface() {
+  const token = localStorage.getItem("token");
+  const [data, setData] = useState(null);
+  const [assets, setAssets] = useState([]);
+  const [selectedAsset, setSelectedAsset] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [progressNow, setProgressNow] = useState(Date.now());
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const loadData = async () => {
+    try {
+      setError("");
+
+      const [
+        surfaceResponse,
+        endpointResponse,
+        networkResponse,
+        databaseResponse,
+        serverResponse,
+      ] = await Promise.all([
+        fetch(`${API_URL}/client/internal-attack-surface`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+        fetch(`${API_URL}/client/endpoints`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+        fetch(`${API_URL}/client/network-devices`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+        fetch(`${API_URL}/client/databases`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+        fetch(`${API_URL}/client/servers`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+      ]);
+
+      const responses = [
+        surfaceResponse,
+        endpointResponse,
+        networkResponse,
+        databaseResponse,
+        serverResponse,
+      ];
+
+      const failedResponse = responses.find((response) => !response.ok);
+
+      if (failedResponse) {
+        throw new Error(
+          `Internal attack surface request failed (${failedResponse.status})`
+        );
+      }
+
+      const [
+        surfaceData,
+        endpointData,
+        networkData,
+        databaseData,
+        serverData,
+      ] = await Promise.all(responses.map((response) => response.json()));
+
+      const internalAssets = [];
+
+      const addPrivateAssets = (items, assetType) => {
+        (items || []).forEach((item) => {
+          const ip = String(item.ip_address || "").trim();
+
+          if (!ip) return;
+
+          const parts = ip.split(".").map((value) => Number(value));
+
+          const isRfc1918 =
+            parts.length === 4 &&
+            parts.every((value) => Number.isInteger(value) && value >= 0 && value <= 255) &&
+            (
+              parts[0] === 10 ||
+              (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+              (parts[0] === 192 && parts[1] === 168)
+            );
+
+          if (!isRfc1918) return;
+
+          internalAssets.push({
+            asset_type: assetType,
+            asset_id: item.id,
+            ip_address: ip,
+            name:
+              item.hostname ||
+              item.name ||
+              item.database_id ||
+              `${assetType} #${item.id}`,
+            status: item.status || item.host_status || "UNKNOWN",
+          });
+        });
+      };
+
+      addPrivateAssets(endpointData.endpoints, "ENDPOINT");
+      addPrivateAssets(networkData.network_devices, "NETWORK_DEVICE");
+      addPrivateAssets(databaseData.databases, "DATABASE");
+      addPrivateAssets(serverData.servers, "SERVER");
+
+      internalAssets.sort((a, b) =>
+        `${a.asset_type}-${a.name}`.localeCompare(
+          `${b.asset_type}-${b.name}`
+        )
+      );
+
+      setData(surfaceData);
+      setAssets(internalAssets);
+
+      if (!selectedAsset && internalAssets.length > 0) {
+        setSelectedAsset(
+          `${internalAssets[0].asset_type}:${internalAssets[0].asset_id}`
+        );
+      }
+    } catch (err) {
+      setError(err.message || "Unable to load internal attack surface data.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+    const interval = setInterval(loadData, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const startScan = async () => {
+    if (!selectedAsset) {
+      setError("Select a verified internal asset first.");
+      return;
+    }
+
+    const separatorIndex = selectedAsset.indexOf(":");
+
+    if (separatorIndex <= 0) {
+      setError("Invalid internal asset selection.");
+      return;
+    }
+
+    const assetType = selectedAsset.slice(0, separatorIndex);
+    const assetId = Number(selectedAsset.slice(separatorIndex + 1));
+
+    if (!Number.isInteger(assetId)) {
+      setError("Invalid internal asset ID.");
+      return;
+    }
+
+    try {
+      setRunning(true);
+      setError("");
+      setMessage("");
+
+      const response = await fetch(
+        `${API_URL}/client/internal-attack-surface/run`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            asset_type: assetType,
+            asset_id: assetId,
+          }),
+        }
+      );
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          result.detail || `Internal scan request failed (${response.status})`
+        );
+      }
+
+      setMessage(
+        `Masscan queued for ${result.target_ip}. Job ${result.job_id}`
+      );
+
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Unable to start internal attack surface scan.");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const runs = data?.runs || [];
+  const latestRun = runs.length > 0 ? runs[0] : null;
+
+  const activeRun =
+    latestRun &&
+    ["QUEUED", "RUNNING", "STARTED", "IN_PROGRESS"].includes(
+      String(latestRun.status || "").toUpperCase()
+    )
+      ? latestRun
+      : null;
+
+  const scanActive = Boolean(running || activeRun);
+
+  const completedDurations = runs
+    .filter(
+      (run) =>
+        String(run.status || "").toUpperCase() === "COMPLETED" &&
+        run.started_at &&
+        run.completed_at
+    )
+    .map((run) => {
+      const started = new Date(run.started_at).getTime();
+      const completed = new Date(run.completed_at).getTime();
+      return completed > started ? completed - started : null;
+    })
+    .filter((duration) => Number.isFinite(duration) && duration > 0);
+
+  const estimatedDurationMs =
+    completedDurations.length > 0
+      ? completedDurations.reduce((sum, value) => sum + value, 0) /
+        completedDurations.length
+      : 180000;
+
+  const progressStart =
+    activeRun?.started_at ||
+    activeRun?.created_at ||
+    null;
+
+  const elapsedMs = progressStart
+    ? Math.max(0, progressNow - new Date(progressStart).getTime())
+    : 0;
+
+  const estimatedProgress = activeRun
+    ? Math.min(
+        99,
+        Math.max(1, Math.round((elapsedMs / estimatedDurationMs) * 100))
+      )
+    : 5;
+
+  useEffect(() => {
+    if (!scanActive) return undefined;
+
+    setProgressNow(Date.now());
+
+    const interval = setInterval(() => {
+      setProgressNow(Date.now());
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [scanActive]);
+
+  useEffect(() => {
+    if (!activeRun) return undefined;
+
+    const interval = setInterval(() => {
+      loadData();
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [activeRun?.id, activeRun?.status]);
+
+  const statusValue = (value) =>
+    String(value || "UNKNOWN").toUpperCase();
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  };
+
+  const getExecution = (run) => {
+    if (!run?.result) return null;
+    return run.result.execution || null;
+  };
+
+  return (
+    <div style={{ padding: "24px", color: "#e5e7eb" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: "16px",
+          marginBottom: "20px",
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <h2 style={{ margin: 0, fontSize: "24px" }}>
+            Internal Attack Surface
+          </h2>
+          <p style={{ margin: "6px 0 0", color: "#94a3b8" }}>
+            Real Masscan discovery against verified private assets in your
+            environment.
+          </p>
+        </div>
+
+        <button
+          onClick={loadData}
+          disabled={loading}
+          style={{
+            padding: "9px 14px",
+            borderRadius: "8px",
+            border: "1px solid #334155",
+            background: "#111827",
+            color: "#e5e7eb",
+            cursor: loading ? "not-allowed" : "pointer",
+          }}
+        >
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div
+          style={{
+            marginBottom: "16px",
+            padding: "12px 14px",
+            borderRadius: "8px",
+            background: "rgba(127, 29, 29, 0.25)",
+            border: "1px solid #7f1d1d",
+            color: "#fecaca",
+          }}
+        >
+          {error}
+        </div>
+      )}
+
+      {message && (
+        <div
+          style={{
+            marginBottom: "16px",
+            padding: "12px 14px",
+            borderRadius: "8px",
+            background: "rgba(6, 78, 59, 0.25)",
+            border: "1px solid #065f46",
+            color: "#a7f3d0",
+          }}
+        >
+          {message}
+        </div>
+      )}
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+          gap: "12px",
+          marginBottom: "20px",
+        }}
+      >
+        {[
+          ["Discovery Runs", data?.run_count ?? 0],
+          ["Internal Assets", assets.length],
+          ["Hosts Discovered", latestRun?.discovered_host_count ?? 0],
+          ["Open Ports", latestRun?.discovered_port_count ?? 0],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            style={{
+              padding: "16px",
+              borderRadius: "10px",
+              border: "1px solid #1e293b",
+              background: "#0f172a",
+            }}
+          >
+            <div style={{ color: "#94a3b8", fontSize: "13px" }}>
+              {label}
+            </div>
+            <div
+              style={{
+                marginTop: "8px",
+                fontSize: "24px",
+                fontWeight: 700,
+              }}
+            >
+              {value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div
+        style={{
+          padding: "16px",
+          borderRadius: "10px",
+          border: "1px solid #1e293b",
+          background: "#0f172a",
+          marginBottom: "20px",
+        }}
+      >
+        <div style={{ fontWeight: 700, marginBottom: "10px" }}>
+          Run Internal Discovery
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            gap: "10px",
+            alignItems: "center",
+            flexWrap: "wrap",
+          }}
+        >
+          <select
+            value={selectedAsset}
+            onChange={(event) => setSelectedAsset(event.target.value)}
+            style={{
+              minWidth: "360px",
+              padding: "10px",
+              borderRadius: "8px",
+              border: "1px solid #334155",
+              background: "#020617",
+              color: "#e5e7eb",
+            }}
+          >
+            <option value="">Select a verified internal asset</option>
+            {assets.map((asset) => {
+              const value = `${asset.asset_type}:${asset.asset_id}`;
+
+              return (
+                <option key={value} value={value}>
+                  {asset.asset_type} — {asset.name} — {asset.ip_address}
+                </option>
+              );
+            })}
+          </select>
+
+          <button
+            onClick={startScan}
+            disabled={running || !selectedAsset}
+            style={{
+              padding: "10px 16px",
+              borderRadius: "8px",
+              border: "1px solid #1d4ed8",
+              background: running ? "#1e3a8a" : "#2563eb",
+              color: "#fff",
+              cursor:
+                running || !selectedAsset ? "not-allowed" : "pointer",
+            }}
+          >
+            {running ? "Starting..." : "Run Masscan"}
+          </button>
+        </div>
+
+        <div
+          style={{
+            marginTop: "10px",
+            color: "#64748b",
+            fontSize: "12px",
+          }}
+        >
+          Only persisted tenant-owned RFC1918 assets are available. Arbitrary
+          IP addresses and CIDR ranges cannot be entered here.
+        </div>
+      </div>
+
+      <div
+        style={{
+          border: "1px solid #1e293b",
+          borderRadius: "10px",
+          overflow: "hidden",
+          background: "#0f172a",
+        }}
+      >
+        <div
+          style={{
+            padding: "14px 16px",
+            borderBottom: "1px solid #1e293b",
+            fontWeight: 700,
+          }}
+        >
+          Internal Discovery History
+        </div>
+
+        {loading ? (
+          <div style={{ padding: "20px", color: "#94a3b8" }}>
+            Loading internal attack surface data...
+          </div>
+        ) : runs.length === 0 ? (
+          <div style={{ padding: "20px", color: "#94a3b8" }}>
+            No internal attack surface discovery runs have been recorded yet.
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ color: "#94a3b8", textAlign: "left" }}>
+                  <th style={{ padding: "12px" }}>Asset</th>
+                  <th style={{ padding: "12px" }}>Target</th>
+                  <th style={{ padding: "12px" }}>Status</th>
+                  <th style={{ padding: "12px" }}>Hosts</th>
+                  <th style={{ padding: "12px" }}>Ports</th>
+                  <th style={{ padding: "12px" }}>Started</th>
+                  <th style={{ padding: "12px" }}>Completed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {runs.map((run) => (
+                  <tr
+                    key={run.id}
+                    style={{ borderTop: "1px solid #1e293b" }}
+                  >
+                    <td style={{ padding: "12px", fontWeight: 600 }}>
+                      {run.asset_type} #{run.asset_id}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {run.target_ip}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {statusValue(run.status)}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {run.discovered_host_count ?? 0}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {run.discovered_port_count ?? 0}
+                    </td>
+                    <td style={{ padding: "12px", color: "#94a3b8" }}>
+                      {formatDate(run.started_at)}
+                    </td>
+                    <td style={{ padding: "12px", color: "#94a3b8" }}>
+                      {formatDate(run.completed_at)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {latestRun && (
+        <div
+          style={{
+            marginTop: "20px",
+            padding: "16px",
+            borderRadius: "10px",
+            border: "1px solid #1e293b",
+            background: "#0f172a",
+          }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: "10px" }}>
+            Latest Scan Details
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+              gap: "10px",
+            }}
+          >
+            <div>Job: {latestRun.job_id}</div>
+            <div>Target: {latestRun.target_ip}</div>
+            <div>Status: {statusValue(latestRun.status)}</div>
+            <div>
+              Hosts: {latestRun.discovered_host_count ?? 0}
+            </div>
+            <div>
+              Open Ports: {latestRun.discovered_port_count ?? 0}
+            </div>
+          </div>
+
+          {getExecution(latestRun)?.results?.open_ports?.length > 0 && (
+            <div style={{ marginTop: "16px" }}>
+              <div
+                style={{
+                  color: "#94a3b8",
+                  fontSize: "13px",
+                  marginBottom: "8px",
+                }}
+              >
+                Discovered Open Ports
+              </div>
+
+              <div
+                style={{
+                  display: "flex",
+                  gap: "8px",
+                  flexWrap: "wrap",
+                }}
+              >
+                {getExecution(latestRun).results.open_ports.map(
+                  (port, index) => (
+                    <span
+                      key={`${latestRun.id}-port-${index}`}
+                      style={{
+                        border: "1px solid rgba(255,255,255,0.1)",
+                        background: "#020617",
+                        padding: "7px 10px",
+                        fontSize: "12px",
+                        color: "#d1d5db",
+                      }}
+                    >
+                      {typeof port === "object"
+                        ? `${port.protocol || "tcp"}/${port.port}`
+                        : `tcp/${port}`}
+                    </span>
+                  )
+                )}
+              </div>
+            </div>
+          )}
+
+          {latestRun.status &&
+            ["failed", "error"].includes(
+              String(latestRun.status).toLowerCase()
+            ) &&
+            latestRun.result?.error && (
+              <div
+                style={{
+                  marginTop: "14px",
+                  padding: "10px",
+                  border: "1px solid rgba(239,68,68,0.25)",
+                  background: "rgba(127,29,29,0.15)",
+                  color: "#fecaca",
+                  fontSize: "12px",
+                }}
+              >
+                {latestRun.result.error}
+              </div>
+            )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+function ExternalAttackSurface() {
+  const token = localStorage.getItem("token");
+  const [data, setData] = useState(null);
+  const [assessments, setAssessments] = useState([]);
+  const [selectedAssessment, setSelectedAssessment] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [progressNow, setProgressNow] = useState(Date.now());
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const loadData = async () => {
+    try {
+      setError("");
+
+      const [surfaceResponse, assetResponse] = await Promise.all([
+        fetch(`${API_URL}/client/external-attack-surface`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+        fetch(`${API_URL}/client/asset-inventory`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+      ]);
+
+      if (!surfaceResponse.ok) {
+        throw new Error(`External attack surface request failed (${surfaceResponse.status})`);
+      }
+
+      if (!assetResponse.ok) {
+        throw new Error(`Assessment inventory request failed (${assetResponse.status})`);
+      }
+
+      const surfaceData = await surfaceResponse.json();
+      const assetData = await assetResponse.json();
+
+      const realAssessments = (assetData.assets || []).filter(
+        (item) =>
+          item.asset_type !== "Code Assessment" &&
+          item.target &&
+          !String(item.target).toLowerCase().startsWith("code://")
+      );
+
+      setData(surfaceData);
+      setAssessments(realAssessments);
+
+      if (!selectedAssessment && realAssessments.length > 0) {
+        setSelectedAssessment(String(realAssessments[0].assessment_id || realAssessments[0].id));
+      }
+    } catch (err) {
+      setError(err.message || "Unable to load external attack surface data.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+    const interval = setInterval(loadData, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const startDiscovery = async () => {
+    if (!selectedAssessment) {
+      setError("Select an owned web assessment first.");
+      return;
+    }
+
+    try {
+      setRunning(true);
+      setError("");
+      setMessage("");
+
+      const response = await fetch(
+        `${API_URL}/client/external-attack-surface/run`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            assessment_id: Number(selectedAssessment),
+          }),
+        }
+      );
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          result.detail || `Discovery request failed (${response.status})`
+        );
+      }
+
+      setMessage(
+        `Discovery started for ${result.target_domain}. Job ${result.job_id}`
+      );
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Unable to start external attack surface discovery.");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const runs = data?.runs || [];
+  const latestRun = runs.length > 0 ? runs[0] : null;
+
+  const statusValue = (value) =>
+    String(value || "UNKNOWN").toUpperCase();
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  };
+
+  return (
+    <div style={{ padding: "24px", color: "#e5e7eb" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: "16px",
+          marginBottom: "20px",
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <h2 style={{ margin: 0, fontSize: "24px" }}>
+            External Attack Surface
+          </h2>
+          <p style={{ margin: "6px 0 0", color: "#94a3b8" }}>
+            Real DNS reconnaissance for domains from your owned web assessments.
+          </p>
+        </div>
+
+        <button
+          onClick={loadData}
+          disabled={loading}
+          style={{
+            padding: "9px 14px",
+            borderRadius: "8px",
+            border: "1px solid #334155",
+            background: "#111827",
+            color: "#e5e7eb",
+            cursor: loading ? "not-allowed" : "pointer",
+          }}
+        >
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div
+          style={{
+            marginBottom: "16px",
+            padding: "12px 14px",
+            borderRadius: "8px",
+            background: "rgba(127, 29, 29, 0.25)",
+            border: "1px solid #7f1d1d",
+            color: "#fecaca",
+          }}
+        >
+          {error}
+        </div>
+      )}
+
+      {message && (
+        <div
+          style={{
+            marginBottom: "16px",
+            padding: "12px 14px",
+            borderRadius: "8px",
+            background: "rgba(6, 78, 59, 0.25)",
+            border: "1px solid #065f46",
+            color: "#a7f3d0",
+          }}
+        >
+          {message}
+        </div>
+      )}
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+          gap: "12px",
+          marginBottom: "20px",
+        }}
+      >
+        {[
+          ["Discovery Runs", data?.run_count ?? 0],
+          ["Domains Discovered", latestRun?.discovered_domain_count ?? 0],
+          ["Hosts Discovered", latestRun?.discovered_host_count ?? 0],
+          ["IPs Discovered", latestRun?.discovered_ip_count ?? 0],
+          ["Ports Discovered", latestRun?.discovered_port_count ?? 0],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            style={{
+              padding: "16px",
+              borderRadius: "10px",
+              border: "1px solid #1e293b",
+              background: "#0f172a",
+            }}
+          >
+            <div style={{ color: "#94a3b8", fontSize: "13px" }}>
+              {label}
+            </div>
+            <div style={{ marginTop: "8px", fontSize: "24px", fontWeight: 700 }}>
+              {value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div
+        style={{
+          padding: "16px",
+          borderRadius: "10px",
+          border: "1px solid #1e293b",
+          background: "#0f172a",
+          marginBottom: "20px",
+        }}
+      >
+        <div style={{ fontWeight: 700, marginBottom: "10px" }}>
+          Run Discovery
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            gap: "10px",
+            alignItems: "center",
+            flexWrap: "wrap",
+          }}
+        >
+          <select
+            value={selectedAssessment}
+            onChange={(event) => setSelectedAssessment(event.target.value)}
+            style={{
+              minWidth: "320px",
+              padding: "10px",
+              borderRadius: "8px",
+              border: "1px solid #334155",
+              background: "#020617",
+              color: "#e5e7eb",
+            }}
+          >
+            <option value="">Select an owned web assessment</option>
+            {assessments.map((item) => {
+              const assessmentId = item.assessment_id || item.id;
+              return (
+                <option key={assessmentId} value={assessmentId}>
+                  Assessment #{assessmentId} — {item.target}
+                </option>
+              );
+            })}
+          </select>
+
+          <button
+            onClick={startDiscovery}
+            disabled={running || !selectedAssessment}
+            style={{
+              padding: "10px 16px",
+              borderRadius: "8px",
+              border: "1px solid #1d4ed8",
+              background: running ? "#1e3a8a" : "#2563eb",
+              color: "#fff",
+              cursor:
+                running || !selectedAssessment ? "not-allowed" : "pointer",
+            }}
+          >
+            {running ? "Starting..." : "Run DNS Discovery"}
+          </button>
+        </div>
+
+        <div style={{ marginTop: "10px", color: "#64748b", fontSize: "12px" }}>
+          Targets are taken from persisted client-owned assessments. Arbitrary
+          domains cannot be entered here.
+        </div>
+      </div>
+
+      <div
+        style={{
+          border: "1px solid #1e293b",
+          borderRadius: "10px",
+          overflow: "hidden",
+          background: "#0f172a",
+        }}
+      >
+        <div
+          style={{
+            padding: "14px 16px",
+            borderBottom: "1px solid #1e293b",
+            fontWeight: 700,
+          }}
+        >
+          Discovery History
+        </div>
+
+        {loading ? (
+          <div style={{ padding: "20px", color: "#94a3b8" }}>
+            Loading external attack surface data...
+          </div>
+        ) : runs.length === 0 ? (
+          <div style={{ padding: "20px", color: "#94a3b8" }}>
+            No external attack surface discovery runs have been recorded yet.
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ color: "#94a3b8", textAlign: "left" }}>
+                  <th style={{ padding: "12px" }}>Domain</th>
+                  <th style={{ padding: "12px" }}>Status</th>
+                  <th style={{ padding: "12px" }}>Domains</th>
+                  <th style={{ padding: "12px" }}>Hosts</th>
+                  <th style={{ padding: "12px" }}>IPs</th>
+                  <th style={{ padding: "12px" }}>Started</th>
+                  <th style={{ padding: "12px" }}>Completed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {runs.map((run) => (
+                  <tr
+                    key={run.id}
+                    style={{ borderTop: "1px solid #1e293b" }}
+                  >
+                    <td style={{ padding: "12px", fontWeight: 600 }}>
+                      {run.target_domain}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {statusValue(run.status)}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {run.discovered_domain_count ?? 0}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {run.discovered_host_count ?? 0}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {run.discovered_ip_count ?? 0}
+                    </td>
+                    <td style={{ padding: "12px", color: "#94a3b8" }}>
+                      {formatDate(run.started_at)}
+                    </td>
+                    <td style={{ padding: "12px", color: "#94a3b8" }}>
+                      {formatDate(run.completed_at)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function DNSSecurity() {
+  const token = localStorage.getItem("token");
+  const [data, setData] = useState([]);
+  const [assessments, setAssessments] = useState([]);
+  const [selectedAssessment, setSelectedAssessment] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const loadData = async () => {
+    try {
+      setError("");
+
+      const [dnsResponse, assetResponse] = await Promise.all([
+        fetch(`${API_URL}/client/dns-security`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        fetch(`${API_URL}/client/asset-inventory`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      ]);
+
+      if (!dnsResponse.ok) {
+        throw new Error(
+          `DNS Security request failed (${dnsResponse.status})`
+        );
+      }
+
+      if (!assetResponse.ok) {
+        throw new Error(
+          `Assessment inventory request failed (${assetResponse.status})`
+        );
+      }
+
+      const dnsData = await dnsResponse.json();
+      const assetData = await assetResponse.json();
+
+      const realAssessments = (assetData.assets || []).filter(
+        (item) =>
+          item.asset_type !== "Code Assessment" &&
+          item.target &&
+          !String(item.target).toLowerCase().startsWith("code://")
+      );
+
+      setData(Array.isArray(dnsData) ? dnsData : []);
+      setAssessments(realAssessments);
+
+      if (!selectedAssessment && realAssessments.length > 0) {
+        setSelectedAssessment(
+          String(realAssessments[0].assessment_id || realAssessments[0].id)
+        );
+      }
+    } catch (err) {
+      setError(err.message || "Unable to load DNS Security data.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+    const interval = setInterval(loadData, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const runs = Array.isArray(data) ? data : [];
+  const latestRun = runs.length > 0 ? runs[0] : null;
+
+  const activeRun =
+    latestRun &&
+    ["QUEUED", "RUNNING", "STARTED", "IN_PROGRESS"].includes(
+      String(latestRun.status || "").toUpperCase()
+    )
+      ? latestRun
+      : null;
+
+  const scanActive = Boolean(running || activeRun);
+
+  useEffect(() => {
+    if (!activeRun) return undefined;
+
+    const interval = setInterval(() => {
+      loadData();
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [activeRun?.id, activeRun?.status]);
+
+  const startScan = async () => {
+    if (!selectedAssessment) {
+      setError("Select an owned web assessment first.");
+      return;
+    }
+
+    try {
+      setRunning(true);
+      setError("");
+      setMessage("");
+
+      const response = await fetch(
+        `${API_URL}/client/dns-security`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            assessment_id: Number(selectedAssessment),
+          }),
+        }
+      );
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          result.detail ||
+            `DNS Security request failed (${response.status})`
+        );
+      }
+
+      setMessage(
+        `DNS Security scan started for ${result.target_domain}. Job ${result.job_id}`
+      );
+
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Unable to start DNS Security scan.");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const latestResult = latestRun?.result_data || {};
+  const checks = latestResult.checks || {};
+  const findings = Array.isArray(latestResult.findings)
+    ? latestResult.findings
+    : [];
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime())
+      ? value
+      : date.toLocaleString();
+  };
+
+  const score = latestRun?.security_score;
+  const scoreLabel =
+    score == null
+      ? "—"
+      : `${Number(score).toFixed(2)} / 10`;
+
+  const statusLabel = String(
+    latestRun?.status || "NO SCAN"
+  ).toUpperCase();
+
+  return (
+    <div style={{ padding: "24px", color: "#e5e7eb" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: "16px",
+          marginBottom: "20px",
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <h2 style={{ margin: 0, fontSize: "24px" }}>
+            DNS Security
+          </h2>
+          <p style={{ margin: "6px 0 0", color: "#94a3b8" }}>
+            Real DNS security assessment for domains from your owned web
+            assessments.
+          </p>
+        </div>
+
+        <button
+          onClick={loadData}
+          disabled={loading}
+          style={{
+            padding: "9px 14px",
+            borderRadius: "8px",
+            border: "1px solid #334155",
+            background: "#111827",
+            color: "#e5e7eb",
+            cursor: loading ? "not-allowed" : "pointer",
+          }}
+        >
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div
+          style={{
+            marginBottom: "16px",
+            padding: "12px 14px",
+            borderRadius: "8px",
+            background: "rgba(127, 29, 29, 0.25)",
+            border: "1px solid #7f1d1d",
+            color: "#fecaca",
+          }}
+        >
+          {error}
+        </div>
+      )}
+
+      {message && (
+        <div
+          style={{
+            marginBottom: "16px",
+            padding: "12px 14px",
+            borderRadius: "8px",
+            background: "rgba(6, 78, 59, 0.25)",
+            border: "1px solid #065f46",
+            color: "#ffffff",
+          }}
+        >
+          {message}
+        </div>
+      )}
+
+      {scanActive && (
+        <div
+          style={{
+            marginBottom: "20px",
+            padding: "14px 16px",
+            borderRadius: "10px",
+            border: "1px solid #b91c1c",
+            background: "rgba(30, 58, 138, 0.18)",
+          }}
+        >
+          <div style={{ fontWeight: 700 }}>
+            DNS Security scan in progress
+          </div>
+          <div
+            style={{
+              marginTop: "6px",
+              color: "#fca5a5",
+              fontSize: "13px",
+            }}
+          >
+            {activeRun?.target_domain || "Preparing DNS checks..."}
+          </div>
+          <div
+            style={{
+              marginTop: "10px",
+              height: "6px",
+              borderRadius: "999px",
+              background: "#262626",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                width: "60%",
+                height: "100%",
+                background: "#dc2626",
+                borderRadius: "999px",
+                animation: "pulse 1.5s ease-in-out infinite",
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+          gap: "12px",
+          marginBottom: "20px",
+        }}
+      >
+        {[
+          ["Security Score", scoreLabel],
+          ["Findings", latestRun?.finding_count ?? 0],
+          ["Critical", latestRun?.critical_count ?? 0],
+          ["High", latestRun?.high_count ?? 0],
+          ["Medium", latestRun?.medium_count ?? 0],
+          ["Low", latestRun?.low_count ?? 0],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            style={{
+              padding: "16px",
+              borderRadius: "10px",
+              border: "1px solid #262626",
+              background: "#0d0d0d",
+            }}
+          >
+            <div style={{ color: "#94a3b8", fontSize: "13px" }}>
+              {label}
+            </div>
+            <div
+              style={{
+                marginTop: "8px",
+                fontSize: "22px",
+                fontWeight: 700,
+              }}
+            >
+              {value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div
+        style={{
+          padding: "16px",
+          borderRadius: "10px",
+          border: "1px solid #262626",
+          background: "#0d0d0d",
+          marginBottom: "20px",
+        }}
+      >
+        <div style={{ fontWeight: 700, marginBottom: "10px" }}>
+          Run DNS Security
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            gap: "10px",
+            alignItems: "center",
+            flexWrap: "wrap",
+          }}
+        >
+          <select
+            value={selectedAssessment}
+            onChange={(event) =>
+              setSelectedAssessment(event.target.value)
+            }
+            style={{
+              minWidth: "320px",
+              padding: "10px",
+              borderRadius: "8px",
+              border: "1px solid #334155",
+              background: "#080808",
+              color: "#e5e7eb",
+            }}
+          >
+            <option value="">Select an owned web assessment</option>
+            {assessments.map((item) => {
+              const assessmentId =
+                item.assessment_id || item.id;
+
+              return (
+                <option key={assessmentId} value={assessmentId}>
+                  Assessment #{assessmentId} — {item.target}
+                </option>
+              );
+            })}
+          </select>
+
+          <button
+            onClick={startScan}
+            disabled={running || scanActive || !selectedAssessment}
+            style={{
+              padding: "10px 16px",
+              borderRadius: "8px",
+              border: "1px solid #b91c1c",
+              background:
+                running || scanActive ? "#7f1d1d" : "#dc2626",
+              color: "#fff",
+              cursor:
+                running || scanActive || !selectedAssessment
+                  ? "not-allowed"
+                  : "pointer",
+            }}
+          >
+            {running || scanActive
+              ? "Scanning..."
+              : "Run DNS Security"}
+          </button>
+        </div>
+
+        <div
+          style={{
+            marginTop: "10px",
+            color: "#64748b",
+            fontSize: "12px",
+          }}
+        >
+          Targets are taken from persisted client-owned assessments.
+          Arbitrary domains cannot be entered here.
+        </div>
+      </div>
+
+      <div
+        style={{
+          padding: "16px",
+          borderRadius: "10px",
+          border: "1px solid #262626",
+          background: "#0d0d0d",
+          marginBottom: "20px",
+        }}
+      >
+        <div
+          style={{
+            fontWeight: 700,
+            marginBottom: "14px",
+          }}
+        >
+          DNS Checks
+        </div>
+
+        {latestRun ? (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns:
+                "repeat(auto-fit, minmax(180px, 1fr))",
+              gap: "10px",
+            }}
+          >
+            {[
+              ["DNSSEC", checks.dnssec?.status],
+              ["SPF", checks.spf?.status || (
+                checks.spf?.record_count > 0 ? "CONFIGURED" : "NO_RECORD"
+              )],
+              ["DMARC", checks.dmarc?.status || (
+                checks.dmarc?.record_count > 0 ? "CONFIGURED" : "NO_RECORD"
+              )],
+              ["MX", checks.mx?.status],
+              ["NS", checks.ns?.status],
+              ["CAA", checks.caa?.status],
+            ].map(([label, value]) => (
+              <div
+                key={label}
+                style={{
+                  padding: "12px",
+                  borderRadius: "8px",
+                  border: "1px solid #262626",
+                  background: "#080808",
+                }}
+              >
+                <div
+                  style={{
+                    color: "#94a3b8",
+                    fontSize: "12px",
+                  }}
+                >
+                  {label}
+                </div>
+                <div
+                  style={{
+                    marginTop: "6px",
+                    fontWeight: 700,
+                    fontSize: "13px",
+                  }}
+                >
+                  {value || "NOT CHECKED"}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ color: "#94a3b8" }}>
+            No DNS Security scan has been completed yet.
+          </div>
+        )}
+      </div>
+
+      <div
+        style={{
+          border: "1px solid #262626",
+          borderRadius: "10px",
+          overflow: "hidden",
+          background: "#0d0d0d",
+          marginBottom: "20px",
+        }}
+      >
+        <div
+          style={{
+            padding: "14px 16px",
+            borderBottom: "1px solid #262626",
+            fontWeight: 700,
+          }}
+        >
+          DNS Security Findings
+        </div>
+
+        {findings.length === 0 ? (
+          <div style={{ padding: "20px", color: "#94a3b8" }}>
+            No findings available for the latest scan.
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table
+              style={{
+                width: "100%",
+                borderCollapse: "collapse",
+              }}
+            >
+              <thead>
+                <tr style={{ color: "#94a3b8", textAlign: "left" }}>
+                  <th style={{ padding: "12px" }}>Finding</th>
+                  <th style={{ padding: "12px" }}>Severity</th>
+                  <th style={{ padding: "12px" }}>CVSS</th>
+                  <th style={{ padding: "12px" }}>Risk</th>
+                  <th style={{ padding: "12px" }}>Status</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {findings.map((finding) => (
+                  <tr
+                    key={finding.finding_id || finding.title}
+                    style={{
+                      borderTop: "1px solid #262626",
+                    }}
+                  >
+                    <td style={{ padding: "12px" }}>
+                      <div style={{ fontWeight: 600 }}>
+                        {finding.title}
+                      </div>
+                      <div
+                        style={{
+                          marginTop: "4px",
+                          color: "#94a3b8",
+                          fontSize: "12px",
+                        }}
+                      >
+                        {finding.vulnerability || "DNS Security finding"}
+                      </div>
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {finding.severity || "NONE"}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {finding.cvss_score ?? "—"}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {finding.risk_level || "—"}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {finding.status || "OPEN"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div
+        style={{
+          border: "1px solid #262626",
+          borderRadius: "10px",
+          overflow: "hidden",
+          background: "#0d0d0d",
+        }}
+      >
+        <div
+          style={{
+            padding: "14px 16px",
+            borderBottom: "1px solid #262626",
+            fontWeight: 700,
+          }}
+        >
+          DNS Security History
+        </div>
+
+        {loading ? (
+          <div style={{ padding: "20px", color: "#94a3b8" }}>
+            Loading DNS Security data...
+          </div>
+        ) : runs.length === 0 ? (
+          <div style={{ padding: "20px", color: "#94a3b8" }}>
+            No DNS Security runs have been recorded yet.
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table
+              style={{
+                width: "100%",
+                borderCollapse: "collapse",
+              }}
+            >
+              <thead>
+                <tr style={{ color: "#94a3b8", textAlign: "left" }}>
+                  <th style={{ padding: "12px" }}>Domain</th>
+                  <th style={{ padding: "12px" }}>Status</th>
+                  <th style={{ padding: "12px" }}>Score</th>
+                  <th style={{ padding: "12px" }}>Findings</th>
+                  <th style={{ padding: "12px" }}>Started</th>
+                  <th style={{ padding: "12px" }}>Completed</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {runs.map((run) => (
+                  <tr
+                    key={run.id}
+                    style={{ borderTop: "1px solid #262626" }}
+                  >
+                    <td style={{ padding: "12px", fontWeight: 600 }}>
+                      {run.target_domain}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {String(run.status || "UNKNOWN").toUpperCase()}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {run.security_score == null
+                        ? "—"
+                        : `${Number(run.security_score).toFixed(2)} / 10`}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {run.finding_count ?? 0}
+                    </td>
+                    <td
+                      style={{
+                        padding: "12px",
+                        color: "#94a3b8",
+                      }}
+                    >
+                      {formatDate(run.started_at)}
+                    </td>
+                    <td
+                      style={{
+                        padding: "12px",
+                        color: "#94a3b8",
+                      }}
+                    >
+                      {formatDate(run.completed_at)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DomainDiscovery() {
+  const token = localStorage.getItem("token");
+  const [data, setData] = useState(null);
+  const [assessments, setAssessments] = useState([]);
+  const [selectedAssessment, setSelectedAssessment] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const loadData = async () => {
+    try {
+      setError("");
+
+      const [discoveryResponse, assetResponse] = await Promise.all([
+        fetch(`${API_URL}/client/domain-discovery`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        fetch(`${API_URL}/client/asset-inventory`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      ]);
+
+      if (!discoveryResponse.ok) {
+        throw new Error(
+          `Domain discovery request failed (${discoveryResponse.status})`
+        );
+      }
+
+      if (!assetResponse.ok) {
+        throw new Error(
+          `Assessment inventory request failed (${assetResponse.status})`
+        );
+      }
+
+      const discoveryData = await discoveryResponse.json();
+      const assetData = await assetResponse.json();
+
+      const realAssessments = (assetData.assets || []).filter(
+        (item) =>
+          item.asset_type !== "Code Assessment" &&
+          item.target &&
+          !String(item.target).toLowerCase().startsWith("code://")
+      );
+
+      setData(discoveryData);
+      setAssessments(realAssessments);
+
+      if (!selectedAssessment && realAssessments.length > 0) {
+        setSelectedAssessment(
+          String(realAssessments[0].assessment_id || realAssessments[0].id)
+        );
+      }
+    } catch (err) {
+      setError(err.message || "Unable to load domain discovery data.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+    const interval = setInterval(loadData, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const startDiscovery = async () => {
+    if (!selectedAssessment) {
+      setError("Select an owned web assessment first.");
+      return;
+    }
+
+    try {
+      setRunning(true);
+      setError("");
+      setMessage("");
+
+      const response = await fetch(
+        `${API_URL}/client/domain-discovery/run`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            assessment_id: Number(selectedAssessment),
+          }),
+        }
+      );
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          result.detail ||
+            `Domain discovery request failed (${response.status})`
+        );
+      }
+
+      setMessage(
+        `Domain discovery started for ${result.target_domain}. Job ${result.job_id}`
+      );
+
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Unable to start domain discovery.");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const runs = data?.runs || [];
+  const latestRun = runs.length > 0 ? runs[0] : null;
+
+  const activeRun =
+    latestRun &&
+    ["QUEUED", "RUNNING", "STARTED", "IN_PROGRESS"].includes(
+      String(latestRun.status || "").toUpperCase()
+    )
+      ? latestRun
+      : null;
+
+  const scanActive = Boolean(running || activeRun);
+
+  const completedDurations = runs
+    .filter(
+      (run) =>
+        String(run.status || "").toUpperCase() === "COMPLETED" &&
+        run.started_at &&
+        run.completed_at
+    )
+    .map((run) => {
+      const started = new Date(run.started_at).getTime();
+      const completed = new Date(run.completed_at).getTime();
+      return completed > started ? completed - started : null;
+    })
+    .filter((duration) => Number.isFinite(duration) && duration > 0);
+
+  const estimatedDurationMs =
+    completedDurations.length > 0
+      ? completedDurations.reduce((sum, value) => sum + value, 0) /
+        completedDurations.length
+      : 180000;
+
+  const progressStart =
+    activeRun?.started_at ||
+    activeRun?.created_at ||
+    null;
+
+  const elapsedMs = progressStart
+    ? Math.max(0, progressNow - new Date(progressStart).getTime())
+    : 0;
+
+  const estimatedProgress = activeRun
+    ? Math.min(
+        99,
+        Math.max(1, Math.round((elapsedMs / estimatedDurationMs) * 100))
+      )
+    : 5;
+
+  useEffect(() => {
+    if (!scanActive) return undefined;
+
+    setProgressNow(Date.now());
+
+    const interval = setInterval(() => {
+      setProgressNow(Date.now());
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [scanActive]);
+
+  useEffect(() => {
+    if (!activeRun) return undefined;
+
+    const interval = setInterval(() => {
+      loadData();
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [activeRun?.id, activeRun?.status]);
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime())
+      ? value
+      : date.toLocaleString();
+  };
+
+  return (
+    <div style={{ padding: "24px", color: "#e5e7eb" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: "16px",
+          marginBottom: "20px",
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <h2 style={{ margin: 0, fontSize: "24px" }}>
+            Domain Discovery
+          </h2>
+          <p style={{ margin: "6px 0 0", color: "#94a3b8" }}>
+            Real DNS reconnaissance for domains from your owned web assessments.
+          </p>
+        </div>
+
+        <button
+          onClick={loadData}
+          disabled={loading}
+          style={{
+            padding: "9px 14px",
+            borderRadius: "8px",
+            border: "1px solid #334155",
+            background: "#111827",
+            color: "#e5e7eb",
+            cursor: loading ? "not-allowed" : "pointer",
+          }}
+        >
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div
+          style={{
+            marginBottom: "16px",
+            padding: "12px 14px",
+            borderRadius: "8px",
+            background: "rgba(127, 29, 29, 0.25)",
+            border: "1px solid #7f1d1d",
+            color: "#fecaca",
+          }}
+        >
+          {error}
+        </div>
+      )}
+
+      {message && (
+        <div
+          style={{
+            marginBottom: "16px",
+            padding: "12px 14px",
+            borderRadius: "8px",
+            background: "rgba(6, 78, 59, 0.25)",
+            border: "1px solid #065f46",
+            color: "#a7f3d0",
+          }}
+        >
+          {message}
+        </div>
+      )}
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+          gap: "12px",
+          marginBottom: "20px",
+        }}
+      >
+        {[
+          ["Discovery Runs", data?.run_count ?? 0],
+          ["Domains Discovered", latestRun?.discovered_domain_count ?? 0],
+          ["Hosts Discovered", latestRun?.discovered_host_count ?? 0],
+          ["IPs Discovered", latestRun?.discovered_ip_count ?? 0],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            style={{
+              padding: "16px",
+              borderRadius: "10px",
+              border: "1px solid #1e293b",
+              background: "#0f172a",
+            }}
+          >
+            <div style={{ color: "#94a3b8", fontSize: "13px" }}>
+              {label}
+            </div>
+            <div
+              style={{
+                marginTop: "8px",
+                fontSize: "24px",
+                fontWeight: 700,
+              }}
+            >
+              {value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div
+        style={{
+          padding: "16px",
+          borderRadius: "10px",
+          border: "1px solid #1e293b",
+          background: "#0f172a",
+          marginBottom: "20px",
+        }}
+      >
+        <div style={{ fontWeight: 700, marginBottom: "10px" }}>
+          Run Discovery
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            gap: "10px",
+            alignItems: "center",
+            flexWrap: "wrap",
+          }}
+        >
+          <select
+            value={selectedAssessment}
+            onChange={(event) => setSelectedAssessment(event.target.value)}
+            style={{
+              minWidth: "320px",
+              padding: "10px",
+              borderRadius: "8px",
+              border: "1px solid #334155",
+              background: "#020617",
+              color: "#e5e7eb",
+            }}
+          >
+            <option value="">Select an owned web assessment</option>
+            {assessments.map((item) => {
+              const assessmentId = item.assessment_id || item.id;
+
+              return (
+                <option key={assessmentId} value={assessmentId}>
+                  Assessment #{assessmentId} — {item.target}
+                </option>
+              );
+            })}
+          </select>
+
+          <button
+            onClick={startDiscovery}
+            disabled={running || !selectedAssessment}
+            style={{
+              padding: "10px 16px",
+              borderRadius: "8px",
+              border: "1px solid #1d4ed8",
+              background: running ? "#1e3a8a" : "#2563eb",
+              color: "#fff",
+              cursor:
+                running || !selectedAssessment
+                  ? "not-allowed"
+                  : "pointer",
+            }}
+          >
+            {running ? "Starting..." : "Run Domain Discovery"}
+          </button>
+        </div>
+
+        <div
+          style={{
+            marginTop: "10px",
+            color: "#64748b",
+            fontSize: "12px",
+          }}
+        >
+          Targets are taken from persisted client-owned assessments.
+          Arbitrary domains cannot be entered here.
+        </div>
+      </div>
+
+      <div
+        style={{
+          border: "1px solid #1e293b",
+          borderRadius: "10px",
+          overflow: "hidden",
+          background: "#0f172a",
+        }}
+      >
+        <div
+          style={{
+            padding: "14px 16px",
+            borderBottom: "1px solid #1e293b",
+            fontWeight: 700,
+          }}
+        >
+          Discovery History
+        </div>
+
+        {loading ? (
+          <div style={{ padding: "20px", color: "#94a3b8" }}>
+            Loading domain discovery data...
+          </div>
+        ) : runs.length === 0 ? (
+          <div style={{ padding: "20px", color: "#94a3b8" }}>
+            No domain discovery runs have been recorded yet.
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ color: "#94a3b8", textAlign: "left" }}>
+                  <th style={{ padding: "12px" }}>Domain</th>
+                  <th style={{ padding: "12px" }}>Status</th>
+                  <th style={{ padding: "12px" }}>Domains</th>
+                  <th style={{ padding: "12px" }}>Hosts</th>
+                  <th style={{ padding: "12px" }}>IPs</th>
+                  <th style={{ padding: "12px" }}>Started</th>
+                  <th style={{ padding: "12px" }}>Completed</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {runs.map((run) => (
+                  <tr
+                    key={run.id}
+                    style={{ borderTop: "1px solid #1e293b" }}
+                  >
+                    <td style={{ padding: "12px", fontWeight: 600 }}>
+                      {run.target_domain}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {String(run.status || "UNKNOWN").toUpperCase()}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {run.discovered_domain_count ?? 0}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {run.discovered_host_count ?? 0}
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      {run.discovered_ip_count ?? 0}
+                    </td>
+                    <td style={{ padding: "12px", color: "#94a3b8" }}>
+                      {formatDate(run.started_at)}
+                    </td>
+                    <td style={{ padding: "12px", color: "#94a3b8" }}>
+                      {formatDate(run.completed_at)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function SubdomainDiscovery() {
+  const token = localStorage.getItem("token");
+  const [data, setData] = useState(null);
+  const [assessments, setAssessments] = useState([]);
+  const [selectedAssessment, setSelectedAssessment] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [progressNow, setProgressNow] = useState(Date.now());
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const loadData = async () => {
+    try {
+      setError("");
+
+      const [discoveryResponse, assetResponse] = await Promise.all([
+        fetch(`${API_URL}/client/subdomain-discovery`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        fetch(`${API_URL}/client/asset-inventory`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      ]);
+
+      if (!discoveryResponse.ok) {
+        throw new Error(
+          `Subdomain discovery request failed (${discoveryResponse.status})`
+        );
+      }
+
+      if (!assetResponse.ok) {
+        throw new Error(
+          `Assessment inventory request failed (${assetResponse.status})`
+        );
+      }
+
+      const discoveryData = await discoveryResponse.json();
+      const assetData = await assetResponse.json();
+
+      const realAssessments = (assetData.assets || []).filter(
+        (item) =>
+          item.asset_type !== "Code Assessment" &&
+          item.target &&
+          !String(item.target).toLowerCase().startsWith("code://")
+      );
+
+      setData(discoveryData);
+      setAssessments(realAssessments);
+
+      if (!selectedAssessment && realAssessments.length > 0) {
+        setSelectedAssessment(
+          String(realAssessments[0].assessment_id || realAssessments[0].id)
+        );
+      }
+    } catch (err) {
+      setError(err.message || "Unable to load subdomain discovery data.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+    const interval = setInterval(loadData, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const startDiscovery = async () => {
+    if (!selectedAssessment) {
+      setError("Select an owned web assessment first.");
+      return;
+    }
+
+    try {
+      setRunning(true);
+      setError("");
+      setMessage("");
+
+      const response = await fetch(
+        `${API_URL}/client/subdomain-discovery/run`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            assessment_id: Number(selectedAssessment),
+          }),
+        }
+      );
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          result.detail ||
+            `Subdomain discovery request failed (${response.status})`
+        );
+      }
+
+      setMessage(
+        `Subdomain discovery started for ${result.target_domain}. Job ${result.job_id}`
+      );
+
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Unable to start subdomain discovery.");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const runs = data?.runs || [];
+  const latestRun = runs.length > 0 ? runs[0] : null;
+
+  const activeRun =
+    latestRun &&
+    ["QUEUED", "RUNNING", "STARTED", "IN_PROGRESS"].includes(
+      String(latestRun.status || "").toUpperCase()
+    )
+      ? latestRun
+      : null;
+
+  const scanActive = Boolean(running || activeRun);
+
+  const completedDurations = runs
+    .filter(
+      (run) =>
+        String(run.status || "").toUpperCase() === "COMPLETED" &&
+        run.started_at &&
+        run.completed_at
+    )
+    .map((run) => {
+      const started = new Date(run.started_at).getTime();
+      const completed = new Date(run.completed_at).getTime();
+      return completed > started ? completed - started : null;
+    })
+    .filter((duration) => Number.isFinite(duration) && duration > 0);
+
+  const estimatedDurationMs =
+    completedDurations.length > 0
+      ? completedDurations.reduce((sum, value) => sum + value, 0) /
+        completedDurations.length
+      : 180000;
+
+  const progressStart =
+    activeRun?.started_at ||
+    activeRun?.created_at ||
+    null;
+
+  const elapsedMs = progressStart
+    ? Math.max(0, progressNow - new Date(progressStart).getTime())
+    : 0;
+
+  const estimatedProgress = activeRun
+    ? Math.min(
+        99,
+        Math.max(1, Math.round((elapsedMs / estimatedDurationMs) * 100))
+      )
+    : 5;
+
+  useEffect(() => {
+    if (!scanActive) return undefined;
+
+    setProgressNow(Date.now());
+
+    const interval = setInterval(() => {
+      setProgressNow(Date.now());
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [scanActive]);
+
+  useEffect(() => {
+    if (!activeRun) return undefined;
+
+    const interval = setInterval(() => {
+      loadData();
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [activeRun?.id, activeRun?.status]);
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime())
+      ? value
+      : date.toLocaleString();
+  };
+
+  return (
+    <div style={{ padding: "24px", color: "#e5e7eb" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: "16px",
+          marginBottom: "20px",
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <h2 style={{ margin: 0, fontSize: "24px" }}>
+            Subdomain Discovery
+          </h2>
+          <p style={{ margin: "6px 0 0", color: "#94a3b8" }}>
+            Real DNSRecon brute-force discovery for domains from your owned web assessments.
+          </p>
+        </div>
+
+        <button
+          onClick={loadData}
+          disabled={loading}
+          style={{
+            padding: "9px 14px",
+            borderRadius: "8px",
+            border: "1px solid #334155",
+            background: "#111827",
+            color: "#e5e7eb",
+            cursor: loading ? "not-allowed" : "pointer",
+          }}
+        >
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div
+          style={{
+            marginBottom: "16px",
+            padding: "12px 14px",
+            borderRadius: "8px",
+            background: "rgba(127, 29, 29, 0.25)",
+            border: "1px solid #7f1d1d",
+            color: "#fecaca",
+          }}
+        >
+          {error}
+        </div>
+      )}
+
+      {message && (
+        <div
+          style={{
+            marginBottom: "16px",
+            padding: "12px 14px",
+            borderRadius: "8px",
+            background: "rgba(6, 78, 59, 0.25)",
+            border: "1px solid #065f46",
+            color: "#a7f3d0",
+          }}
+        >
+          {message}
+        </div>
+      )}
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+          gap: "12px",
+          marginBottom: "20px",
+        }}
+      >
+        {[
+          ["Discovery Runs", data?.count ?? 0],
+          ["Subdomains Discovered", latestRun?.discovered_subdomain_count ?? 0],
+          ["Hosts Discovered", latestRun?.discovered_host_count ?? 0],
+          ["IPs Discovered", latestRun?.discovered_ip_count ?? 0],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            style={{
+              padding: "16px",
+              borderRadius: "10px",
+              border: "1px solid #1e293b",
+              background: "#0f172a",
+            }}
+          >
+            <div style={{ color: "#94a3b8", fontSize: "13px" }}>
+              {label}
+            </div>
+            <div
+              style={{
+                marginTop: "8px",
+                fontSize: "24px",
+                fontWeight: 700,
+              }}
+            >
+              {value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div
+        style={{
+          padding: "18px",
+          borderRadius: "10px",
+          border: "1px solid #1e293b",
+          background: "#0f172a",
+          marginBottom: "20px",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            gap: "12px",
+            alignItems: "flex-end",
+            flexWrap: "wrap",
+          }}
+        >
+          <div style={{ flex: "1 1 320px" }}>
+            <label
+              style={{
+                display: "block",
+                marginBottom: "7px",
+                color: "#94a3b8",
+                fontSize: "13px",
+              }}
+            >
+              Owned Web Assessment
+            </label>
+
+            <select
+              value={selectedAssessment}
+              onChange={(event) => setSelectedAssessment(event.target.value)}
+              style={{
+                width: "100%",
+                padding: "10px 12px",
+                borderRadius: "8px",
+                border: "1px solid #334155",
+                background: "#020617",
+                color: "#e5e7eb",
+              }}
+            >
+              <option value="">Select assessment</option>
+              {assessments.map((assessment) => {
+                const id = assessment.assessment_id || assessment.id;
+                return (
+                  <option key={id} value={id}>
+                    #{id} — {assessment.target}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+
+          {scanActive ? (
+            <div
+              style={{
+                minWidth: "250px",
+                padding: "9px 14px",
+                borderRadius: "8px",
+                border: "1px solid #334155",
+                background: "#0f172a",
+              }}
+              role="status"
+              aria-live="polite"
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: "12px",
+                  fontSize: "13px",
+                  color: "#cbd5e1",
+                  marginBottom: "7px",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                <span>Scanning subdomains...</span>
+                <strong style={{ color: "#e5e7eb" }}>
+                  {estimatedProgress}%
+                </strong>
+              </div>
+
+              <div
+                style={{
+                  width: "100%",
+                  height: "6px",
+                  borderRadius: "999px",
+                  background: "#1e293b",
+                  overflow: "hidden",
+                }}
+                aria-label={"Estimated subdomain discovery progress " + estimatedProgress + "%"}
+              >
+                <div
+                  style={{
+                    width: estimatedProgress + "%",
+                    height: "100%",
+                    borderRadius: "999px",
+                    background: "#2563eb",
+                    transition: "width 1s ease",
+                  }}
+                />
+              </div>
+
+              <div
+                style={{
+                  marginTop: "5px",
+                  fontSize: "11px",
+                  color: "#64748b",
+                }}
+              >
+                Estimated progress
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={startDiscovery}
+              disabled={!selectedAssessment}
+              style={{
+                padding: "10px 16px",
+                borderRadius: "8px",
+                border: "1px solid #334155",
+                background: "#2563eb",
+                color: "#fff",
+                cursor: !selectedAssessment ? "not-allowed" : "pointer",
+                whiteSpace: "nowrap",
+              }}
+            >
+              Run Subdomain Discovery
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div
+        style={{
+          border: "1px solid #1e293b",
+          borderRadius: "10px",
+          overflow: "hidden",
+          background: "#0f172a",
+        }}
+      >
+        <div
+          style={{
+            padding: "16px",
+            borderBottom: "1px solid #1e293b",
+            fontWeight: 600,
+          }}
+        >
+          Discovery History
+        </div>
+
+        {runs.length === 0 ? (
+          <div style={{ padding: "24px", color: "#94a3b8" }}>
+            No subdomain discovery runs yet.
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table
+              style={{
+                width: "100%",
+                borderCollapse: "collapse",
+                minWidth: "850px",
+              }}
+            >
+              <thead>
+                <tr>
+                  {[
+                    "Run",
+                    "Assessment",
+                    "Target Domain",
+                    "Status",
+                    "Subdomains",
+                    "Hosts",
+                    "IPs",
+                    "Started",
+                    "Completed",
+                  ].map((heading) => (
+                    <th
+                      key={heading}
+                      style={{
+                        textAlign: "left",
+                        padding: "11px 12px",
+                        color: "#94a3b8",
+                        fontSize: "12px",
+                        borderBottom: "1px solid #1e293b",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {heading}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+
+              <tbody>
+                {runs.map((run) => (
+                  <tr key={run.id}>
+                    <td style={{ padding: "11px 12px", borderBottom: "1px solid #1e293b" }}>
+                      #{run.id}
+                    </td>
+                    <td style={{ padding: "11px 12px", borderBottom: "1px solid #1e293b" }}>
+                      #{run.assessment_id}
+                    </td>
+                    <td style={{ padding: "11px 12px", borderBottom: "1px solid #1e293b" }}>
+                      {run.target_domain}
+                    </td>
+                    <td style={{ padding: "11px 12px", borderBottom: "1px solid #1e293b", fontWeight: 600 }}>
+                      {run.status}
+                    </td>
+                    <td style={{ padding: "11px 12px", borderBottom: "1px solid #1e293b" }}>
+                      {run.discovered_subdomain_count ?? 0}
+                    </td>
+                    <td style={{ padding: "11px 12px", borderBottom: "1px solid #1e293b" }}>
+                      {run.discovered_host_count ?? 0}
+                    </td>
+                    <td style={{ padding: "11px 12px", borderBottom: "1px solid #1e293b" }}>
+                      {run.discovered_ip_count ?? 0}
+                    </td>
+                    <td style={{ padding: "11px 12px", borderBottom: "1px solid #1e293b", whiteSpace: "nowrap" }}>
+                      {formatDate(run.started_at)}
+                    </td>
+                    <td style={{ padding: "11px 12px", borderBottom: "1px solid #1e293b", whiteSpace: "nowrap" }}>
+                      {formatDate(run.completed_at)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AssetGroups() {
+  const [data, setData] = useState({
+    scope: "personal",
+    group_count: 0,
+    groups: [],
+  });
+  const [assets, setAssets] = useState({
+    ASSESSMENT: [],
+    SERVER: [],
+    ENDPOINT: [],
+    NETWORK_DEVICE: [],
+    DATABASE: [],
+  });
+  const [loading, setLoading] = useState(true);
+  const [assetsLoading, setAssetsLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [addingMember, setAddingMember] = useState(false);
+  const [expandedGroup, setExpandedGroup] = useState(null);
+  const [newGroup, setNewGroup] = useState({
+    name: "",
+    description: "",
+  });
+  const [memberForm, setMemberForm] = useState({
+    groupId: "",
+    assetType: "ASSESSMENT",
+    assetId: "",
+  });
+
+  const authHeaders = () => {
+    const token = localStorage.getItem("token");
+    return token
+      ? { Authorization: `Bearer ${token}` }
+      : {};
+  };
+
+  const getApiErrorMessage = (payload, fallback) => {
+    const detail = payload?.detail;
+
+    if (typeof detail === "string" && detail.trim()) {
+      return detail;
+    }
+
+    if (Array.isArray(detail)) {
+      const messages = detail
+        .map((item) => {
+          if (typeof item === "string") return item;
+          if (item?.msg) return item.msg;
+          return null;
+        })
+        .filter(Boolean);
+
+      if (messages.length) return messages.join("; ");
+    }
+
+    if (detail && typeof detail === "object") {
+      if (typeof detail.message === "string") return detail.message;
+      if (typeof detail.error === "string") return detail.error;
+      try {
+        return JSON.stringify(detail);
+      } catch {
+        return fallback;
+      }
+    }
+
+    return fallback;
+  };
+
+  const loadGroups = async () => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      setError("Authentication token not found. Please sign in again.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_URL}/client/asset-groups`, {
+        headers: authHeaders(),
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        throw new Error("Authentication failed. Please sign in again.");
+      }
+
+      if (!response.ok) {
+        throw new Error(`Failed to load asset groups (${response.status})`);
+      }
+
+      const payload = await response.json();
+      setData(payload);
+      setError("");
+    } catch (err) {
+      setError(err.message || "Unable to load asset groups.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadAssets = async () => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      setAssetsLoading(false);
+      return;
+    }
+
+    try {
+      const endpoints = [
+        ["ASSESSMENT", "/client/asset-inventory"],
+        ["SERVER", "/client/servers"],
+        ["ENDPOINT", "/client/endpoints"],
+        ["NETWORK_DEVICE", "/client/network-devices"],
+        ["DATABASE", "/client/databases"],
+      ];
+
+      const results = await Promise.all(
+        endpoints.map(async ([type, endpoint]) => {
+          const response = await fetch(`${API_URL}${endpoint}`, {
+            headers: authHeaders(),
+          });
+
+          if (!response.ok) {
+            throw new Error(
+              `Failed to load ${type.toLowerCase().replace("_", " ")} assets`
+            );
+          }
+
+          const payload = await response.json();
+
+          let items = [];
+
+          if (type === "ASSESSMENT") {
+            items = (payload.assets || []).map((item) => {
+              const assetId = item.asset_id ?? item.id;
+
+              return {
+                id: assetId,
+                label: item.target || `Assessment #${assetId}`,
+                secondary: `Assessment #${assetId}`,
+                type: "ASSESSMENT",
+              };
+            });
+          } else if (type === "SERVER") {
+            items = (payload.servers || []).map((item) => ({
+              id: item.id,
+              label:
+                item.hostname ||
+                item.ip_address ||
+                item.target ||
+                `Server #${item.id}`,
+              secondary:
+                item.ip_address ||
+                item.target ||
+                `Server #${item.id}`,
+              type: "SERVER",
+            }));
+          } else if (type === "ENDPOINT") {
+            items = (payload.endpoints || []).map((item) => ({
+              id: item.id,
+              label:
+                item.hostname ||
+                item.ip_address ||
+                item.endpoint_id ||
+                `Endpoint #${item.id}`,
+              secondary:
+                item.ip_address ||
+                item.endpoint_id ||
+                `Endpoint #${item.id}`,
+              type: "ENDPOINT",
+            }));
+          } else if (type === "NETWORK_DEVICE") {
+            items = (payload.network_devices || []).map((item) => ({
+              id: item.id,
+              label:
+                item.hostname ||
+                item.ip_address ||
+                item.device_id ||
+                `Network Device #${item.id}`,
+              secondary:
+                item.ip_address ||
+                item.device_id ||
+                `Network Device #${item.id}`,
+              type: "NETWORK_DEVICE",
+            }));
+          } else if (type === "DATABASE") {
+            items = (payload.databases || []).map((item) => ({
+              id: item.id,
+              label:
+                item.name ||
+                item.hostname ||
+                item.database_id ||
+                `Database #${item.id}`,
+              secondary:
+                item.ip_address ||
+                item.hostname ||
+                item.database_id ||
+                `Database #${item.id}`,
+              type: "DATABASE",
+            }));
+          }
+
+          return [type, items];
+        })
+      );
+
+      setAssets(Object.fromEntries(results));
+    } catch (err) {
+      setActionError(err.message || "Unable to load groupable assets.");
+    } finally {
+      setAssetsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadGroups();
+    loadAssets();
+
+    const interval = setInterval(() => {
+      loadGroups();
+      loadAssets();
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const createGroup = async (event) => {
+    event.preventDefault();
+
+    if (!newGroup.name.trim()) {
+      setActionError("Group name is required.");
+      return;
+    }
+
+    setCreating(true);
+    setActionError("");
+
+    try {
+      const response = await fetch(`${API_URL}/client/asset-groups`, {
+        method: "POST",
+        headers: {
+          ...authHeaders(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name: newGroup.name.trim(),
+          description: newGroup.description.trim() || null,
+        }),
+      });
+
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          getApiErrorMessage(
+            payload,
+            `Failed to create group (${response.status})`
+          )
+        );
+      }
+
+      setNewGroup({ name: "", description: "" });
+      await loadGroups();
+      setExpandedGroup(payload.id);
+    } catch (err) {
+      setActionError(err.message || "Unable to create asset group.");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const addMember = async (event) => {
+    event.preventDefault();
+
+    if (!memberForm.groupId || !memberForm.assetId) {
+      setActionError("Select a group and an asset before adding a member.");
+      return;
+    }
+
+    setAddingMember(true);
+    setActionError("");
+
+    try {
+      const response = await fetch(
+        `${API_URL}/client/asset-groups/${memberForm.groupId}/members`,
+        {
+          method: "POST",
+          headers: {
+            ...authHeaders(),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            asset_type: memberForm.assetType,
+            asset_id: Number(memberForm.assetId),
+          }),
+        }
+      );
+
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          getApiErrorMessage(
+            payload,
+            `Failed to add asset (${response.status})`
+          )
+        );
+      }
+
+      await loadGroups();
+      setExpandedGroup(Number(memberForm.groupId));
+      setMemberForm((current) => ({
+        ...current,
+        assetId: "",
+      }));
+    } catch (err) {
+      setActionError(err.message || "Unable to add asset to group.");
+    } finally {
+      setAddingMember(false);
+    }
+  };
+
+  const removeMember = async (groupId, memberId) => {
+    setActionError("");
+
+    try {
+      const response = await fetch(
+        `${API_URL}/client/asset-groups/${groupId}/members/${memberId}`,
+        {
+          method: "DELETE",
+          headers: authHeaders(),
+        }
+      );
+
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          getApiErrorMessage(
+            payload,
+            `Failed to remove member (${response.status})`
+          )
+        );
+      }
+
+      await loadGroups();
+    } catch (err) {
+      setActionError(err.message || "Unable to remove group member.");
+    }
+  };
+
+  const deleteGroup = async (groupId) => {
+    setActionError("");
+
+    try {
+      const response = await fetch(
+        `${API_URL}/client/asset-groups/${groupId}`,
+        {
+          method: "DELETE",
+          headers: authHeaders(),
+        }
+      );
+
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          getApiErrorMessage(
+            payload,
+            `Failed to delete group (${response.status})`
+          )
+        );
+      }
+
+      if (expandedGroup === groupId) {
+        setExpandedGroup(null);
+      }
+
+      if (Number(memberForm.groupId) === groupId) {
+        setMemberForm((current) => ({
+          ...current,
+          groupId: "",
+          assetId: "",
+        }));
+      }
+
+      await loadGroups();
+    } catch (err) {
+      setActionError(err.message || "Unable to delete asset group.");
+    }
+  };
+
+  const selectedAssets = assets[memberForm.assetType] || [];
+
+  const groupCount = data.groups?.length || 0;
+  const activeGroupCount =
+    data.groups?.filter(
+      (group) => String(group.status || "").toUpperCase() === "ACTIVE"
+    ).length || 0;
+  const memberCount =
+    data.groups?.reduce(
+      (total, group) => total + (group.member_count || 0),
+      0
+    ) || 0;
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div>
+          <h2 className="text-xl font-semibold text-white">Asset Groups</h2>
+          <p className="mt-1 text-sm text-gray-500">
+            Organize your verified assets into ownership-scoped groups.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => {
+            setLoading(true);
+            setAssetsLoading(true);
+            setActionError("");
+            loadGroups();
+            loadAssets();
+          }}
+          className="border border-white/10 bg-white/[0.03] px-4 py-2 text-xs font-semibold text-gray-300 transition hover:bg-white/[0.06]"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div className="border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      {actionError && (
+        <div className="border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
+          {actionError}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+        {[
+          ["Total Groups", groupCount],
+          ["Active Groups", activeGroupCount],
+          ["Total Members", memberCount],
+          ["Scope", data.scope === "client" ? "Client" : "Personal"],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            className="border border-white/10 bg-white/[0.02] p-5"
+          >
+            <div className="text-xs uppercase tracking-wider text-gray-500">
+              {label}
+            </div>
+            <div className="mt-2 text-2xl font-semibold text-white">
+              {value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="border border-white/10 bg-white/[0.02] p-5">
+        <div className="mb-4">
+          <h3 className="text-sm font-semibold text-white">
+            Create Asset Group
+          </h3>
+          <p className="mt-1 text-xs text-gray-500">
+            Groups contain only assets verified within your authorized scope.
+          </p>
+        </div>
+
+        <form
+          onSubmit={createGroup}
+          className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_2fr_auto]"
+        >
+          <input
+            value={newGroup.name}
+            onChange={(event) =>
+              setNewGroup((current) => ({
+                ...current,
+                name: event.target.value,
+              }))
+            }
+            placeholder="Group name"
+            maxLength={255}
+            className="border border-white/10 bg-black px-3 py-2 text-sm text-gray-200 outline-none placeholder:text-gray-600 focus:border-white/20"
+          />
+
+          <input
+            value={newGroup.description}
+            onChange={(event) =>
+              setNewGroup((current) => ({
+                ...current,
+                description: event.target.value,
+              }))
+            }
+            placeholder="Description (optional)"
+            maxLength={5000}
+            className="border border-white/10 bg-black px-3 py-2 text-sm text-gray-200 outline-none placeholder:text-gray-600 focus:border-white/20"
+          />
+
+          <button
+            type="submit"
+            disabled={creating}
+            className="border border-white/10 bg-white px-5 py-2 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {creating ? "Creating..." : "Create Group"}
+          </button>
+        </form>
+      </div>
+
+      <div className="border border-white/10 bg-white/[0.02] p-5">
+        <div className="mb-4">
+          <h3 className="text-sm font-semibold text-white">
+            Add Verified Asset
+          </h3>
+          <p className="mt-1 text-xs text-gray-500">
+            Select a persisted asset from the current dashboard scope.
+          </p>
+        </div>
+
+        <form
+          onSubmit={addMember}
+          className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_1fr_2fr_auto]"
+        >
+          <select
+            value={memberForm.groupId}
+            onChange={(event) =>
+              setMemberForm((current) => ({
+                ...current,
+                groupId: event.target.value,
+              }))
+            }
+            className="border border-white/10 bg-black px-3 py-2 text-sm text-gray-300 outline-none"
+          >
+            <option value="">Select group</option>
+            {(data.groups || []).map((group) => (
+              <option key={group.id} value={group.id}>
+                {group.name}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={memberForm.assetType}
+            onChange={(event) =>
+              setMemberForm((current) => ({
+                ...current,
+                assetType: event.target.value,
+                assetId: "",
+              }))
+            }
+            className="border border-white/10 bg-black px-3 py-2 text-sm text-gray-300 outline-none"
+          >
+            <option value="ASSESSMENT">Assessment / Application</option>
+            <option value="SERVER">Server</option>
+            <option value="ENDPOINT">Endpoint</option>
+            <option value="NETWORK_DEVICE">Network Device</option>
+            <option value="DATABASE">Database</option>
+          </select>
+
+          <select
+            value={memberForm.assetId}
+            onChange={(event) =>
+              setMemberForm((current) => ({
+                ...current,
+                assetId: event.target.value,
+              }))
+            }
+            disabled={assetsLoading}
+            className="border border-white/10 bg-black px-3 py-2 text-sm text-gray-300 outline-none disabled:opacity-50"
+          >
+            <option value="">
+              {assetsLoading ? "Loading assets..." : "Select asset"}
+            </option>
+            {selectedAssets.map((asset) => (
+              <option key={asset.id} value={asset.id}>
+                {asset.label} · {asset.secondary}
+              </option>
+            ))}
+          </select>
+
+          <button
+            type="submit"
+            disabled={addingMember || assetsLoading}
+            className="border border-white/10 bg-white px-5 py-2 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {addingMember ? "Adding..." : "Add Asset"}
+          </button>
+        </form>
+      </div>
+
+      {loading ? (
+        <div className="border border-white/10 bg-white/[0.02] p-8 text-center text-sm text-gray-500">
+          Loading asset groups...
+        </div>
+      ) : data.groups?.length === 0 ? (
+        <div className="border border-dashed border-white/10 bg-white/[0.02] p-10 text-center">
+          <div className="text-sm font-medium text-gray-300">
+            No asset groups yet
+          </div>
+          <div className="mt-2 text-xs text-gray-600">
+            Create a group above, then add verified assets to it.
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {(data.groups || []).map((group) => {
+            const isExpanded = expandedGroup === group.id;
+
+            return (
+              <div
+                key={group.id}
+                className="border border-white/10 bg-white/[0.02]"
+              >
+                <div className="flex flex-col gap-4 p-5 lg:flex-row lg:items-center lg:justify-between">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExpandedGroup(isExpanded ? null : group.id)
+                    }
+                    className="min-w-0 text-left"
+                  >
+                    <div className="flex flex-wrap items-center gap-3">
+                      <h3 className="text-sm font-semibold text-white">
+                        {group.name}
+                      </h3>
+                      <span className="border border-white/10 px-2 py-1 text-[10px] uppercase tracking-wider text-gray-400">
+                        {group.status || "ACTIVE"}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-gray-500">
+                      {group.description || "No description"}
+                    </p>
+                  </button>
+
+                  <div className="flex items-center gap-5 text-xs text-gray-500">
+                    <span>
+                      <strong className="text-gray-300">
+                        {group.member_count || 0}
+                      </strong>{" "}
+                      members
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => deleteGroup(group.id)}
+                      className="border border-red-500/20 px-3 py-2 text-red-300 hover:bg-red-500/5"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+
+                {isExpanded && (
+                  <div className="border-t border-white/10">
+                    {group.members?.length ? (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-xs">
+                          <thead className="border-b border-white/10 text-gray-600">
+                            <tr>
+                              <th className="px-5 py-3 font-medium uppercase tracking-wider">
+                                Type
+                              </th>
+                              <th className="px-5 py-3 font-medium uppercase tracking-wider">
+                                Asset
+                              </th>
+                              <th className="px-5 py-3 font-medium uppercase tracking-wider">
+                                Identity
+                              </th>
+                              <th className="px-5 py-3 font-medium uppercase tracking-wider">
+                                Status
+                              </th>
+                              <th className="px-5 py-3 text-right font-medium uppercase tracking-wider">
+                                Action
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-white/5">
+                            {group.members.map((member) => (
+                              <tr key={member.member_id}>
+                                <td className="px-5 py-4 text-gray-400">
+                                  {member.asset_type}
+                                </td>
+                                <td className="px-5 py-4 text-gray-300">
+                                  {member.label || `Asset #${member.asset_id}`}
+                                </td>
+                                <td className="px-5 py-4 text-gray-500">
+                                  {member.identity || "—"}
+                                </td>
+                                <td className="px-5 py-4 text-gray-400">
+                                  {member.status || "UNKNOWN"}
+                                </td>
+                                <td className="px-5 py-4 text-right">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      removeMember(group.id, member.member_id)
+                                    }
+                                    className="text-red-300 hover:text-red-200"
+                                  >
+                                    Remove
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div className="p-6 text-center text-xs text-gray-600">
+                        This group has no members yet.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function IPAddresses() {
+  const [data, setData] = useState({
+    scope: "personal",
+    ip_count: 0,
+    ip_addresses: [],
+  });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadIPAddresses = async () => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      setError("Authentication required. Please log in again.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_URL}/client/ip-addresses`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        setError("Your session is no longer authorized. Please log in again.");
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(`IP Addresses API returned ${response.status}`);
+      }
+
+      const payload = await response.json();
+      setData(payload);
+      setError("");
+    } catch (err) {
+      console.error("Failed to load IP addresses:", err);
+      setError(err.message || "Failed to load IP addresses.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadIPAddresses();
+    const interval = setInterval(loadIPAddresses, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const addresses = Array.isArray(data.ip_addresses)
+    ? data.ip_addresses
+    : [];
+
+  const totalAssetReferences = addresses.reduce(
+    (total, item) => total + Number(item.asset_count || 0),
+    0
+  );
+
+  const addressesWithAssets = addresses.filter(
+    (item) => Number(item.asset_count || 0) > 0
+  ).length;
+
+  const statusBadge = (status) => {
+    const normalized = String(status || "UNKNOWN").toUpperCase();
+
+    const className =
+      normalized === "ONLINE" ||
+      normalized === "UP" ||
+      normalized === "ACTIVE" ||
+      normalized === "COMPLETED"
+        ? "bg-green-500/10 text-green-400 border-green-500/20"
+        : normalized === "OFFLINE" ||
+          normalized === "DOWN" ||
+          normalized === "FAILED" ||
+          normalized === "ERROR"
+        ? "bg-red-500/10 text-red-400 border-red-500/20"
+        : "bg-yellow-500/10 text-yellow-400 border-yellow-500/20";
+
+    return (
+      <span
+        className={`px-2 py-1 rounded border text-xs font-medium ${className}`}
+      >
+        {normalized}
+      </span>
+    );
+  };
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "—";
+    return date.toLocaleString();
+  };
+
+  return (
+    <div className="p-6 space-y-6">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-semibold text-white">IP Addresses</h2>
+          <p className="text-sm text-gray-400 mt-1">
+            Real IP addresses derived from your persisted assessments and registered assets.
+          </p>
+        </div>
+
+        <button
+          onClick={() => {
+            setLoading(true);
+            loadIPAddresses();
+          }}
+          className="px-4 py-2 rounded-lg border border-gray-700 bg-gray-800 text-gray-200 hover:bg-gray-700 transition"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Total IP Addresses</div>
+          <div className="text-3xl font-semibold text-white mt-2">
+            {data.ip_count ?? addresses.length}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">With Assets</div>
+          <div className="text-3xl font-semibold text-green-400 mt-2">
+            {addressesWithAssets}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Asset References</div>
+          <div className="text-3xl font-semibold text-yellow-400 mt-2">
+            {totalAssetReferences}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Scope</div>
+          <div className="text-xl font-semibold text-white mt-3 capitalize">
+            {data.scope || "personal"}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-gray-800 bg-gray-900/60 overflow-hidden">
+        <div className="px-5 py-4 border-b border-gray-800">
+          <h3 className="text-lg font-semibold text-white">
+            IP Address Inventory
+          </h3>
+        </div>
+
+        {loading && addresses.length === 0 ? (
+          <div className="p-8 text-center text-gray-400">
+            Loading persisted IP addresses...
+          </div>
+        ) : addresses.length === 0 ? (
+          <div className="p-8 text-center">
+            <div className="text-gray-300 font-medium">
+              No IP addresses found
+            </div>
+            <div className="text-sm text-gray-500 mt-2">
+              IP addresses appear here when persisted assessments or registered assets contain verified IP data.
+            </div>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-gray-950/60">
+                <tr className="text-left text-gray-400">
+                  <th className="px-5 py-3 font-medium">IP Address</th>
+                  <th className="px-5 py-3 font-medium">Source Types</th>
+                  <th className="px-5 py-3 font-medium">Assets</th>
+                  <th className="px-5 py-3 font-medium">Hostnames</th>
+                  <th className="px-5 py-3 font-medium">Assessments</th>
+                  <th className="px-5 py-3 font-medium">Status</th>
+                  <th className="px-5 py-3 font-medium">Last Seen</th>
+                </tr>
+              </thead>
+
+              <tbody className="divide-y divide-gray-800">
+                {addresses.map((item) => {
+                  const sourceTypes = Array.isArray(item.source_types)
+                    ? item.source_types
+                    : [];
+                  const hostnames = Array.isArray(item.hostnames)
+                    ? item.hostnames
+                    : [];
+                  const assessmentIds = Array.isArray(item.assessment_ids)
+                    ? item.assessment_ids
+                    : [];
+                  const statuses = Array.isArray(item.statuses)
+                    ? item.statuses
+                    : [];
+
+                  return (
+                    <tr
+                      key={item.ip_address}
+                      className="text-gray-200 align-top"
+                    >
+                      <td className="px-5 py-4">
+                        <span className="font-mono text-blue-300">
+                          {item.ip_address}
+                        </span>
+                      </td>
+
+                      <td className="px-5 py-4">
+                        <div className="flex flex-wrap gap-1">
+                          {sourceTypes.length > 0 ? (
+                            sourceTypes.map((source) => (
+                              <span
+                                key={source}
+                                className="px-2 py-1 rounded border border-blue-500/20 bg-blue-500/10 text-xs text-blue-300"
+                              >
+                                {source}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-gray-500">—</span>
+                          )}
+                        </div>
+                      </td>
+
+                      <td className="px-5 py-4 font-semibold text-white">
+                        {item.asset_count ?? 0}
+                      </td>
+
+                      <td className="px-5 py-4">
+                        <div className="space-y-1">
+                          {hostnames.length > 0 ? (
+                            hostnames.map((hostname) => (
+                              <div key={hostname} className="text-gray-300">
+                                {hostname}
+                              </div>
+                            ))
+                          ) : (
+                            <span className="text-gray-500">—</span>
+                          )}
+                        </div>
+                      </td>
+
+                      <td className="px-5 py-4">
+                        <div className="flex flex-wrap gap-1">
+                          {assessmentIds.length > 0 ? (
+                            assessmentIds.map((assessmentId) => (
+                              <span
+                                key={assessmentId}
+                                className="px-2 py-1 rounded border border-gray-700 bg-gray-800 text-xs text-gray-300"
+                              >
+                                #{assessmentId}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-gray-500">—</span>
+                          )}
+                        </div>
+                      </td>
+
+                      <td className="px-5 py-4">
+                        <div className="flex flex-wrap gap-1">
+                          {statuses.length > 0 ? (
+                            statuses.map((status) => (
+                              <span key={status}>{statusBadge(status)}</span>
+                            ))
+                          ) : (
+                            <span className="text-gray-500">UNKNOWN</span>
+                          )}
+                        </div>
+                      </td>
+
+                      <td className="px-5 py-4 text-gray-400 whitespace-nowrap">
+                        {formatDate(item.last_seen)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+
+function OpenPorts() {
+  const [data, setData] = useState({
+    scope: "personal",
+    source_runs: { nmap: 0, masscan: 0 },
+    total_open_ports: 0,
+    targets_with_open_ports: 0,
+    ports: [],
+  });
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadOpenPorts = async (manual = false) => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      setError("Authentication required. Please log in again.");
+      setLoading(false);
+      return;
+    }
+
+    if (manual) setRefreshing(true);
+
+    try {
+      const response = await fetch(`${API_URL}/client/open-ports`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        setError("Your session is no longer authorized. Please log in again.");
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(`Open Ports API returned ${response.status}`);
+      }
+
+      const payload = await response.json();
+
+
+      setData({
+        scope: payload.scope || "personal",
+        source_runs: {
+          nmap: Number(payload.source_runs?.nmap || 0),
+          masscan: Number(payload.source_runs?.masscan || 0),
+        },
+        total_open_ports: Number(payload.total_open_ports || 0),
+        targets_with_open_ports: Number(payload.targets_with_open_ports || 0),
+        ports: Array.isArray(payload.ports) ? payload.ports : [],
+      });
+
+      setError("");
+    } catch (err) {
+      console.error("Failed to load open ports:", err);
+      setError(err.message || "Failed to load open ports.");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadOpenPorts();
+
+    const interval = setInterval(() => {
+      loadOpenPorts();
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const ports = Array.isArray(data.ports) ? data.ports : [];
+
+  const tcpCount = ports.filter(
+    (item) => String(item.protocol || "tcp").toLowerCase() === "tcp"
+  ).length;
+
+  const udpCount = ports.filter(
+    (item) => String(item.protocol || "").toLowerCase() === "udp"
+  ).length;
+
+  const sourceCount = (source) =>
+    ports.filter(
+      (item) => String(item.source || "").toLowerCase() === source.toLowerCase()
+    ).length;
+
+  return (
+    <div className="p-6 space-y-6">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-semibold text-white">
+            Open Ports
+          </h2>
+          <p className="text-sm text-gray-400 mt-1">
+            Real open ports discovered from persisted Nmap and Masscan results.
+            No additional scan is started from this page.
+          </p>
+        </div>
+
+        <button
+          onClick={() => loadOpenPorts(true)}
+          disabled={refreshing}
+          className="px-4 py-2 rounded-lg border border-red-700/50 bg-red-700/20 text-red-200 hover:bg-red-700/30 transition disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+        <div className="rounded-xl border border-red-900/40 bg-red-950/20 p-5">
+          <div className="text-sm text-gray-400">Total Open Ports</div>
+          <div className="text-3xl font-semibold text-red-300 mt-2">
+            {data.total_open_ports}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Targets</div>
+          <div className="text-3xl font-semibold text-white mt-2">
+            {data.targets_with_open_ports}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">TCP</div>
+          <div className="text-3xl font-semibold text-white mt-2">
+            {tcpCount}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">UDP</div>
+          <div className="text-3xl font-semibold text-white mt-2">
+            {udpCount}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Source Runs</div>
+          <div className="text-xl font-semibold text-white mt-3">
+            Nmap {data.source_runs.nmap} · Masscan {data.source_runs.masscan}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-gray-800 bg-gray-900/60 overflow-hidden">
+        <div className="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-white">
+              Discovered Open Ports
+            </h3>
+            <p className="text-xs text-gray-500 mt-1">
+              Deduplicated by target, protocol, and port.
+            </p>
+          </div>
+
+          <span className="text-xs text-gray-500">
+            Auto-refresh: 15s
+          </span>
+        </div>
+
+        {loading && ports.length === 0 ? (
+          <div className="p-8 text-center text-gray-400">
+            Loading real open-port data...
+          </div>
+        ) : ports.length === 0 ? (
+          <div className="p-8 text-center text-gray-400">
+            No open ports found in the completed Nmap/Masscan results.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px]">
+              <thead>
+                <tr className="text-left text-xs uppercase tracking-wider text-gray-500 border-b border-gray-800">
+                  <th className="px-5 py-4">Target</th>
+                  <th className="px-5 py-4">Port</th>
+                  <th className="px-5 py-4">Protocol</th>
+                  <th className="px-5 py-4">Source</th>
+                  <th className="px-5 py-4">Run ID</th>
+                  <th className="px-5 py-4">Assessment</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ports.map((item, index) => (
+                  <tr
+                    key={`${item.target}-${item.protocol}-${item.port}-${index}`}
+                    className="border-b border-gray-800/70 hover:bg-white/[0.02]"
+                  >
+                    <td className="px-5 py-4 text-sm text-white font-medium">
+                      {item.target || "—"}
+                    </td>
+                    <td className="px-5 py-4">
+                      <span className="inline-flex px-2.5 py-1 rounded-md border border-red-700/40 bg-red-700/10 text-red-300 text-sm font-semibold">
+                        {item.port}
+                      </span>
+                    </td>
+                    <td className="px-5 py-4 text-sm text-gray-300 uppercase">
+                      {item.protocol || "tcp"}
+                    </td>
+                    <td className="px-5 py-4 text-sm text-gray-300">
+                      {item.source || "—"}
+                    </td>
+                    <td className="px-5 py-4 text-sm text-gray-400">
+                      #{item.run_id ?? "—"}
+                    </td>
+                    <td className="px-5 py-4 text-sm text-gray-400">
+                      {item.assessment_id ? `#${item.assessment_id}` : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function ExposedServices() {
+  const [data, setData] = useState({
+    scope: "",
+    total_services: 0,
+    targets_with_services: 0,
+    services: [],
+  });
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadExposedServices = useCallback(async (isRefresh = false) => {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setError("Authentication token not found.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      if (isRefresh) setRefreshing(true);
+      else setLoading(true);
+      setError("");
+
+      const response = await fetch(`${API_URL}/client/exposed-services`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const body = await response.text();
+
+      if (!response.ok) {
+        throw new Error(body || `Request failed with status ${response.status}`);
+      }
+
+      const result = JSON.parse(body);
+      setData({
+        scope: result.scope || "",
+        total_services: Number(result.total_services || 0),
+        targets_with_services: Number(result.targets_with_services || 0),
+        services: Array.isArray(result.services) ? result.services : [],
+      });
+    } catch (err) {
+      console.error("Exposed Services API error:", err);
+      setError(err.message || "Failed to load exposed services.");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadExposedServices();
+
+    const interval = setInterval(() => {
+      loadExposedServices(true);
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, [loadExposedServices]);
+
+  const services = data.services || [];
+  const tcpCount = services.filter((item) => String(item.protocol || "").toLowerCase() === "tcp").length;
+  const udpCount = services.filter((item) => String(item.protocol || "").toLowerCase() === "udp").length;
+
+  return (
+    <div style={{ padding: "28px", color: "#fff", background: "#050505", minHeight: "100%", borderRadius: "8px" }}>
+      <div style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        marginBottom: "24px",
+        gap: "16px",
+        flexWrap: "wrap"
+      }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>
+            Exposed Services
+          </h1>
+          <p style={{ margin: "7px 0 0", color: "#aaa", fontSize: "14px" }}>
+            Services identified from real Nmap discovery results.
+          </p>
+        </div>
+
+        <button
+          onClick={() => loadExposedServices(true)}
+          disabled={refreshing}
+          style={{
+            border: "1px solid #e11d2e",
+            background: "#0b0b0b",
+            color: "#fff",
+            borderRadius: "6px",
+            padding: "10px 16px",
+            cursor: refreshing ? "not-allowed" : "pointer",
+            fontWeight: 600,
+            boxShadow: "0 0 0 1px rgba(225,29,46,0.15)",
+            opacity: refreshing ? 0.6 : 1,
+          }}
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div style={{
+          border: "1px solid #e11d2e",
+          background: "#0b0b0b",
+          color: "#ff4d5a",
+          padding: "14px 16px",
+          borderRadius: "6px",
+          marginBottom: "20px"
+        }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
+        gap: "14px",
+        marginBottom: "24px"
+      }}>
+        {[
+          {
+            label: "Exposed Services",
+            value: data.total_services,
+            icon: "▣",
+          },
+          {
+            label: "Targets",
+            value: data.targets_with_services,
+            icon: "◉",
+          },
+          {
+            label: "TCP",
+            value: tcpCount,
+            icon: "⌁",
+          },
+          {
+            label: "UDP",
+            value: udpCount,
+            icon: "◈",
+          },
+        ].map((item) => (
+          <div key={item.label} style={{
+            border: "1px solid #303030",
+            borderRadius: "9px",
+            padding: "20px",
+            background: "linear-gradient(145deg, #101010, #080808)",
+            display: "flex",
+            alignItems: "center",
+            gap: "16px",
+            minHeight: "76px",
+            boxShadow: "inset 0 1px 0 rgba(255,255,255,0.025), 0 8px 24px rgba(0,0,0,0.22)"
+          }}>
+            <div style={{
+              width: "50px",
+              height: "50px",
+              minWidth: "50px",
+              borderRadius: "50%",
+              background: "rgba(225,29,46,0.16)",
+              border: "1px solid rgba(225,29,46,0.28)",
+              color: "#ff263b",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: "25px",
+              fontWeight: 800,
+              boxShadow: "0 0 18px rgba(225,29,46,0.12)"
+            }}>
+              {item.icon}
+            </div>
+            <div>
+              <div style={{
+                fontSize: "13px",
+                color: "#9b9b9b",
+                marginBottom: "6px",
+                fontWeight: 500
+              }}>
+                {item.label}
+              </div>
+              <div style={{
+                fontSize: "30px",
+                lineHeight: 1,
+                fontWeight: 750,
+                color: "#fff"
+              }}>
+                {loading ? "—" : item.value}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{
+        border: "1px solid #292929",
+        borderRadius: "8px",
+        background: "#0b0b0b",
+        overflowX: "auto"
+      }}>
+        <div style={{
+          padding: "20px 22px",
+          borderBottom: "1px solid #292929",
+          background: "rgba(255,255,255,0.012)",
+          display: "flex",
+          justifyContent: "space-between",
+          gap: "12px",
+          flexWrap: "wrap"
+        }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: "18px" }}>Discovered Services</h2>
+            <div style={{ marginTop: "5px", color: "#999", fontSize: "12px" }}>
+              Source: Nmap · Scope: {data.scope || "—"}
+            </div>
+          </div>
+          <div style={{ color: "#999", fontSize: "12px", alignSelf: "center" }}>
+            {loading ? "Loading..." : `${services.length} service${services.length === 1 ? "" : "s"}`}
+          </div>
+        </div>
+
+        {services.length === 0 && !loading ? (
+          <div style={{
+            padding: "42px 20px",
+            textAlign: "center",
+            color: "#999"
+          }}>
+            No exposed services were found in the completed discovery results.
+          </div>
+        ) : (
+          <table style={{
+            width: "100%",
+            minWidth: "1150px",
+            borderCollapse: "collapse",
+            fontSize: "13px"
+          }}>
+            <thead>
+              <tr style={{ background: "#171717", textAlign: "left", boxShadow: "inset 0 -1px 0 #303030" }}>
+                {[
+                  "Target",
+                  "IP Address",
+                  "Port",
+                  "Protocol",
+                  "Service",
+                  "Product",
+                  "Version",
+                  "State",
+                  "Source",
+                  "Run",
+                ].map((heading) => (
+                  <th key={heading} style={{
+                    padding: "14px 14px",
+                    borderBottom: "1px solid #292929",
+                    fontWeight: 700,
+                    whiteSpace: "nowrap"
+                  }}>
+                    {heading}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {services.map((service, index) => (
+                <tr key={`${service.target}-${service.port}-${service.protocol}-${index}`}>
+                  <td style={{ padding: "14px", borderBottom: "1px solid #242424", fontWeight: 600 }}>
+                    {service.target || service.hostname || "—"}
+                  </td>
+                  <td style={{ padding: "14px", borderBottom: "1px solid #242424" }}>
+                    {service.ip_address || "—"}
+                  </td>
+                  <td style={{ padding: "14px", borderBottom: "1px solid #242424", fontWeight: 700 }}>
+                    {service.port ?? "—"}
+                  </td>
+                  <td style={{ padding: "14px", borderBottom: "1px solid #242424" }}>
+                    {String(service.protocol || "—").toUpperCase()}
+                  </td>
+                  <td style={{ padding: "14px", borderBottom: "1px solid #242424", fontWeight: 600 }}>
+                    {service.service_name || "Unknown"}
+                  </td>
+                  <td style={{ padding: "14px", borderBottom: "1px solid #242424" }}>
+                    {service.product || "—"}
+                  </td>
+                  <td style={{ padding: "14px", borderBottom: "1px solid #242424" }}>
+                    {service.version || "—"}
+                  </td>
+                  <td style={{ padding: "14px", borderBottom: "1px solid #242424" }}>
+                    {service.state || "—"}
+                  </td>
+                  <td style={{ padding: "14px", borderBottom: "1px solid #242424" }}>
+                    {service.source || "—"}
+                  </td>
+                  <td style={{ padding: "14px", borderBottom: "1px solid #242424" }}>
+                    #{service.discovery_run_id ?? "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function SSLTLS() {
+  const [data, setData] = useState({
+    scope: "personal",
+    run_count: 0,
+    runs: [],
+  });
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadSSLTLS = useCallback(async (manual = false) => {
+    if (manual) setRefreshing(true);
+
+    try {
+      setError("");
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Authentication token not found");
+      }
+
+      const response = await fetch(`${API_URL}/client/ssl-tls`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`SSL/TLS API returned ${response.status}`);
+      }
+
+      const payload = await response.json();
+      setData({
+        scope: payload.scope || "personal",
+        run_count: payload.run_count || 0,
+        runs: Array.isArray(payload.runs) ? payload.runs : [],
+      });
+
+    } catch (err) {
+      console.error("SSL/TLS API error:", err);
+      setError(err.message || "Unable to load SSL/TLS data");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadSSLTLS();
+
+    const interval = setInterval(() => {
+      loadSSLTLS();
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, [loadSSLTLS]);
+
+  const runs = data.runs || [];
+  const completedRuns = runs.filter(
+    (run) => String(run.status || "").toUpperCase() === "COMPLETED"
+  );
+  const validCertificates = completedRuns.filter(
+    (run) => run.certificate_verified === true
+  );
+  const expiringCertificates = completedRuns.filter(
+    (run) =>
+      Number.isFinite(Number(run.days_remaining)) &&
+      Number(run.days_remaining) <= 30
+  );
+
+  const latest = completedRuns[0] || runs[0] || null;
+  const latestResult = latest?.result_data || {};
+  const latestCertificate = latestResult.certificate || {};
+  const latestConnection = latestResult.connection || {};
+  const latestSANs = Array.isArray(latestCertificate.subject_alt_names)
+    ? latestCertificate.subject_alt_names
+    : [];
+
+  const formatCertificateDate = (value) => {
+    if (!value) return "—";
+    const raw = String(value);
+    const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/.test(raw);
+    const parsed = new Date(hasTimezone ? raw : `${raw}Z`);
+    if (Number.isNaN(parsed.getTime())) return raw;
+
+    return parsed.toLocaleString("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: "UTC",
+    }) + " UTC";
+  };
+
+  const statusStyle = (status) => {
+    const value = String(status || "").toUpperCase();
+    if (value === "COMPLETED") {
+      return {
+        color: "#ff3b30",
+        border: "1px solid #ff3b30",
+        background: "#1a0505",
+      };
+    }
+    if (value === "RUNNING") {
+      return {
+        color: "#ffffff",
+        border: "1px solid #666666",
+        background: "#171717",
+      };
+    }
+    return {
+      color: "#999999",
+      border: "1px solid #333333",
+      background: "#111111",
+    };
+  };
+
+  const cardStyle = {
+    background: "#090909",
+    border: "1px solid #252525",
+    borderRadius: "14px",
+    padding: "20px",
+    minHeight: "112px",
+    boxShadow: "0 0 0 1px rgba(255,59,48,0.03)",
+  };
+
+  const iconStyle = {
+    width: "42px",
+    height: "42px",
+    borderRadius: "50%",
+    background: "#ff3b30",
+    color: "#ffffff",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: "18px",
+    fontWeight: 800,
+    flexShrink: 0,
+  };
+
+  const labelStyle = {
+    color: "#888888",
+    fontSize: "12px",
+    textTransform: "uppercase",
+    letterSpacing: "0.08em",
+    fontWeight: 700,
+  };
+
+  const valueStyle = {
+    color: "#ffffff",
+    fontSize: "28px",
+    fontWeight: 800,
+    marginTop: "7px",
+  };
+
+  const sectionStyle = {
+    background: "#090909",
+    border: "1px solid #242424",
+    borderRadius: "14px",
+    padding: "20px",
+    marginTop: "18px",
+  };
+
+  return (
+    <div style={{ background: "#000000", color: "#ffffff", minHeight: "100%", padding: "28px" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: "16px",
+          marginBottom: "24px",
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <div style={{ fontSize: "28px", fontWeight: 850, letterSpacing: "-0.02em" }}>
+            SSL/TLS
+          </div>
+          <div style={{ color: "#888888", marginTop: "6px", fontSize: "14px" }}>
+            Real TLS protocol and certificate inspection for your assessed web assets.
+          </div>
+        </div>
+
+        <button
+          onClick={() => loadSSLTLS(true)}
+          disabled={refreshing}
+          style={{
+            border: "1px solid #ff3b30",
+            background: "transparent",
+            color: "#ff3b30",
+            borderRadius: "8px",
+            padding: "10px 16px",
+            fontWeight: 750,
+            cursor: refreshing ? "wait" : "pointer",
+            opacity: refreshing ? 0.65 : 1,
+          }}
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div
+          style={{
+            background: "#160505",
+            border: "1px solid #ff3b30",
+            color: "#ff8f88",
+            borderRadius: "10px",
+            padding: "12px 14px",
+            marginBottom: "18px",
+          }}
+        >
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div
+          style={{
+            ...sectionStyle,
+            color: "#999999",
+            textAlign: "center",
+            padding: "50px 20px",
+          }}
+        >
+          Loading SSL/TLS inspection data...
+        </div>
+      ) : (
+        <>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
+              gap: "14px",
+            }}
+          >
+            {[
+              ["◉", "Total Scans", data.run_count],
+              ["✓", "Completed", completedRuns.length],
+              ["🔒", "Valid Certificates", validCertificates.length],
+              ["!", "Expiring ≤30 Days", expiringCertificates.length],
+            ].map(([icon, label, value]) => (
+              <div key={label} style={cardStyle}>
+                <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
+                  <div style={iconStyle}>{icon}</div>
+                  <div>
+                    <div style={labelStyle}>{label}</div>
+                    <div style={valueStyle}>{value}</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {latest ? (
+            <>
+              <div style={sectionStyle}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: "12px",
+                    flexWrap: "wrap",
+                    marginBottom: "18px",
+                  }}
+                >
+                  <div>
+                    <div style={{ fontSize: "18px", fontWeight: 800 }}>
+                      Latest TLS Inspection
+                    </div>
+                    <div style={{ color: "#777777", fontSize: "13px", marginTop: "4px" }}>
+                      {latest.target_host}:{latest.target_port}
+                    </div>
+                  </div>
+
+                  <span
+                    style={{
+                      ...statusStyle(latest.status),
+                      padding: "6px 10px",
+                      borderRadius: "999px",
+                      fontSize: "11px",
+                      fontWeight: 800,
+                    }}
+                  >
+                    {String(latest.status || "UNKNOWN").toUpperCase()}
+                  </span>
+                </div>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+                    gap: "12px",
+                  }}
+                >
+                  {[
+                    ["TLS Protocol", latest.tls_protocol || latestConnection.tls_protocol || "—"],
+                    ["Cipher", latest.cipher_name || latestConnection.cipher_name || "—"],
+                    ["Encryption", latest.cipher_bits ? `${latest.cipher_bits}-bit` : "—"],
+                    ["Certificate", latest.certificate_subject || latestCertificate.subject || "—"],
+                    ["Issuer", latest.certificate_issuer || latestCertificate.issuer || "—"],
+                    ["Days Remaining", Number.isFinite(Number(latest.days_remaining)) ? `${latest.days_remaining} days` : "—"],
+                  ].map(([label, value]) => (
+                    <div
+                      key={label}
+                      style={{
+                        background: "#050505",
+                        border: "1px solid #1f1f1f",
+                        borderRadius: "10px",
+                        padding: "14px",
+                      }}
+                    >
+                      <div style={labelStyle}>{label}</div>
+                      <div
+                        style={{
+                          color: "#ffffff",
+                          fontSize: "14px",
+                          fontWeight: 750,
+                          marginTop: "8px",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {value}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div style={sectionStyle}>
+                <div style={{ fontSize: "18px", fontWeight: 800, marginBottom: "16px" }}>
+                  Certificate Verification
+                </div>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
+                    gap: "12px",
+                  }}
+                >
+                  {[
+                    ["Hostname Verification", latest.hostname_verified === true ? "PASS" : "FAIL"],
+                    ["Certificate Verification", latest.certificate_verified === true ? "PASS" : "FAIL"],
+                    ["Valid From", formatCertificateDate(latest.certificate_valid_from || latestCertificate.valid_from)],
+                    ["Valid Until", formatCertificateDate(latest.certificate_valid_until || latestCertificate.valid_until)],
+                    ["Serial Number", latest.certificate_serial || latestCertificate.serial_number || "—"],
+                    ["SAN Count", latest.san_count ?? latestCertificate.san_count ?? 0],
+                  ].map(([label, value]) => {
+                    const pass =
+                      (label === "Hostname Verification" || label === "Certificate Verification") &&
+                      value === "PASS";
+
+                    return (
+                      <div
+                        key={label}
+                        style={{
+                          background: "#050505",
+                          border: `1px solid ${pass ? "#ff3b30" : "#242424"}`,
+                          borderRadius: "10px",
+                          padding: "14px",
+                        }}
+                      >
+                        <div style={labelStyle}>{label}</div>
+                        <div
+                          style={{
+                            color: pass ? "#ff3b30" : "#ffffff",
+                            fontSize: "14px",
+                            fontWeight: 800,
+                            marginTop: "8px",
+                            wordBreak: "break-word",
+                          }}
+                        >
+                          {value}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {latestSANs.length > 0 && (
+                  <div style={{ marginTop: "16px" }}>
+                    <div style={labelStyle}>Subject Alternative Names</div>
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: "8px",
+                        flexWrap: "wrap",
+                        marginTop: "10px",
+                      }}
+                    >
+                      {latestSANs.map((san) => (
+                        <span
+                          key={san}
+                          style={{
+                            border: "1px solid #ff3b30",
+                            color: "#ffffff",
+                            background: "#120303",
+                            borderRadius: "999px",
+                            padding: "6px 10px",
+                            fontSize: "12px",
+                          }}
+                        >
+                          {san}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <div style={sectionStyle}>
+              <div style={{ color: "#888888", textAlign: "center", padding: "30px" }}>
+                No SSL/TLS inspection results are available yet.
+              </div>
+            </div>
+          )}
+
+          <div style={sectionStyle}>
+            <div style={{ fontSize: "18px", fontWeight: 800, marginBottom: "16px" }}>
+              Scan History
+            </div>
+
+            {runs.length === 0 ? (
+              <div style={{ color: "#777777", padding: "24px 0", textAlign: "center" }}>
+                No scans found.
+              </div>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table
+                  style={{
+                    width: "100%",
+                    minWidth: "980px",
+                    borderCollapse: "collapse",
+                    fontSize: "13px",
+                  }}
+                >
+                  <thead>
+                    <tr style={{ background: "#111111", color: "#999999" }}>
+                      {[
+                        "Target",
+                        "Port",
+                        "Status",
+                        "TLS",
+                        "Certificate",
+                        "Days Left",
+                        "Verification",
+                        "Run",
+                      ].map((heading) => (
+                        <th
+                          key={heading}
+                          style={{
+                            padding: "12px 14px",
+                            textAlign: "left",
+                            borderBottom: "1px solid #2a2a2a",
+                            fontSize: "11px",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.06em",
+                          }}
+                        >
+                          {heading}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {runs.map((run) => (
+                      <tr key={run.id}>
+                        <td style={{ padding: "14px", borderBottom: "1px solid #202020", color: "#ffffff", fontWeight: 700 }}>
+                          {run.target_host || "—"}
+                        </td>
+                        <td style={{ padding: "14px", borderBottom: "1px solid #202020" }}>
+                          {run.target_port || "—"}
+                        </td>
+                        <td style={{ padding: "14px", borderBottom: "1px solid #202020" }}>
+                          <span
+                            style={{
+                              ...statusStyle(run.status),
+                              padding: "5px 8px",
+                              borderRadius: "999px",
+                              fontSize: "10px",
+                              fontWeight: 800,
+                            }}
+                          >
+                            {String(run.status || "UNKNOWN").toUpperCase()}
+                          </span>
+                        </td>
+                        <td style={{ padding: "14px", borderBottom: "1px solid #202020" }}>
+                          {run.tls_protocol || "—"}
+                        </td>
+                        <td style={{ padding: "14px", borderBottom: "1px solid #202020" }}>
+                          {run.certificate_subject || "—"}
+                        </td>
+                        <td style={{ padding: "14px", borderBottom: "1px solid #202020" }}>
+                          {Number.isFinite(Number(run.days_remaining)) ? `${run.days_remaining}d` : "—"}
+                        </td>
+                        <td style={{ padding: "14px", borderBottom: "1px solid #202020" }}>
+                          {run.hostname_verified && run.certificate_verified ? (
+                            <span style={{ color: "#ff3b30", fontWeight: 800 }}>PASS</span>
+                          ) : (
+                            <span style={{ color: "#888888", fontWeight: 700 }}>CHECK</span>
+                          )}
+                        </td>
+                        <td style={{ padding: "14px", borderBottom: "1px solid #202020" }}>
+                          #{run.id}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+function SecurityHeaders() {
+  const [data, setData] = useState({
+    scope: "personal",
+    run_count: 0,
+    runs: [],
+  });
+  const [assets, setAssets] = useState([]);
+  const [selectedAssessmentId, setSelectedAssessmentId] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const loadSecurityHeaders = useCallback(async (manual = false) => {
+    if (manual) setRefreshing(true);
+
+    try {
+      setError("");
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Authentication token not found");
+      }
+
+      const [response, inventoryResponse] = await Promise.all([
+        fetch(`${API_URL}/client/security-headers`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+        axios.get(`${API_URL}/client/asset-inventory`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+      ]);
+
+      if (response.status === 401 || response.status === 403) {
+        throw new Error("Your session is no longer authorized. Please log in again.");
+      }
+
+      if (!response.ok) {
+        throw new Error(`Security Headers API returned ${response.status}`);
+      }
+
+      const payload = await response.json();
+
+      setAssets(
+        Array.isArray(inventoryResponse.data?.assets)
+          ? inventoryResponse.data.assets
+          : []
+      );
+
+      setData({
+        scope: payload.scope || "personal",
+        run_count: payload.run_count || 0,
+        runs: Array.isArray(payload.runs) ? payload.runs : [],
+      });
+    } catch (err) {
+      console.error("Security Headers API error:", err);
+      setError(err.message || "Unable to load Security Headers data");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadSecurityHeaders();
+
+    const interval = setInterval(() => {
+      loadSecurityHeaders();
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, [loadSecurityHeaders]);
+
+  const runs = data.runs || [];
+
+  const targetAssets = assets.filter(
+    (asset) =>
+      asset.asset_type === "Target Assessment" &&
+      !String(asset.target || "").startsWith("code://") &&
+      ["http:", "https:"].includes(
+        String(asset.target || "").split(":")[0].toLowerCase() + ":"
+      )
+  );
+
+  const selectedAsset = targetAssets.find(
+    (asset) => String(asset.assessment_id) === String(selectedAssessmentId)
+  );
+
+  const handleStartSecurityHeaders = async () => {
+    if (!selectedAssessmentId) {
+      setError("Select a target assessment before starting a Security Headers scan.");
+      return;
+    }
+
+    if (!selectedAsset?.target) {
+      setError("The selected assessment does not have a valid target URL.");
+      return;
+    }
+
+    try {
+      setStarting(true);
+      setError("");
+      setMessage("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("No authentication token found.");
+      }
+
+      const response = await axios.post(
+        `${API_URL}/client/security-headers`,
+        {
+          assessment_id: Number(selectedAssessmentId),
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setMessage(
+        response.data?.message ||
+          "Security Headers scan started successfully."
+      );
+
+      await loadSecurityHeaders(true);
+    } catch (err) {
+      console.error("Security Headers start error:", err);
+
+      setError(
+        err.response?.data?.detail ||
+          err.message ||
+          "Unable to start Security Headers scan."
+      );
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const completedRuns = runs.filter(
+    (run) => String(run.status || "").toUpperCase() === "COMPLETED"
+  );
+
+  const latest = completedRuns[0] || runs[0] || null;
+  const latestHeaders = Array.isArray(latest?.result_data?.headers)
+    ? latest.result_data.headers
+    : [];
+
+  const presentCount = latest
+    ? Number.isFinite(Number(latest.present_header_count))
+      ? Number(latest.present_header_count)
+      : latestHeaders.filter((item) => item?.present === true).length
+    : 0;
+
+  const missingCount = latest
+    ? Number.isFinite(Number(latest.missing_header_count))
+      ? Number(latest.missing_header_count)
+      : latestHeaders.filter((item) => item?.present !== true).length
+    : 0;
+
+  const securityScore = latest?.security_score != null
+    ? Number(latest.security_score)
+    : null;
+
+  const statusStyle = (status) => {
+    const value = String(status || "").toUpperCase();
+
+    if (value === "COMPLETED") {
+      return {
+        color: "#ff3b30",
+        border: "1px solid #ff3b30",
+        background: "#1a0505",
+      };
+    }
+
+    if (value === "RUNNING") {
+      return {
+        color: "#ffffff",
+        border: "1px solid #666666",
+        background: "#171717",
+      };
+    }
+
+    if (value === "FAILED" || value === "TIMEOUT") {
+      return {
+        color: "#ff8f88",
+        border: "1px solid #ff3b30",
+        background: "#160505",
+      };
+    }
+
+    return {
+      color: "#999999",
+      border: "1px solid #333333",
+      background: "#111111",
+    };
+  };
+
+  const cardStyle = {
+    background: "#090909",
+    border: "1px solid #252525",
+    borderRadius: "14px",
+    padding: "20px",
+    minHeight: "112px",
+    boxShadow: "0 0 0 1px rgba(255,59,48,0.03)",
+  };
+
+  const iconStyle = {
+    width: "42px",
+    height: "42px",
+    borderRadius: "50%",
+    background: "#ff3b30",
+    color: "#ffffff",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: "18px",
+    fontWeight: 800,
+    flexShrink: 0,
+  };
+
+  const labelStyle = {
+    color: "#888888",
+    fontSize: "12px",
+    textTransform: "uppercase",
+    letterSpacing: "0.08em",
+    fontWeight: 700,
+  };
+
+  const valueStyle = {
+    color: "#ffffff",
+    fontSize: "28px",
+    fontWeight: 800,
+    marginTop: "7px",
+  };
+
+  const sectionStyle = {
+    background: "#090909",
+    border: "1px solid #242424",
+    borderRadius: "14px",
+    padding: "20px",
+    marginTop: "18px",
+  };
+
+  const formatRunDate = (value) => {
+    if (!value) return "—";
+
+    const parsed = new Date(value);
+
+    if (Number.isNaN(parsed.getTime())) {
+      return String(value);
+    }
+
+    return parsed.toLocaleString("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+  };
+
+  return (
+    <div
+      style={{
+        background: "#000000",
+        color: "#ffffff",
+        minHeight: "100%",
+        padding: "28px",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: "16px",
+          marginBottom: "24px",
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <div
+            style={{
+              fontSize: "28px",
+              fontWeight: 850,
+              letterSpacing: "-0.02em",
+            }}
+          >
+            Security Headers
+          </div>
+
+          <div
+            style={{
+              color: "#888888",
+              marginTop: "6px",
+              fontSize: "14px",
+            }}
+          >
+            Real HTTP security-header inspection for your assessed web assets.
+          </div>
+        </div>
+
+        <button
+          onClick={() => loadSecurityHeaders(true)}
+          disabled={refreshing}
+          style={{
+            border: "1px solid #ff3b30",
+            background: "transparent",
+            color: "#ff3b30",
+            borderRadius: "8px",
+            padding: "10px 16px",
+            fontWeight: 750,
+            cursor: refreshing ? "wait" : "pointer",
+            opacity: refreshing ? 0.65 : 1,
+          }}
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div
+          style={{
+            background: "#160505",
+            border: "1px solid #ff3b30",
+            color: "#ff8f88",
+            borderRadius: "10px",
+            padding: "12px 14px",
+            marginBottom: "18px",
+          }}
+        >
+          {error}
+        </div>
+      )}
+
+      <div style={sectionStyle}>
+        <div
+          style={{
+            fontSize: "18px",
+            fontWeight: 800,
+            marginBottom: "6px",
+          }}
+        >
+          Start Security Headers Scan
+        </div>
+
+        <div
+          style={{
+            color: "#666666",
+            fontSize: "13px",
+            marginBottom: "18px",
+          }}
+        >
+          Run a real HTTP security-header inspection against one of your
+          existing target assessments.
+        </div>
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(0, 1fr) auto",
+            gap: "14px",
+            alignItems: "end",
+          }}
+        >
+          <div>
+            <label
+              style={{
+                display: "block",
+                color: "#777777",
+                fontSize: "11px",
+                textTransform: "uppercase",
+                letterSpacing: "0.08em",
+                fontWeight: 700,
+                marginBottom: "8px",
+              }}
+            >
+              Target Assessment
+            </label>
+
+            <select
+              value={selectedAssessmentId}
+              onChange={(event) =>
+                setSelectedAssessmentId(event.target.value)
+              }
+              disabled={starting || loading || targetAssets.length === 0}
+              style={{
+                width: "100%",
+                border: "1px solid #333333",
+                background: "#050505",
+                color: "#dddddd",
+                borderRadius: "8px",
+                padding: "11px 12px",
+                fontSize: "13px",
+                outline: "none",
+                opacity:
+                  starting || loading || targetAssets.length === 0
+                    ? 0.5
+                    : 1,
+              }}
+            >
+              <option value="">
+                {targetAssets.length === 0
+                  ? "No eligible target assessments"
+                  : "Select an assessment"}
+              </option>
+
+              {targetAssets.map((asset) => (
+                <option
+                  key={asset.assessment_id}
+                  value={asset.assessment_id}
+                >
+                  #{asset.assessment_id} — {asset.target}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleStartSecurityHeaders}
+            disabled={
+              starting ||
+              loading ||
+              !selectedAssessmentId ||
+              !selectedAsset
+            }
+            style={{
+              border: "1px solid #ff3b30",
+              background: "#ff3b30",
+              color: "#ffffff",
+              borderRadius: "8px",
+              padding: "11px 18px",
+              fontSize: "13px",
+              fontWeight: 800,
+              cursor:
+                starting ||
+                loading ||
+                !selectedAssessmentId ||
+                !selectedAsset
+                  ? "not-allowed"
+                  : "pointer",
+              opacity:
+                starting ||
+                loading ||
+                !selectedAssessmentId ||
+                !selectedAsset
+                  ? 0.4
+                  : 1,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {starting ? "Starting..." : "Start Scan"}
+          </button>
+        </div>
+
+        {selectedAsset && (
+          <div
+            style={{
+              borderTop: "1px solid #1f1f1f",
+              marginTop: "16px",
+              paddingTop: "14px",
+              color: "#666666",
+              fontSize: "12px",
+              wordBreak: "break-all",
+            }}
+          >
+            Selected target:{" "}
+            <span style={{ color: "#cccccc" }}>
+              {selectedAsset.target}
+            </span>
+            {" · "}
+            Assessment #{selectedAsset.assessment_id}
+          </div>
+        )}
+
+        {message && !error && (
+          <div
+            style={{
+              marginTop: "14px",
+              padding: "11px 13px",
+              border: "1px solid #1f4d1f",
+              background: "#061006",
+              color: "#8fd18f",
+              borderRadius: "8px",
+              fontSize: "12px",
+            }}
+          >
+            {message}
+          </div>
+        )}
+      </div>
+
+
+      {loading ? (
+        <div
+          style={{
+            ...sectionStyle,
+            color: "#999999",
+            textAlign: "center",
+            padding: "50px 20px",
+          }}
+        >
+          Loading Security Headers inspection data...
+        </div>
+      ) : (
+        <>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
+              gap: "14px",
+            }}
+          >
+            {[
+              ["◉", "Total Scans", data.run_count],
+              ["✓", "Completed", completedRuns.length],
+              ["✓", "Headers Present", presentCount],
+              ["!", "Headers Missing", missingCount],
+            ].map(([icon, label, value]) => (
+              <div key={label} style={cardStyle}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "14px",
+                  }}
+                >
+                  <div style={iconStyle}>{icon}</div>
+
+                  <div>
+                    <div style={labelStyle}>{label}</div>
+                    <div style={valueStyle}>{value}</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {latest ? (
+            <>
+              <div style={sectionStyle}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: "12px",
+                    flexWrap: "wrap",
+                    marginBottom: "18px",
+                  }}
+                >
+                  <div>
+                    <div style={{ fontSize: "18px", fontWeight: 800 }}>
+                      Latest Security Headers Inspection
+                    </div>
+
+                    <div
+                      style={{
+                        color: "#777777",
+                        fontSize: "13px",
+                        marginTop: "4px",
+                        wordBreak: "break-all",
+                      }}
+                    >
+                      {latest.final_url || latest.target_url || "—"}
+                    </div>
+                  </div>
+
+                  <span
+                    style={{
+                      ...statusStyle(latest.status),
+                      padding: "6px 10px",
+                      borderRadius: "999px",
+                      fontSize: "11px",
+                      fontWeight: 800,
+                    }}
+                  >
+                    {String(latest.status || "UNKNOWN").toUpperCase()}
+                  </span>
+                </div>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns:
+                      "repeat(auto-fit, minmax(180px, 1fr))",
+                    gap: "12px",
+                  }}
+                >
+                  {[
+                    ["Security Score", securityScore != null ? `${securityScore}/10` : "—"],
+                    ["HTTP Status", latest.http_status ?? "—"],
+                    ["Total Headers", latest.header_count ?? 0],
+                    ["Present", presentCount],
+                    ["Missing", missingCount],
+                    ["Final URL", latest.final_url || "—"],
+                  ].map(([label, value]) => (
+                    <div
+                      key={label}
+                      style={{
+                        background: "#050505",
+                        border: "1px solid #1f1f1f",
+                        borderRadius: "10px",
+                        padding: "14px",
+                      }}
+                    >
+                      <div style={labelStyle}>{label}</div>
+
+                      <div
+                        style={{
+                          color:
+                            label === "Security Score" && securityScore != null
+                              ? securityScore >= 8
+                                ? "#ff3b30"
+                                : "#ffffff"
+                              : "#ffffff",
+                          fontSize: "14px",
+                          fontWeight: 750,
+                          marginTop: "8px",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {value}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div style={sectionStyle}>
+                <div
+                  style={{
+                    fontSize: "18px",
+                    fontWeight: 800,
+                    marginBottom: "16px",
+                  }}
+                >
+                  Security Header Status
+                </div>
+
+                {latestHeaders.length === 0 ? (
+                  <div
+                    style={{
+                      color: "#777777",
+                      padding: "24px 0",
+                      textAlign: "center",
+                    }}
+                  >
+                    No individual security-header results were returned.
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns:
+                        "repeat(auto-fit, minmax(280px, 1fr))",
+                      gap: "12px",
+                    }}
+                  >
+                    {latestHeaders.map((item) => {
+                      const present = item?.present === true;
+
+                      return (
+                        <div
+                          key={item?.header || Math.random()}
+                          style={{
+                            background: "#050505",
+                            border: `1px solid ${
+                              present ? "#ff3b30" : "#242424"
+                            }`,
+                            borderRadius: "10px",
+                            padding: "16px",
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              alignItems: "center",
+                              gap: "12px",
+                            }}
+                          >
+                            <div
+                              style={{
+                                color: "#ffffff",
+                                fontSize: "14px",
+                                fontWeight: 800,
+                                wordBreak: "break-word",
+                              }}
+                            >
+                              {item?.header || "Unknown Header"}
+                            </div>
+
+                            <span
+                              style={{
+                                color: present ? "#ff3b30" : "#999999",
+                                border: `1px solid ${
+                                  present ? "#ff3b30" : "#333333"
+                                }`,
+                                background: present ? "#120303" : "#111111",
+                                borderRadius: "999px",
+                                padding: "5px 8px",
+                                fontSize: "10px",
+                                fontWeight: 800,
+                                flexShrink: 0,
+                              }}
+                            >
+                              {present ? "PRESENT" : "MISSING"}
+                            </span>
+                          </div>
+
+                          <div
+                            style={{
+                              marginTop: "12px",
+                              color: item?.value ? "#cccccc" : "#666666",
+                              fontSize: "12px",
+                              lineHeight: 1.5,
+                              wordBreak: "break-word",
+                            }}
+                          >
+                            {item?.value || "No value returned by target."}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <div style={sectionStyle}>
+              <div
+                style={{
+                  color: "#888888",
+                  textAlign: "center",
+                  padding: "30px",
+                }}
+              >
+                No Security Headers inspection results are available yet.
+              </div>
+            </div>
+          )}
+
+          <div style={sectionStyle}>
+            <div
+              style={{
+                fontSize: "18px",
+                fontWeight: 800,
+                marginBottom: "16px",
+              }}
+            >
+              Scan History
+            </div>
+
+            {runs.length === 0 ? (
+              <div
+                style={{
+                  color: "#777777",
+                  padding: "24px 0",
+                  textAlign: "center",
+                }}
+              >
+                No scans found.
+              </div>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table
+                  style={{
+                    width: "100%",
+                    minWidth: "980px",
+                    borderCollapse: "collapse",
+                    fontSize: "13px",
+                  }}
+                >
+                  <thead>
+                    <tr style={{ background: "#111111", color: "#999999" }}>
+                      {[
+                        "Target",
+                        "Status",
+                        "HTTP",
+                        "Score",
+                        "Present",
+                        "Missing",
+                        "Completed",
+                        "Run",
+                      ].map((heading) => (
+                        <th
+                          key={heading}
+                          style={{
+                            padding: "12px 14px",
+                            textAlign: "left",
+                            borderBottom: "1px solid #2a2a2a",
+                            fontSize: "11px",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.06em",
+                          }}
+                        >
+                          {heading}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {runs.map((run) => (
+                      <tr key={run.id}>
+                        <td
+                          style={{
+                            padding: "14px",
+                            borderBottom: "1px solid #202020",
+                            color: "#ffffff",
+                            fontWeight: 700,
+                            wordBreak: "break-all",
+                          }}
+                        >
+                          {run.target_url || "—"}
+                        </td>
+
+                        <td
+                          style={{
+                            padding: "14px",
+                            borderBottom: "1px solid #202020",
+                          }}
+                        >
+                          <span
+                            style={{
+                              ...statusStyle(run.status),
+                              padding: "5px 8px",
+                              borderRadius: "999px",
+                              fontSize: "10px",
+                              fontWeight: 800,
+                            }}
+                          >
+                            {String(run.status || "UNKNOWN").toUpperCase()}
+                          </span>
+                        </td>
+
+                        <td
+                          style={{
+                            padding: "14px",
+                            borderBottom: "1px solid #202020",
+                          }}
+                        >
+                          {run.http_status ?? "—"}
+                        </td>
+
+                        <td
+                          style={{
+                            padding: "14px",
+                            borderBottom: "1px solid #202020",
+                            fontWeight: 800,
+                          }}
+                        >
+                          {run.security_score != null
+                            ? `${run.security_score}/10`
+                            : "—"}
+                        </td>
+
+                        <td
+                          style={{
+                            padding: "14px",
+                            borderBottom: "1px solid #202020",
+                          }}
+                        >
+                          {run.present_header_count ?? 0}
+                        </td>
+
+                        <td
+                          style={{
+                            padding: "14px",
+                            borderBottom: "1px solid #202020",
+                          }}
+                        >
+                          {run.missing_header_count ?? 0}
+                        </td>
+
+                        <td
+                          style={{
+                            padding: "14px",
+                            borderBottom: "1px solid #202020",
+                            color: "#999999",
+                          }}
+                        >
+                          {formatRunDate(run.completed_at)}
+                        </td>
+
+                        <td
+                          style={{
+                            padding: "14px",
+                            borderBottom: "1px solid #202020",
+                          }}
+                        >
+                          #{run.id}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function IPIntelligence() {
+  const [data, setData] = useState({
+    scope: "personal",
+    ip_count: 0,
+    ips: [],
+  });
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadIPIntelligence = async (manual = false) => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      setError("Authentication required. Please log in again.");
+      setLoading(false);
+      return;
+    }
+
+    if (manual) setRefreshing(true);
+
+    try {
+      const response = await fetch(`${API_URL}/client/ip-intelligence`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        setError("Your session is no longer authorized. Please log in again.");
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(`IP Intelligence API returned ${response.status}`);
+      }
+
+      const payload = await response.json();
+      setData({
+        scope: payload.scope || "personal",
+        ip_count: Number(payload.ip_count || 0),
+        ips: Array.isArray(payload.ips) ? payload.ips : [],
+      });
+      setError("");
+    } catch (err) {
+      console.error("Failed to load IP intelligence:", err);
+      setError(err.message || "Failed to load IP intelligence.");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadIPIntelligence();
+
+    const interval = setInterval(() => {
+      loadIPIntelligence();
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const ips = Array.isArray(data.ips) ? data.ips : [];
+
+  const publicCount = ips.filter(
+    (item) => String(item.address_type || "").toUpperCase() === "PUBLIC"
+  ).length;
+
+  const privateCount = ips.filter(
+    (item) => String(item.address_type || "").toUpperCase() === "PRIVATE"
+  ).length;
+
+  const completedCount = ips.filter(
+    (item) => String(item.lookup_status || "").toUpperCase() === "COMPLETED"
+  ).length;
+
+  const statusBadge = (status) => {
+    const normalized = String(status || "UNKNOWN").toUpperCase();
+
+    const className =
+      normalized === "COMPLETED"
+        ? "bg-green-500/10 text-green-300 border-green-500/20"
+        : normalized === "PENDING" || normalized === "RUNNING"
+        ? "bg-yellow-500/10 text-yellow-300 border-yellow-500/20"
+        : normalized === "FAILED"
+        ? "bg-red-500/10 text-red-300 border-red-500/20"
+        : "bg-gray-500/10 text-gray-300 border-gray-500/20";
+
+    return (
+      <span
+        className={`px-2 py-1 rounded border text-xs font-medium ${className}`}
+      >
+        {normalized}
+      </span>
+    );
+  };
+
+  const addressTypeBadge = (type) => {
+    const normalized = String(type || "UNKNOWN").toUpperCase();
+
+    const className =
+      normalized === "PUBLIC"
+        ? "bg-red-500/10 text-red-300 border-red-500/20"
+        : normalized === "PRIVATE"
+        ? "bg-white/10 text-white border-white/20"
+        : normalized === "LOOPBACK"
+        ? "bg-yellow-500/10 text-yellow-300 border-yellow-500/20"
+        : "bg-gray-500/10 text-gray-300 border-gray-500/20";
+
+    return (
+      <span
+        className={`px-2 py-1 rounded border text-xs font-medium ${className}`}
+      >
+        {normalized}
+      </span>
+    );
+  };
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "—";
+    return date.toLocaleString();
+  };
+
+  return (
+    <div className="p-6 space-y-6">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-semibold text-white">
+            IP Intelligence
+          </h2>
+          <p className="text-sm text-gray-400 mt-1">
+            Real-time intelligence enriched from your persisted IP inventory,
+            including network ownership, geolocation, PTR records, and address classification.
+          </p>
+        </div>
+
+        <button
+          onClick={() => loadIPIntelligence(true)}
+          disabled={refreshing}
+          className="px-4 py-2 rounded-lg border border-red-700/50 bg-red-700/20 text-red-200 hover:bg-red-700/30 transition disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Total IPs</div>
+          <div className="text-3xl font-semibold text-white mt-2">
+            {data.ip_count}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-red-900/40 bg-red-950/20 p-5">
+          <div className="text-sm text-gray-400">Public</div>
+          <div className="text-3xl font-semibold text-red-300 mt-2">
+            {publicCount}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Private</div>
+          <div className="text-3xl font-semibold text-white mt-2">
+            {privateCount}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Lookups Completed</div>
+          <div className="text-3xl font-semibold text-green-300 mt-2">
+            {completedCount}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Scope</div>
+          <div className="text-xl font-semibold text-white mt-3 capitalize">
+            {data.scope || "personal"}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-gray-800 bg-gray-900/60 overflow-hidden">
+        <div className="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-white">
+              IP Intelligence Inventory
+            </h3>
+            <p className="text-xs text-gray-500 mt-1">
+              Enrichment is persisted per owned IP address.
+            </p>
+          </div>
+
+          <span className="text-xs text-gray-500">
+            Auto-refresh: 15s
+          </span>
+        </div>
+
+        {loading && ips.length === 0 ? (
+          <div className="p-8 text-center text-gray-400">
+            Loading real IP intelligence...
+          </div>
+        ) : ips.length === 0 ? (
+          <div className="p-8 text-center">
+            <div className="text-gray-300 font-medium">
+              No IP intelligence available
+            </div>
+            <div className="text-sm text-gray-500 mt-2">
+              IP intelligence will appear when your persisted assessments or registered assets contain verified IP addresses.
+            </div>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-black/60">
+                <tr className="text-left text-gray-400">
+                  <th className="px-5 py-3 font-medium">IP Address</th>
+                  <th className="px-5 py-3 font-medium">Type</th>
+                  <th className="px-5 py-3 font-medium">PTR Hostname</th>
+                  <th className="px-5 py-3 font-medium">ASN</th>
+                  <th className="px-5 py-3 font-medium">Organization / ISP</th>
+                  <th className="px-5 py-3 font-medium">Location</th>
+                  <th className="px-5 py-3 font-medium">Provider</th>
+                  <th className="px-5 py-3 font-medium">Status</th>
+                  <th className="px-5 py-3 font-medium">Last Lookup</th>
+                </tr>
+              </thead>
+
+              <tbody className="divide-y divide-gray-800">
+                {ips.map((item) => {
+                  const location = [
+                    item.city,
+                    item.region,
+                    item.country,
+                  ]
+                    .filter(Boolean)
+                    .join(", ");
+
+                  return (
+                    <tr
+                      key={item.id || item.ip_address}
+                      className="text-gray-200 align-top hover:bg-white/[0.02]"
+                    >
+                      <td className="px-5 py-4">
+                        <span className="font-mono text-red-300 font-medium">
+                          {item.ip_address}
+                        </span>
+                      </td>
+
+                      <td className="px-5 py-4">
+                        {addressTypeBadge(item.address_type)}
+                      </td>
+
+                      <td className="px-5 py-4 text-gray-300">
+                        {item.ptr_hostname || "—"}
+                      </td>
+
+                      <td className="px-5 py-4">
+                        <span className="font-mono text-gray-200">
+                          {item.asn || "—"}
+                        </span>
+                      </td>
+
+                      <td className="px-5 py-4 min-w-[220px]">
+                        <div className="text-gray-200">
+                          {item.organization || "—"}
+                        </div>
+                        {item.isp && item.isp !== item.organization && (
+                          <div className="text-xs text-gray-500 mt-1">
+                            ISP: {item.isp}
+                          </div>
+                        )}
+                      </td>
+
+                      <td className="px-5 py-4 min-w-[180px]">
+                        <div className="text-gray-300">
+                          {location || "—"}
+                        </div>
+                        {(item.latitude != null && item.longitude != null) && (
+                          <div className="text-xs text-gray-500 mt-1 font-mono">
+                            {item.latitude}, {item.longitude}
+                          </div>
+                        )}
+                      </td>
+
+                      <td className="px-5 py-4 text-gray-300">
+                        {item.provider || "—"}
+                      </td>
+
+                      <td className="px-5 py-4">
+                        {statusBadge(item.lookup_status)}
+                      </td>
+
+                      <td className="px-5 py-4 text-gray-400 whitespace-nowrap">
+                        {formatDate(item.last_lookup_at)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function Domains() {
+  const [data, setData] = useState({
+    scope: "personal",
+    domain_count: 0,
+    domains: [],
+  });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const assetRequestRef = useRef({ sequence: 0, controller: null });
+
+
+
+  const loadDomains = useAssetLoadCallback(async () => {
+    const request = assetRequestRef.current;
+    const sequence = ++request.sequence;
+    request.controller?.abort();
+    const controller = new AbortController();
+    request.controller = controller;
+
+    const emptyData = {
+      scope: "unknown",
+      domain_count: 0,
+      domains: [],
+    };
+
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setData(emptyData);
+      setError("Authentication required. Please log in again.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const response = await fetch(`${API_URL}/client/domains`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(
+          "Your session is no longer authorized. Please log in again."
+        );
+      }
+      if (!response.ok) {
+        throw new Error(`Asset API returned ${response.status}`);
+      }
+
+      const payload = await response.json();
+      if (controller.signal.aborted || sequence !== request.sequence) return;
+
+      if (!payload || !Array.isArray(payload.domains)) {
+        throw new Error("The asset API returned an unexpected response.");
+      }
+
+      setData(payload);
+      setError("");
+    } catch (err) {
+      if (controller.signal.aborted || sequence !== request.sequence) return;
+      setData(emptyData);
+      setError(err.message || "Unable to retrieve asset records.");
+    } finally {
+      if (!controller.signal.aborted && sequence === request.sequence) {
+        setLoading(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    let stopped = false;
+    let timer;
+
+    const refresh = async () => {
+      await loadDomains();
+      if (!stopped) timer = setTimeout(refresh, 15000);
+    };
+
+    refresh();
+
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      assetRequestRef.current.sequence += 1;
+      assetRequestRef.current.controller?.abort();
+    };
+  }, [loadDomains]);
+
+
+  const domains = Array.isArray(data.domains) ? data.domains : [];
+  const domainsWithFindings = domains.filter(
+    (domain) => Number(domain.finding_count || 0) > 0
+  ).length;
+  const totalFindings = domains.reduce(
+    (total, domain) => total + Number(domain.finding_count || 0),
+    0
+  );
+
+  const statusBadge = (status) => {
+    const normalized = String(status || "UNKNOWN").toLowerCase();
+
+    const className =
+      normalized === "completed" || normalized === "active"
+        ? "bg-green-500/10 text-green-400 border-green-500/20"
+        : normalized === "failed" || normalized === "error"
+        ? "bg-red-500/10 text-red-400 border-red-500/20"
+        : "bg-yellow-500/10 text-yellow-400 border-yellow-500/20";
+
+    return (
+      <span className={`px-2 py-1 rounded border text-xs font-medium ${className}`}>
+        {String(status || "UNKNOWN").toUpperCase()}
+      </span>
+    );
+  };
+
+  return (
+    <div className="p-6 space-y-6">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-semibold text-white">Domains</h2>
+          <p className="text-sm text-gray-400 mt-1">
+            Real domains derived from your persisted web assessment targets.
+          </p>
+        </div>
+
+        <button
+          onClick={() => {
+            setLoading(true);
+            loadDomains();
+          }}
+          className="px-4 py-2 rounded-lg border border-gray-700 bg-gray-800 text-gray-200 hover:bg-gray-700 transition"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Total Domains</div>
+          <div className="text-3xl font-semibold text-white mt-2">
+            {data.domain_count ?? domains.length}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">With Findings</div>
+          <div className="text-3xl font-semibold text-red-400 mt-2">
+            {domainsWithFindings}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Total Findings</div>
+          <div className="text-3xl font-semibold text-yellow-400 mt-2">
+            {totalFindings}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Scope</div>
+          <div className="text-xl font-semibold text-white mt-3 capitalize">
+            {data.scope || "personal"}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-gray-800 bg-gray-900/60 overflow-hidden">
+        <div className="px-5 py-4 border-b border-gray-800">
+          <h3 className="text-lg font-semibold text-white">
+            Discovered Domains
+          </h3>
+        </div>
+
+        {loading && domains.length === 0 ? (
+          <div className="p-8 text-center text-gray-400">
+            Loading persisted domains...
+          </div>
+        ) : domains.length === 0 ? (
+          <div className="p-8 text-center">
+            <div className="text-gray-300 font-medium">No domains found</div>
+            <div className="text-sm text-gray-500 mt-2">
+              Domains appear here when web-target assessments are persisted.
+            </div>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-gray-950/60">
+                <tr className="text-left text-gray-400">
+                  <th className="px-5 py-3 font-medium">Domain</th>
+                  <th className="px-5 py-3 font-medium">Assessments</th>
+                  <th className="px-5 py-3 font-medium">Findings</th>
+                  <th className="px-5 py-3 font-medium">VAPT</th>
+                  <th className="px-5 py-3 font-medium">QA</th>
+                  <th className="px-5 py-3 font-medium">Monitoring</th>
+                  <th className="px-5 py-3 font-medium">Overall</th>
+                  <th className="px-5 py-3 font-medium">Last Updated</th>
+                </tr>
+              </thead>
+
+              <tbody className="divide-y divide-gray-800">
+                {domains.map((domain) => (
+                  <tr key={domain.domain} className="text-gray-200">
+                    <td className="px-5 py-4">
+                      <div className="font-medium text-white">
+                        {domain.domain}
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">
+                        {domain.assessment_count ?? 0} assessment(s)
+                      </div>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <div className="flex flex-wrap gap-1">
+                        {(Array.isArray(domain.assessment_ids)
+                          ? domain.assessment_ids
+                          : []
+                        ).map((id) => (
+                          <span
+                            key={id}
+                            className="px-2 py-1 rounded border border-gray-700 bg-gray-800 text-xs text-gray-300"
+                          >
+                            #{id}
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <span
+                        className={
+                          Number(domain.finding_count || 0) > 0
+                            ? "text-red-400 font-semibold"
+                            : "text-gray-400"
+                        }
+                      >
+                        {domain.finding_count ?? 0}
+                      </span>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <div className="flex flex-wrap gap-1">
+                        {(Array.isArray(domain.vapt_statuses)
+                          ? domain.vapt_statuses
+                          : []
+                        ).map((status) => (
+                          <span key={status}>{statusBadge(status)}</span>
+                        ))}
+                      </div>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <div className="flex flex-wrap gap-1">
+                        {(Array.isArray(domain.qa_statuses)
+                          ? domain.qa_statuses
+                          : []
+                        ).map((status) => (
+                          <span key={status}>{statusBadge(status)}</span>
+                        ))}
+                      </div>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <div className="flex flex-wrap gap-1">
+                        {(Array.isArray(domain.monitoring_statuses)
+                          ? domain.monitoring_statuses
+                          : []
+                        ).map((status) => (
+                          <span key={status}>{statusBadge(status)}</span>
+                        ))}
+                      </div>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <div className="flex flex-wrap gap-1">
+                        {(Array.isArray(domain.overall_statuses)
+                          ? domain.overall_statuses
+                          : []
+                        ).map((status) => (
+                          <span key={status}>{statusBadge(status)}</span>
+                        ))}
+                      </div>
+                    </td>
+
+                    <td className="px-5 py-4 text-gray-400">
+                      {domain.last_updated
+                        ? new Date(domain.last_updated).toLocaleString()
+                        : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Databases() {
+  const [data, setData] = useState({
+    scope: "personal",
+    database_count: 0,
+    databases: [],
+  });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const assetRequestRef = useRef({ sequence: 0, controller: null });
+
+
+
+  const loadDatabases = useAssetLoadCallback(async () => {
+    const request = assetRequestRef.current;
+    const sequence = ++request.sequence;
+    request.controller?.abort();
+    const controller = new AbortController();
+    request.controller = controller;
+
+    const emptyData = {
+      scope: "unknown",
+      database_count: 0,
+      databases: [],
+    };
+
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setData(emptyData);
+      setError("Authentication required. Please log in again.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const response = await fetch(`${API_URL}/client/databases`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(
+          "Your session is no longer authorized. Please log in again."
+        );
+      }
+      if (!response.ok) {
+        throw new Error(`Asset API returned ${response.status}`);
+      }
+
+      const payload = await response.json();
+      if (controller.signal.aborted || sequence !== request.sequence) return;
+
+      if (!payload || !Array.isArray(payload.databases)) {
+        throw new Error("The asset API returned an unexpected response.");
+      }
+
+      setData(payload);
+      setError("");
+    } catch (err) {
+      if (controller.signal.aborted || sequence !== request.sequence) return;
+      setData(emptyData);
+      setError(err.message || "Unable to retrieve asset records.");
+    } finally {
+      if (!controller.signal.aborted && sequence === request.sequence) {
+        setLoading(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    let stopped = false;
+    let timer;
+
+    const refresh = async () => {
+      await loadDatabases();
+      if (!stopped) timer = setTimeout(refresh, 15000);
+    };
+
+    refresh();
+
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      assetRequestRef.current.sequence += 1;
+      assetRequestRef.current.controller?.abort();
+    };
+  }, [loadDatabases]);
+
+
+  const databases = Array.isArray(data.databases) ? data.databases : [];
+  const onlineCount = databases.filter(
+    (database) => String(database.status || "").toUpperCase() === "ONLINE"
+  ).length;
+  const offlineCount = databases.filter(
+    (database) => String(database.status || "").toUpperCase() === "OFFLINE"
+  ).length;
+
+  const statusBadge = (status) => {
+    const normalized = String(status || "UNKNOWN").toUpperCase();
+
+    const className =
+      normalized === "ONLINE"
+        ? "bg-green-500/10 text-green-400 border-green-500/20"
+        : normalized === "OFFLINE"
+        ? "bg-red-500/10 text-red-400 border-red-500/20"
+        : "bg-yellow-500/10 text-yellow-400 border-yellow-500/20";
+
+    return (
+      <span className={`px-2 py-1 rounded border text-xs font-medium ${className}`}>
+        {normalized}
+      </span>
+    );
+  };
+
+
+  // DATABASE_REPORT_FRESHNESS
+  const reportNow = Date.now();
+  const reportTimes = databases.map((database) => {
+    const raw = database.last_seen;
+    if (!raw) return null;
+
+    // Existing backend timestamps without an offset represent UTC.
+    const text = String(raw);
+    const timestamp = Date.parse(
+      /(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(text) ? text : `${text}Z`
+    );
+    return Number.isFinite(timestamp) ? timestamp : null;
+  });
+
+  const validPastReports = reportTimes.filter(
+    (timestamp) => timestamp !== null && timestamp <= reportNow
+  );
+  const newestReport = validPastReports.length
+    ? Math.max(...validPastReports)
+    : null;
+  const missingReportCount = reportTimes.filter(
+    (timestamp) => timestamp === null
+  ).length;
+  const futureReportCount = reportTimes.filter(
+    (timestamp) => timestamp !== null && timestamp > reportNow
+  ).length;
+  const otherReportedStatusCount =
+    databases.length - onlineCount - offlineCount;
+
+  const newestReportAge = (() => {
+    if (newestReport === null) return "No valid past report timestamp";
+    const seconds = Math.floor((reportNow - newestReport) / 1000);
+    if (seconds < 60) return "Less than a minute ago";
+    if (seconds < 3600) return `${Math.floor(seconds / 60)} minute(s) ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)} hour(s) ago`;
+    return `${Math.floor(seconds / 86400)} day(s) ago`;
+  })();
+
+
+  return (
+    <div className="p-6 space-y-6">
+
+      <div className="mb-6 border border-yellow-600/30 bg-yellow-600/5 p-5">
+        <p className="text-sm font-semibold text-yellow-400">
+          Reported status does not verify current availability
+        </p>
+        <p className="mt-2 text-sm leading-6 text-gray-300">
+          Online and offline values are the source's last stored report.
+          Refreshing this page reloads saved records; it does not contact
+          the database or create a new collector report.
+        </p>
+        {!loading && !error && (
+          <div className="mt-3 space-y-1 text-xs leading-5 text-gray-400">
+            <p>Newest report in this result: {newestReportAge}.</p>
+            <p>
+              Other or unknown reported statuses: {otherReportedStatusCount}.
+              Missing or invalid report timestamps: {missingReportCount}.
+            </p>
+            {futureReportCount > 0 && (
+              <p className="text-yellow-400">
+                Future-dated reports: {futureReportCount}. Check the source clock.
+              </p>
+            )}
+            <p>
+              Current database availability has not been verified by this page.
+            </p>
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-semibold text-white">Databases</h2>
+          <p className="text-sm text-gray-400 mt-1">
+            Persisted database assets registered through authenticated telemetry.
+          </p>
+        </div>
+
+        <button
+          onClick={() => {
+            setLoading(true);
+            loadDatabases();
+          }}
+          className="px-4 py-2 rounded-lg border border-gray-700 bg-gray-800 text-gray-200 hover:bg-gray-700 transition"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Total Databases</div>
+          <div className="text-3xl font-semibold text-white mt-2">
+            {data.database_count ?? databases.length}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Reported Online</div>
+          <div className="text-3xl font-semibold text-green-400 mt-2">
+            {onlineCount}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Reported Offline</div>
+          <div className="text-3xl font-semibold text-red-400 mt-2">
+            {offlineCount}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+          <div className="text-sm text-gray-400">Scope</div>
+          <div className="text-xl font-semibold text-white mt-3 capitalize">
+            {data.scope || "personal"}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-gray-800 bg-gray-900/60 overflow-hidden">
+        <div className="px-5 py-4 border-b border-gray-800">
+          <h3 className="text-lg font-semibold text-white">Registered Databases</h3>
+        </div>
+
+        {loading && databases.length === 0 ? (
+          <div className="p-8 text-center text-gray-400">
+            Loading persisted database assets...
+          </div>
+        ) : databases.length === 0 ? (
+          <div className="p-8 text-center">
+            <div className="text-gray-300 font-medium">No database assets found</div>
+            <div className="text-sm text-gray-500 mt-2">
+              Register a database through an authenticated telemetry source to
+              populate this inventory.
+            </div>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-gray-950/60">
+                <tr className="text-left text-gray-400">
+                  <th className="px-5 py-3 font-medium">Database</th>
+                  <th className="px-5 py-3 font-medium">Host</th>
+                  <th className="px-5 py-3 font-medium">Port</th>
+                  <th className="px-5 py-3 font-medium">Type</th>
+                  <th className="px-5 py-3 font-medium">Version</th>
+                  <th className="px-5 py-3 font-medium">Environment</th>
+                  <th className="px-5 py-3 font-medium">Reported Status</th>
+                  <th className="px-5 py-3 font-medium">Last Reported</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800">
+                {databases.map((database) => (
+                  <tr key={database.id} className="text-gray-200">
+                    <td className="px-5 py-4">
+                      <div className="font-medium text-white">
+                        {database.name || database.database_id || "Unnamed Database"}
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">
+                        {database.database_id || `Asset #${database.id}`}
+                      </div>
+                    </td>
+                    <td className="px-5 py-4">
+                      <div>{database.hostname || "—"}</div>
+                      <div className="text-xs text-gray-500 mt-1">
+                        {database.ip_address || "No IP"}
+                      </div>
+                    </td>
+                    <td className="px-5 py-4">
+                      {database.port ?? "—"}
+                    </td>
+                    <td className="px-5 py-4">
+                      {database.database_type || "UNKNOWN"}
+                    </td>
+                    <td className="px-5 py-4">
+                      {database.version || "—"}
+                    </td>
+                    <td className="px-5 py-4">
+                      {database.environment || "—"}
+                    </td>
+                    <td className="px-5 py-4">
+                      {statusBadge(database.status)}
+                    </td>
+                    <td className="px-5 py-4 text-gray-400">
+                      {database.last_seen
+                        ? new Date(database.last_seen).toLocaleString()
+                        : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Applications() {
+  const [applications, setApplications] = useState([]);
+  const [scope, setScope] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadApplications = async (manual = false) => {
+    try {
+      if (manual) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("No authentication token found.");
+      }
+
+      const response = await axios.get(
+        `${API_URL}/client/applications`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setApplications(
+        Array.isArray(response.data?.applications)
+          ? response.data.applications
+          : []
+      );
+      setScope(response.data?.scope || "");
+    } catch (err) {
+      console.error("Applications load error:", err);
+
+      if (err.response?.status === 401) {
+        setError("Your session has expired. Please login again.");
+      } else if (err.response?.status === 403) {
+        setError("You are not authorized to view applications.");
+      } else {
+        setError(
+          err.response?.data?.detail ||
+            err.message ||
+            "Unable to load applications."
+        );
+      }
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadApplications();
+
+    const interval = setInterval(() => {
+      loadApplications(true);
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) return "—";
+
+    return date.toLocaleString();
+  };
+
+  const getStatusClass = (status) => {
+    const normalized = String(status || "").toLowerCase();
+
+    if (["completed", "active", "running", "passed"].includes(normalized)) {
+      return "bg-green-500/10 text-green-400 border-green-500/20";
+    }
+
+    if (["failed", "error", "cancelled"].includes(normalized)) {
+      return "bg-red-500/10 text-red-400 border-red-500/20";
+    }
+
+    return "bg-gray-500/10 text-gray-400 border-gray-500/20";
+  };
+
+  const completedApplications = applications.filter(
+    (application) =>
+      String(application.vapt_status || "").toLowerCase() === "completed"
+  ).length;
+
+  const applicationsWithFindings = applications.filter(
+    (application) => Number(application.finding_count || 0) > 0
+  ).length;
+
+  const totalFindings = applications.reduce(
+    (total, application) =>
+      total + Number(application.finding_count || 0),
+    0
+  );
+
+  return (
+    <div>
+      <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-red-500">
+            Asset Management
+          </p>
+
+          <h1 className="mt-2 text-3xl font-bold">
+            Applications
+          </h1>
+
+          <p className="mt-2 max-w-3xl text-sm text-gray-500">
+            Web applications discovered from your persisted VAPT assessments.
+            Application records are backed by real assessment and finding data.
+          </p>
+        </div>
+
+        <button
+          onClick={() => loadApplications(true)}
+          disabled={refreshing}
+          className="border border-white/10 bg-white/[0.03] px-4 py-2 text-xs uppercase tracking-wider text-gray-300 transition hover:border-red-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="mt-6 border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-400">
+          {error}
+        </div>
+      )}
+
+      <div className="mt-8 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="border border-white/10 bg-white/[0.02] p-5">
+          <p className="text-xs uppercase tracking-wider text-gray-600">
+            Total Applications
+          </p>
+          <p className="mt-2 text-3xl font-bold text-white">
+            {applications.length}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-white/[0.02] p-5">
+          <p className="text-xs uppercase tracking-wider text-gray-600">
+            VAPT Completed
+          </p>
+          <p className="mt-2 text-3xl font-bold text-green-400">
+            {completedApplications}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-white/[0.02] p-5">
+          <p className="text-xs uppercase tracking-wider text-gray-600">
+            With Findings
+          </p>
+          <p className="mt-2 text-3xl font-bold text-yellow-400">
+            {applicationsWithFindings}
+          </p>
+        </div>
+
+        <div className="border border-white/10 bg-white/[0.02] p-5">
+          <p className="text-xs uppercase tracking-wider text-gray-600">
+            Total Findings
+          </p>
+          <p className="mt-2 text-3xl font-bold text-red-400">
+            {totalFindings}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-8 overflow-hidden border border-white/10 bg-white/[0.02]">
+        <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
+          <div>
+            <h2 className="font-semibold text-white">
+              Web Applications
+            </h2>
+            <p className="mt-1 text-xs text-gray-600">
+              Scope: {scope || "—"}
+            </p>
+          </div>
+
+          <span className="text-xs text-gray-600">
+            {applications.length} application{applications.length === 1 ? "" : "s"}
+          </span>
+        </div>
+
+        {loading ? (
+          <div className="px-5 py-12 text-center text-sm text-gray-500">
+            Loading applications...
+          </div>
+        ) : applications.length === 0 ? (
+          <div className="px-5 py-12 text-center">
+            <p className="text-sm text-gray-400">
+              No web applications are currently available.
+            </p>
+            <p className="mt-2 text-xs text-gray-600">
+              Applications appear here from persisted web-target VAPT
+              assessments. Code assessments are excluded.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-[1250px] w-full text-left text-sm">
+              <thead className="border-b border-white/10 bg-white/[0.02]">
+                <tr className="text-[10px] uppercase tracking-wider text-gray-600">
+                  <th className="px-5 py-3">Application</th>
+                  <th className="px-5 py-3">Type</th>
+                  <th className="px-5 py-3">VAPT</th>
+                  <th className="px-5 py-3">Findings</th>
+                  <th className="px-5 py-3">QA</th>
+                  <th className="px-5 py-3">Monitoring</th>
+                  <th className="px-5 py-3">Overall</th>
+                  <th className="px-5 py-3">Assessment</th>
+                  <th className="px-5 py-3">Updated</th>
+                </tr>
+              </thead>
+
+              <tbody className="divide-y divide-white/5">
+                {applications.map((application) => (
+                  <tr
+                    key={application.assessment_id}
+                    className="transition hover:bg-white/[0.02]"
+                  >
+                    <td className="px-5 py-4">
+                      <div className="max-w-[360px] truncate font-medium text-gray-200">
+                        {application.hostname ||
+                          application.target ||
+                          "Unnamed application"}
+                      </div>
+
+                      <div className="mt-1 max-w-[360px] truncate font-mono text-xs text-gray-600">
+                        {application.target || "—"}
+                      </div>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <span className="border border-white/10 bg-white/[0.03] px-2 py-1 text-xs text-gray-300">
+                        {application.application_type || "Web Application"}
+                      </span>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <span
+                        className={`inline-flex border px-2 py-1 text-xs font-medium ${getStatusClass(
+                          application.vapt_status
+                        )}`}
+                      >
+                        {application.vapt_status || "UNKNOWN"}
+                      </span>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <span className="font-semibold text-gray-200">
+                        {Number(application.finding_count || 0)}
+                      </span>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <span
+                        className={`inline-flex border px-2 py-1 text-xs ${getStatusClass(
+                          application.qa_status
+                        )}`}
+                      >
+                        {application.qa_status || "UNKNOWN"}
+                      </span>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <span
+                        className={`inline-flex border px-2 py-1 text-xs ${getStatusClass(
+                          application.monitoring_status
+                        )}`}
+                      >
+                        {application.monitoring_status || "UNKNOWN"}
+                      </span>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <span
+                        className={`inline-flex border px-2 py-1 text-xs ${getStatusClass(
+                          application.overall_status
+                        )}`}
+                      >
+                        {application.overall_status || "UNKNOWN"}
+                      </span>
+                    </td>
+
+                    <td className="px-5 py-4 font-mono text-xs text-gray-400">
+                      #{application.assessment_id}
+                    </td>
+
+                    <td className="px-5 py-4 text-xs text-gray-500">
+                      {formatDate(application.updated_at)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function NetworkDevices() {
+  const [devices, setDevices] = useState([]);
+  const [scope, setScope] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadNetworkDevices = async (manual = false) => {
+    try {
+      if (manual) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("No authentication token found.");
+      }
+
+      const response = await axios.get(
+        `${API_URL}/client/network-devices`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setDevices(
+        Array.isArray(response.data?.network_devices)
+          ? response.data.network_devices
+          : []
+      );
+      setScope(response.data?.scope || "");
+    } catch (err) {
+      console.error("Network devices load error:", err);
+
+      if (err.response?.status === 401) {
+        setError("Your session has expired. Please login again.");
+      } else if (err.response?.status === 403) {
+        setError("You are not authorized to view network devices.");
+      } else {
+        setError(
+          err.response?.data?.detail ||
+            err.message ||
+            "Unable to load network devices."
+        );
+      }
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadNetworkDevices();
+
+    const interval = setInterval(() => {
+      loadNetworkDevices(true);
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) return "—";
+
+    return date.toLocaleString();
+  };
+
+  const getStatusClass = (status) => {
+    const normalized = String(status || "").toLowerCase();
+
+    if (["online", "active", "up"].includes(normalized)) {
+      return "bg-green-500/10 text-green-400 border-green-500/20";
+    }
+
+    if (["offline", "down", "failed", "error"].includes(normalized)) {
+      return "bg-red-500/10 text-red-400 border-red-500/20";
+    }
+
+    return "bg-gray-500/10 text-gray-400 border-gray-500/20";
+  };
+
+  const onlineDevices = devices.filter((device) =>
+    ["online", "active", "up"].includes(
+      String(device.status || "").toLowerCase()
+    )
+  ).length;
+
+  const offlineDevices = devices.filter((device) =>
+    ["offline", "down", "failed", "error"].includes(
+      String(device.status || "").toLowerCase()
+    )
+  ).length;
+
+
+  // ASSET_OBSERVATION_AGE
+  const observationNow = Date.now();
+  const observationTimes = devices.map((asset) => {
+    if (!asset.last_seen) return null;
+    const raw = String(asset.last_seen);
+    const timestamp = Date.parse(
+      /(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(raw) ? raw : `${raw}Z`
+    );
+    return Number.isFinite(timestamp) ? timestamp : null;
+  });
+  const pastObservations = observationTimes.filter(
+    (timestamp) => timestamp !== null && timestamp <= observationNow
+  );
+  const newestObservation = pastObservations.length
+    ? Math.max(...pastObservations)
+    : null;
+  const missingObservationCount = observationTimes.filter(
+    (timestamp) => timestamp === null
+  ).length;
+  const futureObservationCount = observationTimes.filter(
+    (timestamp) => timestamp !== null && timestamp > observationNow
+  ).length;
+
+  const observationAge = (() => {
+    if (newestObservation === null) return "No valid past timestamp";
+    const seconds = Math.floor((observationNow - newestObservation) / 1000);
+    if (seconds < 60) return "Less than a minute ago";
+    if (seconds < 3600) return `${Math.floor(seconds / 60)} minute(s) ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)} hour(s) ago`;
+    return `${Math.floor(seconds / 86400)} day(s) ago`;
+  })();
+
+
+  return (
+    <div>
+
+      <div className="mb-6 border border-yellow-600/30 bg-yellow-600/5 p-5">
+        <p className="text-sm font-semibold text-yellow-400">
+          Stored observations do not verify current availability
+        </p>
+        <p className="mt-2 text-sm leading-6 text-gray-300">
+          Device status comes from the last stored source report. Refreshing this page reloads records; it does not probe the device or establish current availability.
+        </p>
+        {!loading && !error && (
+          <div className="mt-3 space-y-1 text-xs leading-5 text-gray-400">
+            <p>Newest observation in this result: {observationAge}.</p>
+            <p>
+              Missing or invalid observation timestamps: {missingObservationCount}.
+            </p>
+            {futureObservationCount > 0 && (
+              <p className="text-yellow-400">
+                Future-dated observations: {futureObservationCount}.
+                Check the source clock.
+              </p>
+            )}
+            <p>
+              Timestamp age is shown as evidence; no automatic offline
+              classification is inferred from missing reports.
+            </p>
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-red-500">
+            Asset Management
+          </p>
+
+          <h1 className="mt-2 text-3xl font-bold">
+            Network Devices
+          </h1>
+
+          <p className="mt-2 max-w-3xl text-sm text-gray-500">
+            Verified network device assets registered through authenticated
+            telemetry sources. Only persisted network device data in your
+            authorized scope is displayed.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadNetworkDevices(true)}
+          disabled={refreshing || loading}
+          className="border border-white/10 bg-[#111111] px-4 py-2 text-sm text-gray-300 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="mt-6 border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-400">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="mt-8 border border-white/10 bg-[#0d0d0d] p-10 text-center text-sm text-gray-500">
+          Loading verified network devices...
+        </div>
+      ) : (
+        <>
+          <div className="mt-8 grid gap-4 md:grid-cols-4">
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Total Devices
+              </p>
+              <p className="mt-2 text-3xl font-bold">{devices.length}</p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Reported Online
+              </p>
+              <p className="mt-2 text-3xl font-bold">{onlineDevices}</p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Reported Offline
+              </p>
+              <p className="mt-2 text-3xl font-bold">{offlineDevices}</p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Scope
+              </p>
+              <p className="mt-2 text-lg font-semibold capitalize">
+                {scope || "personal"}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-8 overflow-hidden border border-white/10 bg-[#0d0d0d]">
+            <div className="border-b border-white/10 px-5 py-4">
+              <h2 className="font-semibold text-white">
+                Registered Network Devices
+              </h2>
+              <p className="mt-1 text-xs text-gray-600">
+                {devices.length} persisted network device
+                {devices.length === 1 ? "" : "s"} in your authenticated scope
+              </p>
+            </div>
+
+            {devices.length === 0 ? (
+              <div className="p-10 text-center text-sm text-gray-500">
+                No persisted network device assets are available in your
+                scope. Register a network device through an authenticated
+                telemetry source to populate this inventory.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[1600px] text-left text-sm">
+                  <thead className="border-b border-white/10 text-xs uppercase tracking-wider text-gray-500">
+                    <tr>
+                      <th className="px-5 py-4">Device</th>
+                      <th className="px-5 py-4">IP Address</th>
+                      <th className="px-5 py-4">MAC Address</th>
+                      <th className="px-5 py-4">Reported Status</th>
+                      <th className="px-5 py-4">Device Type</th>
+                      <th className="px-5 py-4">Vendor / Model</th>
+                      <th className="px-5 py-4">Operating System</th>
+                      <th className="px-5 py-4">Telemetry Source</th>
+                      <th className="px-5 py-4">Last Reported</th>
+                    </tr>
+                  </thead>
+
+                  <tbody className="divide-y divide-white/5">
+                    {devices.map((device) => (
+                      <tr
+                        key={device.id}
+                        className="hover:bg-white/[0.02]"
+                      >
+                        <td className="px-5 py-4">
+                          <div className="font-medium text-gray-200">
+                            {device.hostname ||
+                              device.device_id ||
+                              "Unnamed device"}
+                          </div>
+                          <div className="mt-1 text-xs font-mono text-gray-600">
+                            {device.device_id || "No device ID"}
+                          </div>
+                        </td>
+
+                        <td className="px-5 py-4 font-mono text-gray-300">
+                          {device.ip_address || "—"}
+                        </td>
+
+                        <td className="px-5 py-4 font-mono text-xs text-gray-400">
+                          {device.mac_address || "—"}
+                        </td>
+
+                        <td className="px-5 py-4">
+                          <span
+                            className={`inline-flex border px-2 py-1 text-xs font-medium ${getStatusClass(
+                              device.status
+                            )}`}
+                          >
+                            {device.status || "UNKNOWN"}
+                          </span>
+                        </td>
+
+                        <td className="px-5 py-4">
+                          <span className="border border-white/10 bg-white/[0.03] px-2 py-1 text-xs text-gray-300">
+                            {device.device_type || "UNKNOWN"}
+                          </span>
+                        </td>
+
+                        <td className="px-5 py-4">
+                          <div className="text-gray-300">
+                            {device.vendor || "—"}
+                          </div>
+                          <div className="mt-1 text-xs text-gray-600">
+                            {device.model || "Model not detected"}
+                          </div>
+                        </td>
+
+                        <td className="px-5 py-4">
+                          <div className="text-gray-300">
+                            {device.os_name || "Not detected"}
+                          </div>
+                          {device.os_version && (
+                            <div className="mt-1 text-xs text-gray-600">
+                              {device.os_version}
+                            </div>
+                          )}
+                        </td>
+
+                        <td className="px-5 py-4 font-mono text-xs text-gray-400">
+                          {device.telemetry_source_id
+                            ? `#${device.telemetry_source_id}`
+                            : "—"}
+                        </td>
+
+                        <td className="px-5 py-4 text-xs text-gray-500">
+                          {formatDate(device.last_seen)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+function Endpoints() {
+  const [endpoints, setEndpoints] = useState([]);
+  const [scope, setScope] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadEndpoints = async (manual = false) => {
+    try {
+      if (manual) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("No authentication token found.");
+      }
+
+      const response = await axios.get(
+        `${API_URL}/client/endpoints`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setEndpoints(
+        Array.isArray(response.data?.endpoints)
+          ? response.data.endpoints
+          : []
+      );
+      setScope(response.data?.scope || "");
+    } catch (err) {
+      console.error("Endpoints load error:", err);
+
+      if (err.response?.status === 401) {
+        setError("Your session has expired. Please login again.");
+      } else if (err.response?.status === 403) {
+        setError("You are not authorized to view endpoints.");
+      } else {
+        setError(
+          err.response?.data?.detail ||
+            err.message ||
+            "Unable to load endpoints."
+        );
+      }
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadEndpoints();
+
+    const interval = setInterval(() => {
+      loadEndpoints(true);
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) return "—";
+
+    return date.toLocaleString();
+  };
+
+  const getStatusClass = (status) => {
+    const normalized = String(status || "").toLowerCase();
+
+    if (["online", "active", "up"].includes(normalized)) {
+      return "bg-green-500/10 text-green-400 border-green-500/20";
+    }
+
+    if (["offline", "down", "failed", "error"].includes(normalized)) {
+      return "bg-red-500/10 text-red-400 border-red-500/20";
+    }
+
+    return "bg-gray-500/10 text-gray-400 border-gray-500/20";
+  };
+
+  const onlineEndpoints = endpoints.filter((endpoint) =>
+    ["online", "active", "up"].includes(
+      String(endpoint.status || "").toLowerCase()
+    )
+  ).length;
+
+  const offlineEndpoints = endpoints.filter((endpoint) =>
+    ["offline", "down", "failed", "error"].includes(
+      String(endpoint.status || "").toLowerCase()
+    )
+  ).length;
+
+
+  // ASSET_OBSERVATION_AGE
+  const observationNow = Date.now();
+  const observationTimes = endpoints.map((asset) => {
+    if (!asset.last_seen) return null;
+    const raw = String(asset.last_seen);
+    const timestamp = Date.parse(
+      /(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(raw) ? raw : `${raw}Z`
+    );
+    return Number.isFinite(timestamp) ? timestamp : null;
+  });
+  const pastObservations = observationTimes.filter(
+    (timestamp) => timestamp !== null && timestamp <= observationNow
+  );
+  const newestObservation = pastObservations.length
+    ? Math.max(...pastObservations)
+    : null;
+  const missingObservationCount = observationTimes.filter(
+    (timestamp) => timestamp === null
+  ).length;
+  const futureObservationCount = observationTimes.filter(
+    (timestamp) => timestamp !== null && timestamp > observationNow
+  ).length;
+
+  const observationAge = (() => {
+    if (newestObservation === null) return "No valid past timestamp";
+    const seconds = Math.floor((observationNow - newestObservation) / 1000);
+    if (seconds < 60) return "Less than a minute ago";
+    if (seconds < 3600) return `${Math.floor(seconds / 60)} minute(s) ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)} hour(s) ago`;
+    return `${Math.floor(seconds / 86400)} day(s) ago`;
+  })();
+
+
+  return (
+    <div>
+
+      <div className="mb-6 border border-yellow-600/30 bg-yellow-600/5 p-5">
+        <p className="text-sm font-semibold text-yellow-400">
+          Stored observations do not verify current availability
+        </p>
+        <p className="mt-2 text-sm leading-6 text-gray-300">
+          Endpoint status comes from the last stored source report. Refreshing this page reloads records; it does not verify that the endpoint is currently reachable.
+        </p>
+        {!loading && !error && (
+          <div className="mt-3 space-y-1 text-xs leading-5 text-gray-400">
+            <p>Newest observation in this result: {observationAge}.</p>
+            <p>
+              Missing or invalid observation timestamps: {missingObservationCount}.
+            </p>
+            {futureObservationCount > 0 && (
+              <p className="text-yellow-400">
+                Future-dated observations: {futureObservationCount}.
+                Check the source clock.
+              </p>
+            )}
+            <p>
+              Timestamp age is shown as evidence; no automatic offline
+              classification is inferred from missing reports.
+            </p>
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-red-500">
+            Asset Management
+          </p>
+
+          <h1 className="mt-2 text-3xl font-bold">
+            Endpoints
+          </h1>
+
+          <p className="mt-2 max-w-3xl text-sm text-gray-500">
+            Verified endpoint assets registered through authenticated telemetry
+            sources. Only persisted endpoint data in your authorized scope is displayed.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadEndpoints(true)}
+          disabled={refreshing || loading}
+          className="border border-white/10 bg-[#111111] px-4 py-2 text-sm text-gray-300 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="mt-6 border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-400">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="mt-8 border border-white/10 bg-[#0d0d0d] p-10 text-center text-sm text-gray-500">
+          Loading verified endpoints...
+        </div>
+      ) : (
+        <>
+          <div className="mt-8 grid gap-4 md:grid-cols-4">
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Total Endpoints
+              </p>
+              <p className="mt-2 text-3xl font-bold">{endpoints.length}</p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Reported Online
+              </p>
+              <p className="mt-2 text-3xl font-bold">{onlineEndpoints}</p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Reported Offline
+              </p>
+              <p className="mt-2 text-3xl font-bold">{offlineEndpoints}</p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Scope
+              </p>
+              <p className="mt-2 text-lg font-semibold capitalize">
+                {scope || "personal"}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-8 overflow-hidden border border-white/10 bg-[#0d0d0d]">
+            <div className="border-b border-white/10 px-5 py-4">
+              <h2 className="font-semibold text-white">
+                Registered Endpoints
+              </h2>
+              <p className="mt-1 text-xs text-gray-600">
+                {endpoints.length} persisted endpoint{endpoints.length === 1 ? "" : "s"} in your authenticated scope
+              </p>
+            </div>
+
+            {endpoints.length === 0 ? (
+              <div className="p-10 text-center text-sm text-gray-500">
+                No persisted endpoint assets are available in your scope.
+                Register an endpoint through an authenticated telemetry source
+                to populate this inventory.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[1400px] text-left text-sm">
+                  <thead className="border-b border-white/10 text-xs uppercase tracking-wider text-gray-500">
+                    <tr>
+                      <th className="px-5 py-4">Endpoint</th>
+                      <th className="px-5 py-4">IP Address</th>
+                      <th className="px-5 py-4">MAC Address</th>
+                      <th className="px-5 py-4">Reported Status</th>
+                      <th className="px-5 py-4">Operating System</th>
+                      <th className="px-5 py-4">Device Type</th>
+                      <th className="px-5 py-4">Agent</th>
+                      <th className="px-5 py-4">Last Reported</th>
+                    </tr>
+                  </thead>
+
+                  <tbody className="divide-y divide-white/5">
+                    {endpoints.map((endpoint) => (
+                      <tr
+                        key={endpoint.id}
+                        className="hover:bg-white/[0.02]"
+                      >
+                        <td className="px-5 py-4">
+                          <div className="font-medium text-gray-200">
+                            {endpoint.hostname ||
+                              endpoint.endpoint_id ||
+                              "Unnamed endpoint"}
+                          </div>
+                          <div className="mt-1 text-xs font-mono text-gray-600">
+                            ID: {endpoint.endpoint_id || "—"}
+                          </div>
+                        </td>
+
+                        <td className="px-5 py-4 font-mono text-xs text-gray-400">
+                          {endpoint.ip_address || "—"}
+                        </td>
+
+                        <td className="px-5 py-4 font-mono text-xs text-gray-400">
+                          {endpoint.mac_address || "—"}
+                        </td>
+
+                        <td className="px-5 py-4">
+                          <span
+                            className={`border px-2 py-1 text-xs ${getStatusClass(
+                              endpoint.status
+                            )}`}
+                          >
+                            {endpoint.status || "UNKNOWN"}
+                          </span>
+                        </td>
+
+                        <td className="px-5 py-4 text-gray-400">
+                          {endpoint.os_name
+                            ? `${endpoint.os_name}${endpoint.os_version ? ` ${endpoint.os_version}` : ""}`
+                            : "Not detected"}
+                        </td>
+
+                        <td className="px-5 py-4 text-gray-400">
+                          {endpoint.device_type || "—"}
+                        </td>
+
+                        <td className="px-5 py-4">
+                          <div className="font-mono text-xs text-gray-400">
+                            {endpoint.agent_id || "—"}
+                          </div>
+                          <div className="mt-1 text-[10px] text-gray-600">
+                            Source #{endpoint.telemetry_source_id ?? "—"}
+                          </div>
+                        </td>
+
+                        <td className="px-5 py-4 text-xs text-gray-500">
+                          {formatDate(endpoint.last_seen)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+
+
+
+function PrivilegedAccounts() {
+  const [endpoints, setEndpoints] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadPrivilegedAccounts = async (manual = false) => {
+    try {
+      manual ? setRefreshing(true) : setLoading(true);
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Your session has expired. Please login again.");
+      }
+
+      const config = {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      };
+
+      const [endpointResponse, eventResponse] = await Promise.all([
+        axios.get(`${API_URL}/client/endpoints`, config),
+        axios.get(`${API_URL}/client/security-events`, config),
+      ]);
+
+      const allEndpoints = Array.isArray(endpointResponse.data?.endpoints)
+        ? endpointResponse.data.endpoints
+        : [];
+
+      const allEvents = Array.isArray(eventResponse.data?.events)
+        ? eventResponse.data.events
+        : [];
+
+      const privilegedEvents = allEvents.filter((event) => {
+        const type = String(event.event_type || "").toLowerCase();
+
+        return (
+          type === "privileged_command" ||
+          type === "privileged_group_change_attempt"
+        );
+      });
+
+      const endpointIds = new Set(
+        privilegedEvents
+          .map((event) => event.endpoint_asset_id)
+          .filter((id) => id !== null && id !== undefined)
+      );
+
+      const relatedEndpoints = allEndpoints.filter((endpoint) =>
+        endpointIds.has(endpoint.id)
+      );
+
+      setEndpoints(relatedEndpoints);
+      setEvents(privilegedEvents);
+    } catch (err) {
+      setError(
+        err?.response?.data?.detail ||
+          err?.message ||
+          "Unable to load privileged account security telemetry."
+      );
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadPrivilegedAccounts();
+
+    const interval = setInterval(() => {
+      loadPrivilegedAccounts(true);
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const commandEvents = events.filter(
+    (event) =>
+      String(event.event_type || "").toLowerCase() === "privileged_command"
+  );
+
+  const groupChangeEvents = events.filter(
+    (event) =>
+      String(event.event_type || "").toLowerCase() ===
+      "privileged_group_change_attempt"
+  );
+
+  const usernames = new Set();
+
+  events.forEach((event) => {
+    const message = String(event.message || "").trim();
+
+    const markers = [
+      "failed password for invalid user ",
+      "failed password for ",
+      "invalid user ",
+    ];
+
+    const lowerMessage = message.toLowerCase();
+
+    let username = null;
+
+    for (const marker of markers) {
+      const position = lowerMessage.indexOf(marker);
+
+      if (position !== -1) {
+        const value = message.slice(position + marker.length);
+        username = value.split(" from ", 1)[0].trim();
+        break;
+      }
+    }
+
+    if (!username && message.includes(" : TTY=")) {
+      username = message.split(" : TTY=", 1)[0].trim();
+    }
+
+    if (username) {
+      usernames.add(username);
+    }
+  });
+
+  const criticalEvents = events.filter(
+    (event) => String(event.severity || "").toUpperCase() === "CRITICAL"
+  ).length;
+
+  const highEvents = events.filter(
+    (event) => String(event.severity || "").toUpperCase() === "HIGH"
+  ).length;
+
+  const online = endpoints.filter((endpoint) =>
+    ["online", "active", "up", "alive"].includes(
+      String(endpoint.status || "").toLowerCase()
+    )
+  ).length;
+
+  const severityClass = (severity) => {
+    const value = String(severity || "INFO").toUpperCase();
+
+    if (value === "CRITICAL") return "text-red-400";
+    if (value === "HIGH") return "text-orange-400";
+    if (value === "MEDIUM") return "text-yellow-400";
+    if (value === "LOW") return "text-blue-400";
+
+    return "text-gray-500";
+  };
+
+  const extractUsername = (event) => {
+    const message = String(event.message || "").trim();
+    const lowerMessage = message.toLowerCase();
+
+    const markers = [
+      "failed password for invalid user ",
+      "failed password for ",
+      "invalid user ",
+    ];
+
+    for (const marker of markers) {
+      const position = lowerMessage.indexOf(marker);
+
+      if (position !== -1) {
+        const value = message.slice(position + marker.length);
+        const username = value.split(" from ", 1)[0].trim();
+
+        if (username) return username;
+      }
+    }
+
+    if (message.includes(" : TTY=")) {
+      const username = message.split(" : TTY=", 1)[0].trim();
+
+      if (username) return username;
+    }
+
+    return "Unknown";
+  };
+
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        <div className="border border-white/10 bg-[#0d0d0d] px-6 py-12 text-center">
+          <p className="text-sm text-gray-400">
+            Loading privileged account security telemetry...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col justify-between gap-4 xl:flex-row xl:items-end">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.28em] text-red-500">
+            Server Security
+          </p>
+
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">
+            Privileged Accounts
+          </h1>
+
+          <p className="mt-1 text-xs text-gray-500">
+            Observed privileged account activity from registered endpoint
+            security telemetry.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadPrivilegedAccounts(true)}
+          disabled={refreshing}
+          className="border border-white/10 bg-[#0d0d0d] px-4 py-2 text-xs text-gray-400 transition hover:border-red-500/40 hover:text-white disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="border border-red-500/20 bg-red-500/5 px-5 py-4">
+          <p className="text-sm text-red-400">{error}</p>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+        {[
+          ["Observed Users", usernames.size],
+          ["Online Endpoints", online],
+          ["Privileged Events", events.length],
+          ["Group Changes", groupChangeEvents.length],
+          ["Critical / High", `${criticalEvents} / ${highEvents}`],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            className="border border-white/10 bg-[#0d0d0d] px-5 py-5"
+          >
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              {label}
+            </p>
+
+            <p className="mt-3 text-2xl font-semibold text-white">{value}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-6 py-5">
+          <p className="text-sm font-semibold">Privileged Activity Overview</p>
+
+          <p className="mt-1 text-xs text-gray-600">
+            Activity is derived from persisted privileged command and privileged
+            group-change telemetry.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-3">
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Privileged Commands
+            </p>
+            <p className="mt-2 text-xl font-semibold text-white">
+              {commandEvents.length}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Group Membership Changes
+            </p>
+            <p className="mt-2 text-xl font-semibold text-white">
+              {groupChangeEvents.length}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Observed Privileged Users
+            </p>
+            <p className="mt-2 text-xl font-semibold text-white">
+              {usernames.size}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-6 py-5">
+          <p className="text-sm font-semibold">Recent Privileged Activity</p>
+
+          <p className="mt-1 text-xs text-gray-600">
+            Privileged activity linked to registered endpoint assets.
+          </p>
+        </div>
+
+        {events.length === 0 ? (
+          <div className="px-6 py-12 text-center">
+            <p className="text-sm text-gray-400">
+              No privileged account activity recorded.
+            </p>
+
+            <p className="mt-2 text-xs text-gray-600">
+              This section will populate when registered endpoints send
+              privileged security telemetry. No synthetic activity is generated.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1400px] text-left">
+              <thead>
+                <tr className="border-b border-white/10 text-[10px] uppercase tracking-wider text-gray-600">
+                  <th className="px-6 py-4">Time</th>
+                  <th className="px-6 py-4">User</th>
+                  <th className="px-6 py-4">Event Type</th>
+                  <th className="px-6 py-4">Severity</th>
+                  <th className="px-6 py-4">Endpoint</th>
+                  <th className="px-6 py-4">Source</th>
+                  <th className="px-6 py-4">Message</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {events.slice(0, 100).map((event) => {
+                  const endpoint = endpoints.find(
+                    (item) => item.id === event.endpoint_asset_id
+                  );
+
+                  return (
+                    <tr
+                      key={event.id}
+                      className="border-b border-white/5 transition hover:bg-white/[0.02]"
+                    >
+                      <td className="px-6 py-5 text-xs text-gray-500">
+                        {event.timestamp
+                          ? new Date(event.timestamp).toLocaleString()
+                          : "Unknown"}
+                      </td>
+
+                      <td className="px-6 py-5 text-sm text-gray-300">
+                        {extractUsername(event)}
+                      </td>
+
+                      <td className="px-6 py-5 text-sm text-gray-300">
+                        {event.event_type || "Unknown"}
+                      </td>
+
+                      <td className="px-6 py-5">
+                        <span
+                          className={`text-xs font-semibold ${severityClass(
+                            event.severity
+                          )}`}
+                        >
+                          {String(event.severity || "INFO").toUpperCase()}
+                        </span>
+                      </td>
+
+                      <td className="px-6 py-5">
+                        <p className="text-sm text-gray-300">
+                          {endpoint?.hostname ||
+                            endpoint?.endpoint_id ||
+                            "Unknown"}
+                        </p>
+
+                        <p className="mt-1 text-xs text-gray-600">
+                          {endpoint?.ip_address || "IP unavailable"}
+                        </p>
+                      </td>
+
+                      <td className="px-6 py-5 text-sm text-gray-400">
+                        {event.source || "Unknown"}
+                      </td>
+
+                      <td className="max-w-[520px] px-6 py-5 text-sm text-gray-400">
+                        <div className="truncate" title={event.message || ""}>
+                          {event.message || "No message"}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-6 py-5">
+          <p className="text-sm font-semibold">Privileged Endpoint Coverage</p>
+
+          <p className="mt-1 text-xs text-gray-600">
+            Registered endpoints that have generated privileged activity.
+          </p>
+        </div>
+
+        {endpoints.length === 0 ? (
+          <div className="px-6 py-12 text-center">
+            <p className="text-sm text-gray-400">
+              No endpoints with privileged activity are currently registered.
+            </p>
+
+            <p className="mt-2 text-xs text-gray-600">
+              Privileged monitoring becomes active when registered endpoints
+              send privileged security events.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] text-left">
+              <thead>
+                <tr className="border-b border-white/10 text-[10px] uppercase tracking-wider text-gray-600">
+                  <th className="px-6 py-4">Endpoint</th>
+                  <th className="px-6 py-4">IP Address</th>
+                  <th className="px-6 py-4">Operating System</th>
+                  <th className="px-6 py-4">Status</th>
+                  <th className="px-6 py-4">Last Seen</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {endpoints.map((endpoint) => (
+                  <tr
+                    key={endpoint.id}
+                    className="border-b border-white/5 transition hover:bg-white/[0.02]"
+                  >
+                    <td className="px-6 py-5">
+                      <p className="text-sm font-medium text-gray-200">
+                        {endpoint.hostname ||
+                          endpoint.endpoint_id ||
+                          "Unknown"}
+                      </p>
+                    </td>
+
+                    <td className="px-6 py-5 text-sm text-gray-400">
+                      {endpoint.ip_address || "Unknown"}
+                    </td>
+
+                    <td className="px-6 py-5 text-sm text-gray-400">
+                      {endpoint.os_name || "Unknown"}
+                      {endpoint.os_version ? ` ${endpoint.os_version}` : ""}
+                    </td>
+
+                    <td className="px-6 py-5 text-xs text-gray-500">
+                      {String(endpoint.status || "UNKNOWN").toUpperCase()}
+                    </td>
+
+                    <td className="px-6 py-5 text-xs text-gray-500">
+                      {endpoint.last_seen
+                        ? new Date(endpoint.last_seen).toLocaleString()
+                        : "Never"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function RunningProcesses() {
+  const [processes, setProcesses] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [endpointFilter, setEndpointFilter] = useState("ALL");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+
+  const loadProcesses = async (manual = false) => {
+    try {
+      manual ? setRefreshing(true) : setLoading(true);
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Your session has expired. Please login again.");
+      }
+
+      const response = await axios.get(`${API_URL}/client/processes`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const rows = Array.isArray(response.data?.processes)
+        ? response.data.processes
+        : [];
+
+      setProcesses(rows);
+    } catch (err) {
+      setError(
+        err?.response?.data?.detail ||
+          err?.message ||
+          "Unable to load endpoint process inventory."
+      );
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadProcesses();
+
+    const interval = setInterval(() => {
+      loadProcesses(true);
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const endpoints = Array.from(
+    new Map(
+      processes.map((process) => [
+        process.endpoint_asset_id,
+        {
+          id: process.endpoint_asset_id,
+          name:
+            process.hostname ||
+            process.endpoint_id ||
+            `Endpoint ${process.endpoint_asset_id}`,
+        },
+      ])
+    ).values()
+  );
+
+  const statusOptions = Array.from(
+    new Set(
+      processes
+        .map((process) => String(process.status || "").trim())
+        .filter(Boolean)
+    )
+  ).sort();
+
+  const now = Date.now();
+  const recentThresholdMs = 5 * 60 * 1000;
+
+  const filteredProcesses = processes.filter((process) => {
+    const haystack = [
+      process.name,
+      process.executable,
+      process.command_line,
+      process.username,
+      process.hostname,
+      process.endpoint_id,
+      process.ip_address,
+      process.pid,
+    ]
+      .map((value) => String(value ?? "").toLowerCase())
+      .join(" ");
+
+    const matchesSearch =
+      !search.trim() || haystack.includes(search.trim().toLowerCase());
+
+    const matchesEndpoint =
+      endpointFilter === "ALL" ||
+      String(process.endpoint_asset_id) === endpointFilter;
+
+    const matchesStatus =
+      statusFilter === "ALL" ||
+      String(process.status || "").trim() === statusFilter;
+
+    return matchesSearch && matchesEndpoint && matchesStatus;
+  });
+
+  const currentlyObserved = processes.filter((process) => {
+    if (!process.last_seen) return false;
+    const lastSeen = new Date(process.last_seen).getTime();
+    return Number.isFinite(lastSeen) && now - lastSeen <= recentThresholdMs;
+  });
+
+  const endpointCount = new Set(
+    processes.map((process) => process.endpoint_asset_id)
+  ).size;
+
+  const activeEndpointCount = new Set(
+    currentlyObserved.map((process) => process.endpoint_asset_id)
+  ).size;
+
+  const highCpuCount = processes.filter(
+    (process) => Number(process.cpu_percent) >= 80
+  ).length;
+
+  const highMemoryCount = processes.filter(
+    (process) => Number(process.memory_percent) >= 80
+  ).length;
+
+  const formatMetric = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number.toFixed(1) : "—";
+  };
+
+  const formatLastSeen = (value) => {
+    if (!value) return "Never";
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) return "Unknown";
+
+    return date.toLocaleString();
+  };
+
+  const getProcessState = (process) => {
+    if (!process.last_seen) return "STALE";
+
+    const lastSeen = new Date(process.last_seen).getTime();
+
+    if (!Number.isFinite(lastSeen)) return "STALE";
+
+    return now - lastSeen <= recentThresholdMs
+      ? "OBSERVED"
+      : "STALE";
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.22em] text-red-500">
+            Server Security / Process Monitoring
+          </p>
+          <h1 className="mt-2 text-2xl font-semibold text-white">
+            Running Processes
+          </h1>
+          <p className="mt-1 max-w-3xl text-sm text-gray-500">
+            Real process inventory reported by registered endpoint telemetry.
+            Processes are retained with their last observed timestamp so
+            temporary telemetry gaps do not create false termination events.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadProcesses(true)}
+          disabled={refreshing}
+          className="border border-white/10 bg-white/[0.03] px-4 py-2 text-xs uppercase tracking-wider text-gray-300 transition hover:border-red-500/40 hover:text-white disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+        {[
+          ["Processes", processes.length],
+          ["Observed ≤ 5m", currentlyObserved.length],
+          ["Endpoints", endpointCount],
+          ["Active Endpoints", activeEndpointCount],
+          ["High CPU / Memory", `${highCpuCount} / ${highMemoryCount}`],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            className="border border-white/10 bg-white/[0.02] p-5"
+          >
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              {label}
+            </p>
+            <p className="mt-3 text-2xl font-semibold text-white">
+              {value}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <div className="border border-white/10 bg-black/10 p-5">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-end">
+          <div className="flex-1">
+            <label className="text-[10px] uppercase tracking-wider text-gray-600">
+              Search
+            </label>
+            <input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Process, executable, command line, user, endpoint, PID..."
+              className="mt-2 w-full border border-white/10 bg-black/20 px-3 py-2 text-sm text-gray-300 outline-none placeholder:text-gray-700 focus:border-red-500/40"
+            />
+          </div>
+
+          <div className="xl:w-64">
+            <label className="text-[10px] uppercase tracking-wider text-gray-600">
+              Endpoint
+            </label>
+            <select
+              value={endpointFilter}
+              onChange={(event) => setEndpointFilter(event.target.value)}
+              className="mt-2 w-full border border-white/10 bg-black/20 px-3 py-2 text-sm text-gray-300 outline-none"
+            >
+              <option value="ALL">All Endpoints</option>
+              {endpoints.map((endpoint) => (
+                <option key={endpoint.id} value={endpoint.id}>
+                  {endpoint.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="xl:w-48">
+            <label className="text-[10px] uppercase tracking-wider text-gray-600">
+              Status
+            </label>
+            <select
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+              className="mt-2 w-full border border-white/10 bg-black/20 px-3 py-2 text-sm text-gray-300 outline-none"
+            >
+              <option value="ALL">All Statuses</option>
+              {statusOptions.map((status) => (
+                <option key={status} value={status}>
+                  {status}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div className="border border-white/10 bg-white/[0.02]">
+        <div className="flex items-center justify-between border-b border-white/10 px-6 py-4">
+          <div>
+            <h2 className="text-sm font-semibold text-gray-200">
+              Endpoint Process Inventory
+            </h2>
+            <p className="mt-1 text-xs text-gray-600">
+              Showing {filteredProcesses.length} of {processes.length} persisted
+              process records
+            </p>
+          </div>
+          <span className="text-[10px] uppercase tracking-wider text-gray-600">
+            Refresh: 15s
+          </span>
+        </div>
+
+        {loading ? (
+          <div className="px-6 py-16 text-center text-sm text-gray-600">
+            Loading endpoint process telemetry...
+          </div>
+        ) : filteredProcesses.length === 0 ? (
+          <div className="px-6 py-16 text-center">
+            <p className="text-sm text-gray-400">
+              No endpoint process telemetry is currently available.
+            </p>
+            <p className="mt-2 text-xs text-gray-600">
+              Running Processes becomes populated when a registered endpoint
+              sends a process snapshot through the telemetry API.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1350px] text-left">
+              <thead>
+                <tr className="border-b border-white/10 text-[10px] uppercase tracking-wider text-gray-600">
+                  <th className="px-5 py-4">Process</th>
+                  <th className="px-5 py-4">PID</th>
+                  <th className="px-5 py-4">User</th>
+                  <th className="px-5 py-4">Endpoint</th>
+                  <th className="px-5 py-4">Status</th>
+                  <th className="px-5 py-4">CPU</th>
+                  <th className="px-5 py-4">Memory</th>
+                  <th className="px-5 py-4">Executable</th>
+                  <th className="px-5 py-4">Last Seen</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {filteredProcesses.map((process) => {
+                  const state = getProcessState(process);
+
+                  return (
+                    <tr
+                      key={`${process.endpoint_asset_id}-${process.pid}`}
+                      className="border-b border-white/5 transition hover:bg-white/[0.02]"
+                    >
+                      <td className="px-5 py-4">
+                        <p className="text-sm font-medium text-gray-200">
+                          {process.name || "Unknown"}
+                        </p>
+                        <p className="mt-1 max-w-[280px] truncate text-[10px] text-gray-600">
+                          {process.command_line || "No command line reported"}
+                        </p>
+                      </td>
+
+                      <td className="px-5 py-4 font-mono text-xs text-gray-400">
+                        {process.pid}
+                      </td>
+
+                      <td className="px-5 py-4 text-xs text-gray-400">
+                        {process.username || "Unknown"}
+                      </td>
+
+                      <td className="px-5 py-4">
+                        <p className="text-xs text-gray-300">
+                          {process.hostname ||
+                            process.endpoint_id ||
+                            "Unknown"}
+                        </p>
+                        <p className="mt-1 text-[10px] text-gray-600">
+                          {process.ip_address || "No IP"}
+                        </p>
+                      </td>
+
+                      <td className="px-5 py-4">
+                        <div className="flex flex-col gap-1">
+                          <span
+                            className={`inline-flex w-fit border px-2 py-1 text-[10px] uppercase ${
+                              state === "OBSERVED"
+                                ? "border-green-500/20 text-green-400"
+                                : "border-yellow-500/20 text-yellow-500"
+                            }`}
+                          >
+                            {state}
+                          </span>
+                          {process.status && (
+                            <span className="text-[10px] text-gray-600">
+                              {process.status}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+
+                      <td className="px-5 py-4 font-mono text-xs text-gray-400">
+                        {formatMetric(process.cpu_percent)}%
+                      </td>
+
+                      <td className="px-5 py-4 font-mono text-xs text-gray-400">
+                        {formatMetric(process.memory_percent)}%
+                      </td>
+
+                      <td className="px-5 py-4">
+                        <p
+                          className="max-w-[300px] truncate font-mono text-[10px] text-gray-500"
+                          title={process.executable || ""}
+                        >
+                          {process.executable || "Not reported"}
+                        </p>
+                      </td>
+
+                      <td className="px-5 py-4 text-[10px] text-gray-500">
+                        {formatLastSeen(process.last_seen)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Services() {
+  const [services, setServices] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+
+  const loadServices = useCallback(async () => {
+    try {
+      setError("");
+
+      const token = localStorage.getItem("token");
+      if (!token) {
+        throw new Error("Your session has expired. Please login again.");
+      }
+
+      const response = await fetch(`${API_URL}/client/services`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(detail || `Failed to load services (${response.status})`);
+      }
+
+      const data = await response.json();
+      setServices(Array.isArray(data.services) ? data.services : []);
+    } catch (err) {
+      setError(err.message || "Failed to load endpoint services.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadServices();
+
+    const interval = setInterval(loadServices, 15000);
+    return () => clearInterval(interval);
+  }, [loadServices]);
+
+  const normalizedSearch = search.trim().toLowerCase();
+
+  const filteredServices = services.filter((service) => {
+    const status = String(service.status || "").toLowerCase();
+
+    if (
+      statusFilter !== "ALL" &&
+      status !== statusFilter.toLowerCase()
+    ) {
+      return false;
+    }
+
+    if (!normalizedSearch) {
+      return true;
+    }
+
+    return [
+      service.service_name,
+      service.display_name,
+      service.hostname,
+      service.endpoint_id,
+      service.ip_address,
+      service.username,
+      service.executable,
+    ]
+      .filter(Boolean)
+      .some((value) =>
+        String(value).toLowerCase().includes(normalizedSearch)
+      );
+  });
+
+  const runningCount = services.filter(
+    (service) => String(service.status || "").toLowerCase() === "running"
+  ).length;
+
+  const stoppedCount = services.filter((service) => {
+    const status = String(service.status || "").toLowerCase();
+    return status === "stopped" || status === "inactive";
+  }).length;
+
+  const endpointCount = new Set(
+    services.map((service) => service.endpoint_asset_id)
+  ).size;
+
+  const observedRecently = services.filter((service) => {
+    if (!service.last_seen) return false;
+
+    const lastSeen = new Date(service.last_seen).getTime();
+    if (Number.isNaN(lastSeen)) return false;
+
+    return Date.now() - lastSeen <= 5 * 60 * 1000;
+  }).length;
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "—";
+
+    return date.toLocaleString();
+  };
+
+  const statusBadge = (status) => {
+    const normalized = String(status || "").toLowerCase();
+
+    if (normalized === "running") {
+      return "bg-emerald-500/10 text-emerald-400 border-emerald-500/30";
+    }
+
+    if (
+      normalized === "stopped" ||
+      normalized === "inactive" ||
+      normalized === "failed"
+    ) {
+      return "bg-red-500/10 text-red-400 border-red-500/30";
+    }
+
+    return "bg-slate-500/10 text-slate-300 border-slate-500/30";
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div className="text-xs uppercase tracking-[0.18em] text-slate-500">
+            Server Security
+          </div>
+          <h1 className="mt-1 text-2xl font-semibold text-white">
+            Services
+          </h1>
+          <p className="mt-1 text-sm text-slate-400">
+            Endpoint service inventory reported by registered telemetry agents.
+          </p>
+        </div>
+
+        <button
+          onClick={loadServices}
+          className="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="text-xs uppercase tracking-wide text-slate-500">
+            Total Services
+          </div>
+          <div className="mt-2 text-3xl font-semibold text-white">
+            {services.length}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="text-xs uppercase tracking-wide text-slate-500">
+            Running
+          </div>
+          <div className="mt-2 text-3xl font-semibold text-emerald-400">
+            {runningCount}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="text-xs uppercase tracking-wide text-slate-500">
+            Stopped / Inactive
+          </div>
+          <div className="mt-2 text-3xl font-semibold text-red-400">
+            {stoppedCount}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="text-xs uppercase tracking-wide text-slate-500">
+            Endpoints
+          </div>
+          <div className="mt-2 text-3xl font-semibold text-white">
+            {endpointCount}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="text-xs uppercase tracking-wide text-slate-500">
+            Observed ≤5m
+          </div>
+          <div className="mt-2 text-3xl font-semibold text-cyan-400">
+            {observedRecently}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+        <div className="flex flex-col gap-3 lg:flex-row">
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search service, endpoint, hostname, IP, user..."
+            className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-500"
+          />
+
+          <select
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="ALL">All Statuses</option>
+            <option value="RUNNING">Running</option>
+            <option value="STOPPED">Stopped</option>
+            <option value="INACTIVE">Inactive</option>
+            <option value="FAILED">Failed</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
+        <div className="border-b border-slate-800 px-5 py-4">
+          <h2 className="font-semibold text-white">
+            Endpoint Service Inventory
+          </h2>
+          <p className="mt-1 text-xs text-slate-500">
+            {filteredServices.length} service record{filteredServices.length === 1 ? "" : "s"} shown
+            · refreshed every 15 seconds
+          </p>
+        </div>
+
+        {loading ? (
+          <div className="p-10 text-center text-sm text-slate-500">
+            Loading endpoint service telemetry...
+          </div>
+        ) : filteredServices.length === 0 ? (
+          <div className="p-10 text-center">
+            <div className="text-sm font-medium text-slate-300">
+              No endpoint service telemetry recorded
+            </div>
+            <div className="mt-2 text-xs text-slate-500">
+              Services appear here only after a registered endpoint reports a
+              service snapshot. No synthetic service records are generated.
+            </div>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-[1250px] w-full text-left text-sm">
+              <thead className="border-b border-slate-800 bg-slate-950/70 text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-5 py-3">Service</th>
+                  <th className="px-5 py-3">Endpoint</th>
+                  <th className="px-5 py-3">Status</th>
+                  <th className="px-5 py-3">Startup</th>
+                  <th className="px-5 py-3">User</th>
+                  <th className="px-5 py-3">PID</th>
+                  <th className="px-5 py-3">Executable</th>
+                  <th className="px-5 py-3">Last Seen</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800">
+                {filteredServices.map((service) => (
+                  <tr key={service.id} className="hover:bg-slate-800/30">
+                    <td className="px-5 py-4">
+                      <div className="font-medium text-white">
+                        {service.display_name || service.service_name || "—"}
+                      </div>
+                      {service.display_name && (
+                        <div className="mt-1 text-xs text-slate-500">
+                          {service.service_name}
+                        </div>
+                      )}
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <div className="text-slate-200">
+                        {service.hostname || service.endpoint_id || "—"}
+                      </div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        {service.ip_address || "IP unavailable"}
+                      </div>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <span
+                        className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${statusBadge(
+                          service.status
+                        )}`}
+                      >
+                        {service.status || "Unknown"}
+                      </span>
+                    </td>
+
+                    <td className="px-5 py-4 text-slate-300">
+                      {service.startup_type || "—"}
+                    </td>
+
+                    <td className="px-5 py-4 text-slate-300">
+                      {service.username || "—"}
+                    </td>
+
+                    <td className="px-5 py-4 font-mono text-xs text-slate-300">
+                      {service.pid ?? "—"}
+                    </td>
+
+                    <td className="max-w-[300px] px-5 py-4">
+                      <div
+                        className="truncate font-mono text-xs text-slate-400"
+                        title={service.executable || ""}
+                      >
+                        {service.executable || "—"}
+                      </div>
+                    </td>
+
+                    <td className="px-5 py-4 whitespace-nowrap text-xs text-slate-400">
+                      {formatDate(service.last_seen)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function Firewall() {
+  const [rules, setRules] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [enabledFilter, setEnabledFilter] = useState("ALL");
+  const [directionFilter, setDirectionFilter] = useState("ALL");
+  const [actionFilter, setActionFilter] = useState("ALL");
+  const [profileFilter, setProfileFilter] = useState("ALL");
+
+  const loadFirewall = useCallback(async () => {
+    try {
+      setError("");
+
+      const token = localStorage.getItem("token");
+      if (!token) {
+        throw new Error("Your session has expired. Please login again.");
+      }
+
+      const response = await fetch(`${API_URL}/client/firewall`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(
+          detail || `Failed to load firewall rules (${response.status})`
+        );
+      }
+
+      const data = await response.json();
+      setRules(Array.isArray(data.rules) ? data.rules : []);
+    } catch (err) {
+      setError(err.message || "Failed to load endpoint firewall telemetry.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadFirewall();
+
+    const interval = setInterval(loadFirewall, 15000);
+    return () => clearInterval(interval);
+  }, [loadFirewall]);
+
+  const normalizedSearch = search.trim().toLowerCase();
+
+  const filteredRules = rules.filter((rule) => {
+    const enabledValue =
+      rule.enabled === true ? "ENABLED" : rule.enabled === false ? "DISABLED" : "UNKNOWN";
+
+    const direction = String(rule.direction || "").toUpperCase();
+    const action = String(rule.action || "").toUpperCase();
+    const profile = String(rule.profile || "").toUpperCase();
+
+    if (enabledFilter !== "ALL" && enabledValue !== enabledFilter) {
+      return false;
+    }
+
+    if (directionFilter !== "ALL" && direction !== directionFilter) {
+      return false;
+    }
+
+    if (actionFilter !== "ALL" && action !== actionFilter) {
+      return false;
+    }
+
+    if (profileFilter !== "ALL" && !profile.includes(profileFilter)) {
+      return false;
+    }
+
+    if (!normalizedSearch) {
+      return true;
+    }
+
+    return [
+      rule.rule_name,
+      rule.display_name,
+      rule.description,
+      rule.endpoint_id,
+      rule.hostname,
+      rule.ip_address,
+      rule.direction,
+      rule.action,
+      rule.profile,
+      rule.protocol,
+      rule.local_port,
+      rule.remote_port,
+      rule.local_address,
+      rule.remote_address,
+      rule.program,
+      rule.service_name,
+      rule.policy_store_source,
+    ]
+      .filter(Boolean)
+      .some((value) =>
+        String(value).toLowerCase().includes(normalizedSearch)
+      );
+  });
+
+  const enabledCount = rules.filter((rule) => rule.enabled === true).length;
+
+  const allowCount = rules.filter(
+    (rule) => String(rule.action || "").toLowerCase() === "allow"
+  ).length;
+
+  const blockCount = rules.filter((rule) => {
+    const action = String(rule.action || "").toLowerCase();
+    return action === "block" || action === "deny";
+  }).length;
+
+  const endpointCount = new Set(
+    rules.map((rule) => rule.endpoint_asset_id)
+  ).size;
+
+  const observedRecently = rules.filter((rule) => {
+    if (!rule.last_seen) return false;
+
+    const lastSeen = new Date(`${rule.last_seen}Z`).getTime();
+    if (Number.isNaN(lastSeen)) return false;
+
+    return Date.now() - lastSeen <= 5 * 60 * 1000;
+  }).length;
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "—";
+
+    return date.toLocaleString();
+  };
+
+  const enabledBadge = (enabled) => {
+    if (enabled === true) {
+      return "bg-emerald-500/10 text-emerald-400 border-emerald-500/30";
+    }
+
+    if (enabled === false) {
+      return "bg-red-500/10 text-red-400 border-red-500/30";
+    }
+
+    return "bg-slate-500/10 text-slate-300 border-slate-500/30";
+  };
+
+  const actionBadge = (action) => {
+    const normalized = String(action || "").toLowerCase();
+
+    if (normalized === "allow") {
+      return "bg-emerald-500/10 text-emerald-400 border-emerald-500/30";
+    }
+
+    if (normalized === "block" || normalized === "deny") {
+      return "bg-red-500/10 text-red-400 border-red-500/30";
+    }
+
+    return "bg-slate-500/10 text-slate-300 border-slate-500/30";
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div className="text-xs uppercase tracking-[0.18em] text-slate-500">
+            Server Security
+          </div>
+          <h1 className="mt-1 text-2xl font-semibold text-white">
+            Firewall
+          </h1>
+          <p className="mt-1 text-sm text-slate-400">
+            Endpoint firewall rule inventory reported by registered Windows telemetry agents.
+          </p>
+        </div>
+
+        <button
+          onClick={loadFirewall}
+          className="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-6">
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="text-xs uppercase tracking-wide text-slate-500">
+            Total Rules
+          </div>
+          <div className="mt-2 text-3xl font-semibold text-white">
+            {rules.length}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="text-xs uppercase tracking-wide text-slate-500">
+            Enabled
+          </div>
+          <div className="mt-2 text-3xl font-semibold text-emerald-400">
+            {enabledCount}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="text-xs uppercase tracking-wide text-slate-500">
+            Allow
+          </div>
+          <div className="mt-2 text-3xl font-semibold text-cyan-400">
+            {allowCount}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="text-xs uppercase tracking-wide text-slate-500">
+            Block / Deny
+          </div>
+          <div className="mt-2 text-3xl font-semibold text-red-400">
+            {blockCount}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="text-xs uppercase tracking-wide text-slate-500">
+            Endpoints
+          </div>
+          <div className="mt-2 text-3xl font-semibold text-white">
+            {endpointCount}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="text-xs uppercase tracking-wide text-slate-500">
+            Observed ≤5m
+          </div>
+          <div className="mt-2 text-3xl font-semibold text-cyan-400">
+            {observedRecently}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-5">
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search rule, endpoint, protocol, port, program..."
+            className="min-w-0 rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-500"
+          />
+
+          <select
+            value={enabledFilter}
+            onChange={(event) => setEnabledFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="ALL">All States</option>
+            <option value="ENABLED">Enabled</option>
+            <option value="DISABLED">Disabled</option>
+            <option value="UNKNOWN">Unknown</option>
+          </select>
+
+          <select
+            value={directionFilter}
+            onChange={(event) => setDirectionFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="ALL">All Directions</option>
+            <option value="INBOUND">Inbound</option>
+            <option value="OUTBOUND">Outbound</option>
+          </select>
+
+          <select
+            value={actionFilter}
+            onChange={(event) => setActionFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="ALL">All Actions</option>
+            <option value="ALLOW">Allow</option>
+            <option value="BLOCK">Block</option>
+            <option value="DENY">Deny</option>
+          </select>
+
+          <select
+            value={profileFilter}
+            onChange={(event) => setProfileFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="ALL">All Profiles</option>
+            <option value="DOMAIN">Domain</option>
+            <option value="PRIVATE">Private</option>
+            <option value="PUBLIC">Public</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
+        <div className="border-b border-slate-800 px-5 py-4">
+          <h2 className="font-semibold text-white">
+            Endpoint Firewall Rule Inventory
+          </h2>
+          <p className="mt-1 text-xs text-slate-500">
+            {filteredRules.length} rule record{filteredRules.length === 1 ? "" : "s"} shown
+            · refreshed every 15 seconds
+          </p>
+        </div>
+
+        {loading ? (
+          <div className="p-10 text-center text-sm text-slate-500">
+            Loading endpoint firewall telemetry...
+          </div>
+        ) : filteredRules.length === 0 ? (
+          <div className="p-10 text-center">
+            <div className="text-sm font-medium text-slate-300">
+              No endpoint firewall telemetry recorded
+            </div>
+            <div className="mt-2 text-xs text-slate-500">
+              Firewall rules appear here only after a registered endpoint reports
+              a firewall snapshot. No synthetic firewall records are generated.
+            </div>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-[1700px] w-full text-left text-sm">
+              <thead className="border-b border-slate-800 bg-slate-950/70 text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-5 py-3">Rule</th>
+                  <th className="px-5 py-3">Endpoint</th>
+                  <th className="px-5 py-3">State</th>
+                  <th className="px-5 py-3">Direction</th>
+                  <th className="px-5 py-3">Action</th>
+                  <th className="px-5 py-3">Protocol</th>
+                  <th className="px-5 py-3">Ports</th>
+                  <th className="px-5 py-3">Addresses</th>
+                  <th className="px-5 py-3">Program / Service</th>
+                  <th className="px-5 py-3">Profile</th>
+                  <th className="px-5 py-3">Last Seen</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800">
+                {filteredRules.map((rule) => (
+                  <tr key={rule.id} className="hover:bg-slate-800/30">
+                    <td className="px-5 py-4">
+                      <div className="font-medium text-white">
+                        {rule.display_name || rule.rule_name || "—"}
+                      </div>
+                      {rule.display_name && rule.rule_name && (
+                        <div className="mt-1 text-xs text-slate-500">
+                          {rule.rule_name}
+                        </div>
+                      )}
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <div className="text-slate-200">
+                        {rule.hostname || rule.endpoint_id || "—"}
+                      </div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        {rule.ip_address || "IP unavailable"}
+                      </div>
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <span
+                        className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${enabledBadge(
+                          rule.enabled
+                        )}`}
+                      >
+                        {rule.enabled === true
+                          ? "Enabled"
+                          : rule.enabled === false
+                          ? "Disabled"
+                          : "Unknown"}
+                      </span>
+                    </td>
+
+                    <td className="px-5 py-4 text-slate-300">
+                      {rule.direction || "—"}
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <span
+                        className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${actionBadge(
+                          rule.action
+                        )}`}
+                      >
+                        {rule.action || "Unknown"}
+                      </span>
+                    </td>
+
+                    <td className="px-5 py-4 font-mono text-xs text-slate-300">
+                      {rule.protocol || "—"}
+                    </td>
+
+                    <td className="px-5 py-4 text-xs text-slate-300">
+                      <div>
+                        Local: {rule.local_port || "Any"}
+                      </div>
+                      <div className="mt-1 text-slate-500">
+                        Remote: {rule.remote_port || "Any"}
+                      </div>
+                    </td>
+
+                    <td className="max-w-[280px] px-5 py-4 text-xs text-slate-400">
+                      <div className="truncate" title={rule.local_address || ""}>
+                        Local: {rule.local_address || "Any"}
+                      </div>
+                      <div
+                        className="mt-1 truncate"
+                        title={rule.remote_address || ""}
+                      >
+                        Remote: {rule.remote_address || "Any"}
+                      </div>
+                    </td>
+
+                    <td className="max-w-[300px] px-5 py-4">
+                      <div
+                        className="truncate text-xs text-slate-300"
+                        title={rule.program || ""}
+                      >
+                        {rule.program || "Any program"}
+                      </div>
+                      <div
+                        className="mt-1 truncate text-xs text-slate-500"
+                        title={rule.service_name || ""}
+                      >
+                        {rule.service_name || "Any service"}
+                      </div>
+                    </td>
+
+                    <td className="px-5 py-4 text-xs text-slate-300">
+                      {rule.profile || "—"}
+                    </td>
+
+                    <td className="px-5 py-4 whitespace-nowrap text-xs text-slate-400">
+                      {formatDate(rule.last_seen)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function SystemHardening() {
+  const [controls, setControls] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [categoryFilter, setCategoryFilter] = useState("ALL");
+
+  const loadSystemHardening = useCallback(async (manual = false) => {
+    try {
+      manual ? setRefreshing(true) : setLoading(true);
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Your session has expired. Please login again.");
+      }
+
+      const response = await fetch(`${API_URL}/client/system-hardening`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!response.ok) {
+        let message = `Failed to load System Hardening data (${response.status})`;
+        try {
+          const body = await response.json();
+          if (body?.detail) {
+            message = body.detail;
+          }
+        } catch {
+          // Keep the HTTP status message.
+        }
+        throw new Error(message);
+      }
+
+      const data = await response.json();
+      setControls(Array.isArray(data?.controls) ? data.controls : []);
+    } catch (err) {
+      console.error("System Hardening load error:", err);
+      setError(err.message || "Failed to load System Hardening data.");
+      setControls([]);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadSystemHardening();
+  }, [loadSystemHardening]);
+
+  const categories = [
+    "ALL",
+    ...Array.from(
+      new Set(
+        controls
+          .map((control) => control.category)
+          .filter(Boolean)
+      )
+    ),
+  ];
+
+  const filteredControls = controls.filter((control) => {
+    const query = search.trim().toLowerCase();
+
+    const matchesSearch =
+      !query ||
+      [
+        control.control_name,
+        control.control_id,
+        control.category,
+        control.endpoint_id,
+        control.hostname,
+        control.observed_value,
+      ]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query));
+
+    const matchesStatus =
+      statusFilter === "ALL" ||
+      String(control.status || "").toUpperCase() === statusFilter;
+
+    const matchesCategory =
+      categoryFilter === "ALL" ||
+      control.category === categoryFilter;
+
+    return matchesSearch && matchesStatus && matchesCategory;
+  });
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "—";
+
+    return date.toLocaleString();
+  };
+
+  const passCount = controls.filter(
+    (control) => String(control.status || "").toUpperCase() === "PASS"
+  ).length;
+
+  const warnCount = controls.filter(
+    (control) => String(control.status || "").toUpperCase() === "WARN"
+  ).length;
+
+  const failCount = controls.filter(
+    (control) => String(control.status || "").toUpperCase() === "FAIL"
+  ).length;
+
+  const endpointCount = new Set(
+    controls.map((control) => control.endpoint_asset_id)
+  ).size;
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <p className="text-sm font-medium text-slate-400">Server Security</p>
+          <h1 className="mt-1 text-2xl font-semibold text-white">
+            System Hardening
+          </h1>
+          <p className="mt-2 max-w-3xl text-sm text-slate-400">
+            Review persisted endpoint hardening controls and their latest observed state.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadSystemHardening(true)}
+          disabled={loading || refreshing}
+          className="inline-flex items-center justify-center rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-slate-600 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-xl border border-red-900/60 bg-red-950/30 px-4 py-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+          <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+            Total Controls
+          </p>
+          <p className="mt-2 text-2xl font-semibold text-white">
+            {controls.length}
+          </p>
+        </div>
+
+        <div className="rounded-xl border border-emerald-900/50 bg-emerald-950/20 p-5">
+          <p className="text-xs font-medium uppercase tracking-wide text-emerald-400">
+            Pass
+          </p>
+          <p className="mt-2 text-2xl font-semibold text-white">
+            {passCount}
+          </p>
+        </div>
+
+        <div className="rounded-xl border border-amber-900/50 bg-amber-950/20 p-5">
+          <p className="text-xs font-medium uppercase tracking-wide text-amber-400">
+            Warning
+          </p>
+          <p className="mt-2 text-2xl font-semibold text-white">
+            {warnCount}
+          </p>
+        </div>
+
+        <div className="rounded-xl border border-red-900/50 bg-red-950/20 p-5">
+          <p className="text-xs font-medium uppercase tracking-wide text-red-400">
+            Fail
+          </p>
+          <p className="mt-2 text-2xl font-semibold text-white">
+            {failCount}
+          </p>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+          <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+            Endpoints
+          </p>
+          <p className="mt-2 text-2xl font-semibold text-white">
+            {endpointCount}
+          </p>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_180px_220px]">
+          <input
+            type="text"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search controls, endpoints, categories..."
+            className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 outline-none placeholder:text-slate-600 focus:border-slate-500"
+          />
+
+          <select
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 outline-none focus:border-slate-500"
+          >
+            <option value="ALL">All Statuses</option>
+            <option value="PASS">Pass</option>
+            <option value="WARN">Warning</option>
+            <option value="FAIL">Fail</option>
+          </select>
+
+          <select
+            value={categoryFilter}
+            onChange={(event) => setCategoryFilter(event.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 outline-none focus:border-slate-500"
+          >
+            {categories.map((category) => (
+              <option key={category} value={category}>
+                {category === "ALL" ? "All Categories" : category}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
+        {loading ? (
+          <div className="px-6 py-12 text-center text-sm text-slate-500">
+            Loading System Hardening data...
+          </div>
+        ) : filteredControls.length === 0 ? (
+          <div className="px-6 py-12 text-center">
+            <p className="text-sm font-medium text-slate-300">
+              {controls.length === 0
+                ? "No System Hardening data available."
+                : "No controls match the selected filters."}
+            </p>
+            <p className="mt-1 text-xs text-slate-500">
+              {controls.length === 0
+                ? "Collect endpoint hardening telemetry to populate this view."
+                : "Try changing the search or filters."}
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-[1100px] w-full text-left">
+              <thead className="border-b border-slate-800 bg-slate-950/60">
+                <tr className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                  <th className="px-5 py-4">Control</th>
+                  <th className="px-5 py-4">Category</th>
+                  <th className="px-5 py-4">Endpoint</th>
+                  <th className="px-5 py-4">Status</th>
+                  <th className="px-5 py-4">Observed Value</th>
+                  <th className="px-5 py-4">Last Seen</th>
+                </tr>
+              </thead>
+
+              <tbody className="divide-y divide-slate-800/80">
+                {filteredControls.map((control) => {
+                  const status = String(control.status || "").toUpperCase();
+
+                  const statusClass =
+                    status === "PASS"
+                      ? "border-emerald-800/60 bg-emerald-950/30 text-emerald-300"
+                      : status === "WARN"
+                        ? "border-amber-800/60 bg-amber-950/30 text-amber-300"
+                        : status === "FAIL"
+                          ? "border-red-800/60 bg-red-950/30 text-red-300"
+                          : "border-slate-700 bg-slate-800/40 text-slate-300";
+
+                  return (
+                    <tr key={control.id} className="hover:bg-slate-800/30">
+                      <td className="max-w-[300px] px-5 py-4">
+                        <div className="truncate text-sm font-medium text-slate-200">
+                          {control.control_name || "—"}
+                        </div>
+                        <div
+                          className="mt-1 truncate text-xs text-slate-500"
+                          title={control.control_id || ""}
+                        >
+                          {control.control_id || "—"}
+                        </div>
+                      </td>
+
+                      <td className="px-5 py-4 text-xs text-slate-300">
+                        {control.category || "—"}
+                      </td>
+
+                      <td className="max-w-[220px] px-5 py-4">
+                        <div className="truncate text-sm text-slate-300">
+                          {control.hostname || control.endpoint_id || "—"}
+                        </div>
+                        <div className="mt-1 truncate text-xs text-slate-500">
+                          {control.endpoint_id || "—"}
+                        </div>
+                      </td>
+
+                      <td className="px-5 py-4">
+                        <span
+                          className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${statusClass}`}
+                        >
+                          {status || "UNKNOWN"}
+                        </span>
+                      </td>
+
+                      <td className="max-w-[420px] px-5 py-4">
+                        <div
+                          className="truncate text-xs text-slate-300"
+                          title={control.observed_value || ""}
+                        >
+                          {control.observed_value || "—"}
+                        </div>
+                      </td>
+
+                      <td className="whitespace-nowrap px-5 py-4 text-xs text-slate-400">
+                        {formatDate(control.last_seen)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function UserAccounts() {
+  const [endpoints, setEndpoints] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadUserAccounts = async (manual = false) => {
+    try {
+      manual ? setRefreshing(true) : setLoading(true);
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Your session has expired. Please login again.");
+      }
+
+      const config = {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      };
+
+      const [endpointResponse, eventResponse] = await Promise.all([
+        axios.get(`${API_URL}/client/endpoints`, config),
+        axios.get(`${API_URL}/client/security-events`, config),
+      ]);
+
+      const allEndpoints = Array.isArray(endpointResponse.data?.endpoints)
+        ? endpointResponse.data.endpoints
+        : [];
+
+      const allEvents = Array.isArray(eventResponse.data?.events)
+        ? eventResponse.data.events
+        : [];
+
+      const accountEventTypes = new Set([
+        "account_creation",
+        "account_modification",
+        "password_change",
+        "privileged_group_change_attempt",
+        "authentication_failure",
+        "invalid_user",
+      ]);
+
+      const accountEvents = allEvents.filter((event) => {
+        const type = String(event.event_type || "").toLowerCase();
+        const message = String(event.message || "").toLowerCase();
+
+        return (
+          accountEventTypes.has(type) ||
+          type.includes("account_creation") ||
+          type.includes("account_modification") ||
+          type.includes("password_change") ||
+          type.includes("privileged_group") ||
+          type.includes("authentication_failure") ||
+          type.includes("invalid_user") ||
+          message.includes("useradd") ||
+          message.includes("usermod") ||
+          message.includes("gpasswd") ||
+          message.includes("password change") ||
+          message.includes("authentication failure") ||
+          message.includes("invalid user")
+        );
+      });
+
+      const endpointIds = new Set(
+        accountEvents
+          .map((event) => event.endpoint_asset_id)
+          .filter((id) => id !== null && id !== undefined)
+      );
+
+      const relatedEndpoints = allEndpoints.filter((endpoint) =>
+        endpointIds.has(endpoint.id)
+      );
+
+      setEndpoints(relatedEndpoints);
+      setEvents(accountEvents);
+    } catch (err) {
+      setError(
+        err?.response?.data?.detail ||
+          err?.message ||
+          "Unable to load user account security telemetry."
+      );
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadUserAccounts();
+
+    const interval = setInterval(() => {
+      loadUserAccounts(true);
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const accountCreations = events.filter(
+    (event) =>
+      String(event.event_type || "").toLowerCase() === "account_creation"
+  ).length;
+
+  const accountModifications = events.filter(
+    (event) =>
+      String(event.event_type || "").toLowerCase() === "account_modification"
+  ).length;
+
+  const passwordChanges = events.filter(
+    (event) =>
+      String(event.event_type || "").toLowerCase() === "password_change"
+  ).length;
+
+  const privilegedChanges = events.filter(
+    (event) =>
+      String(event.event_type || "").toLowerCase() ===
+      "privileged_group_change_attempt"
+  ).length;
+
+  const authenticationFailures = events.filter((event) => {
+    const type = String(event.event_type || "").toLowerCase();
+
+    return (
+      type === "authentication_failure" ||
+      type === "invalid_user"
+    );
+  }).length;
+
+  const criticalEvents = events.filter(
+    (event) => String(event.severity || "").toUpperCase() === "CRITICAL"
+  ).length;
+
+  const highEvents = events.filter(
+    (event) => String(event.severity || "").toUpperCase() === "HIGH"
+  ).length;
+
+  const online = endpoints.filter((endpoint) =>
+    ["online", "active", "up", "alive"].includes(
+      String(endpoint.status || "").toLowerCase()
+    )
+  ).length;
+
+  const severityClass = (severity) => {
+    const value = String(severity || "INFO").toUpperCase();
+
+    if (value === "CRITICAL") return "text-red-400";
+    if (value === "HIGH") return "text-orange-400";
+    if (value === "MEDIUM") return "text-yellow-400";
+    if (value === "LOW") return "text-blue-400";
+
+    return "text-gray-500";
+  };
+
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        <div className="border border-white/10 bg-[#0d0d0d] px-6 py-12 text-center">
+          <p className="text-sm text-gray-400">
+            Loading user account security telemetry...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col justify-between gap-4 xl:flex-row xl:items-end">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.28em] text-red-500">
+            Server Security
+          </p>
+
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">
+            User Accounts
+          </h1>
+
+          <p className="mt-1 text-xs text-gray-500">
+            Account and authentication activity derived from registered endpoint
+            security telemetry.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadUserAccounts(true)}
+          disabled={refreshing}
+          className="border border-white/10 bg-[#0d0d0d] px-4 py-2 text-xs text-gray-400 transition hover:border-red-500/40 hover:text-white disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="border border-red-500/20 bg-red-500/5 px-5 py-4">
+          <p className="text-sm text-red-400">{error}</p>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+        {[
+          ["Monitored Endpoints", endpoints.length],
+          ["Online", online],
+          ["Account Events", events.length],
+          ["Auth Failures", authenticationFailures],
+          ["Critical / High", `${criticalEvents} / ${highEvents}`],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            className="border border-white/10 bg-[#0d0d0d] px-5 py-5"
+          >
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              {label}
+            </p>
+
+            <p className="mt-3 text-2xl font-semibold text-white">{value}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-6 py-5">
+          <p className="text-sm font-semibold">Account Activity Overview</p>
+
+          <p className="mt-1 text-xs text-gray-600">
+            Counts are derived only from persisted endpoint telemetry.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-2 xl:grid-cols-4">
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Account Creations
+            </p>
+            <p className="mt-2 text-xl font-semibold text-white">
+              {accountCreations}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Account Modifications
+            </p>
+            <p className="mt-2 text-xl font-semibold text-white">
+              {accountModifications}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Password Changes
+            </p>
+            <p className="mt-2 text-xl font-semibold text-white">
+              {passwordChanges}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Privileged Group Changes
+            </p>
+            <p className="mt-2 text-xl font-semibold text-white">
+              {privilegedChanges}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-6 py-5">
+          <p className="text-sm font-semibold">Recent Account Security Events</p>
+
+          <p className="mt-1 text-xs text-gray-600">
+            Account creation, modification, password, privilege and
+            authentication events linked to registered endpoints.
+          </p>
+        </div>
+
+        {events.length === 0 ? (
+          <div className="px-6 py-12 text-center">
+            <p className="text-sm text-gray-400">
+              No user account security events recorded.
+            </p>
+
+            <p className="mt-2 text-xs text-gray-600">
+              This section will populate automatically when endpoint account
+              telemetry is received. No synthetic account records are generated.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1400px] text-left">
+              <thead>
+                <tr className="border-b border-white/10 text-[10px] uppercase tracking-wider text-gray-600">
+                  <th className="px-6 py-4">Time</th>
+                  <th className="px-6 py-4">Event Type</th>
+                  <th className="px-6 py-4">Severity</th>
+                  <th className="px-6 py-4">Endpoint</th>
+                  <th className="px-6 py-4">Source</th>
+                  <th className="px-6 py-4">Message</th>
+                  <th className="px-6 py-4">Status</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {events.slice(0, 100).map((event) => {
+                  const endpoint = endpoints.find(
+                    (item) => item.id === event.endpoint_asset_id
+                  );
+
+                  return (
+                    <tr
+                      key={event.id}
+                      className="border-b border-white/5 transition hover:bg-white/[0.02]"
+                    >
+                      <td className="px-6 py-5 text-xs text-gray-500">
+                        {event.timestamp
+                          ? new Date(event.timestamp).toLocaleString()
+                          : "Unknown"}
+                      </td>
+
+                      <td className="px-6 py-5 text-sm text-gray-300">
+                        {event.event_type || "Unknown"}
+                      </td>
+
+                      <td className="px-6 py-5">
+                        <span
+                          className={`text-xs font-semibold ${severityClass(
+                            event.severity
+                          )}`}
+                        >
+                          {String(event.severity || "INFO").toUpperCase()}
+                        </span>
+                      </td>
+
+                      <td className="px-6 py-5">
+                        <p className="text-sm text-gray-300">
+                          {endpoint?.hostname ||
+                            endpoint?.endpoint_id ||
+                            "Unknown"}
+                        </p>
+                        <p className="mt-1 text-xs text-gray-600">
+                          {endpoint?.ip_address || "IP unavailable"}
+                        </p>
+                      </td>
+
+                      <td className="px-6 py-5 text-sm text-gray-400">
+                        {event.source || "Unknown"}
+                      </td>
+
+                      <td className="max-w-[520px] px-6 py-5 text-sm text-gray-400">
+                        <div className="truncate" title={event.message || ""}>
+                          {event.message || "No message"}
+                        </div>
+                      </td>
+
+                      <td className="px-6 py-5 text-xs text-gray-500">
+                        {event.alert_status || "ACTIVE"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-6 py-5">
+          <p className="text-sm font-semibold">Account Telemetry Coverage</p>
+
+          <p className="mt-1 text-xs text-gray-600">
+            Endpoints that have generated account-related security telemetry.
+          </p>
+        </div>
+
+        {endpoints.length === 0 ? (
+          <div className="px-6 py-12 text-center">
+            <p className="text-sm text-gray-400">
+              No endpoints with account security telemetry are currently
+              registered.
+            </p>
+
+            <p className="mt-2 text-xs text-gray-600">
+              Account monitoring becomes active when a registered endpoint
+              begins sending account-related security events.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] text-left">
+              <thead>
+                <tr className="border-b border-white/10 text-[10px] uppercase tracking-wider text-gray-600">
+                  <th className="px-6 py-4">Endpoint</th>
+                  <th className="px-6 py-4">IP Address</th>
+                  <th className="px-6 py-4">Operating System</th>
+                  <th className="px-6 py-4">Status</th>
+                  <th className="px-6 py-4">Last Seen</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {endpoints.map((endpoint) => (
+                  <tr
+                    key={endpoint.id}
+                    className="border-b border-white/5 transition hover:bg-white/[0.02]"
+                  >
+                    <td className="px-6 py-5">
+                      <p className="text-sm font-medium text-gray-200">
+                        {endpoint.hostname ||
+                          endpoint.endpoint_id ||
+                          "Unknown"}
+                      </p>
+                    </td>
+
+                    <td className="px-6 py-5 text-sm text-gray-400">
+                      {endpoint.ip_address || "Unknown"}
+                    </td>
+
+                    <td className="px-6 py-5 text-sm text-gray-400">
+                      {endpoint.os_name || "Unknown"}
+                      {endpoint.os_version ? ` ${endpoint.os_version}` : ""}
+                    </td>
+
+                    <td className="px-6 py-5 text-xs text-gray-500">
+                      {String(endpoint.status || "UNKNOWN").toUpperCase()}
+                    </td>
+
+                    <td className="px-6 py-5 text-xs text-gray-500">
+                      {endpoint.last_seen
+                        ? new Date(endpoint.last_seen).toLocaleString()
+                        : "Never"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SSHSecurity() {
+  const [endpoints, setEndpoints] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadSSHSecurity = async (manual = false) => {
+    try {
+      manual ? setRefreshing(true) : setLoading(true);
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Your session has expired. Please login again.");
+      }
+
+      const config = {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      };
+
+      const [endpointResponse, eventResponse] = await Promise.all([
+        axios.get(`${API_URL}/client/endpoints`, config),
+        axios.get(`${API_URL}/client/security-events`, config),
+      ]);
+
+      const allEndpoints = Array.isArray(endpointResponse.data?.endpoints)
+        ? endpointResponse.data.endpoints
+        : [];
+
+      const allEvents = Array.isArray(eventResponse.data?.events)
+        ? eventResponse.data.events
+        : [];
+
+      const linuxEndpoints = allEndpoints.filter((endpoint) => {
+        const os = String(endpoint.os_name || "").toLowerCase();
+
+        return [
+          "linux",
+          "ubuntu",
+          "debian",
+          "rhel",
+          "red hat",
+          "centos",
+          "fedora",
+          "rocky",
+          "alma",
+          "opensuse",
+          "open suse",
+          "suse",
+          "arch",
+          "amazon linux",
+          "alpine",
+        ].some((name) => os.includes(name));
+      });
+
+      const linuxEndpointIds = new Set(
+        linuxEndpoints.map((endpoint) => endpoint.id)
+      );
+
+      const sshEvents = allEvents.filter((event) => {
+        if (!linuxEndpointIds.has(event.endpoint_asset_id)) {
+          return false;
+        }
+
+        const type = String(event.event_type || "").toLowerCase();
+        const message = String(event.message || "").toLowerCase();
+
+        return (
+          type.includes("ssh") ||
+          type.includes("auth") ||
+          type.includes("login") ||
+          type.includes("authentication") ||
+          message.includes("sshd") ||
+          message.includes("ssh") ||
+          message.includes("authentication") ||
+          message.includes("failed password") ||
+          message.includes("accepted password") ||
+          message.includes("accepted publickey") ||
+          message.includes("invalid user") ||
+          message.includes("failed login")
+        );
+      });
+
+      setEndpoints(linuxEndpoints);
+      setEvents(sshEvents);
+    } catch (err) {
+      setError(
+        err?.response?.data?.detail ||
+          err?.message ||
+          "Unable to load SSH security telemetry."
+      );
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadSSHSecurity();
+
+    const interval = setInterval(() => {
+      loadSSHSecurity(true);
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const failedAttempts = events.filter((event) => {
+    const type = String(event.event_type || "").toLowerCase();
+    const message = String(event.message || "").toLowerCase();
+
+    return (
+      type.includes("failed") ||
+      type.includes("failure") ||
+      message.includes("failed password") ||
+      message.includes("failed login") ||
+      message.includes("invalid user") ||
+      message.includes("authentication failure")
+    );
+  }).length;
+
+  const successfulLogins = events.filter((event) => {
+    const type = String(event.event_type || "").toLowerCase();
+    const message = String(event.message || "").toLowerCase();
+
+    return (
+      type.includes("success") ||
+      type.includes("accepted") ||
+      message.includes("accepted password") ||
+      message.includes("accepted publickey") ||
+      message.includes("successful login")
+    );
+  }).length;
+
+  const criticalEvents = events.filter(
+    (event) => String(event.severity || "").toUpperCase() === "CRITICAL"
+  ).length;
+
+  const highEvents = events.filter(
+    (event) => String(event.severity || "").toUpperCase() === "HIGH"
+  ).length;
+
+  const online = endpoints.filter((endpoint) =>
+    ["online", "active", "up", "alive"].includes(
+      String(endpoint.status || "").toLowerCase()
+    )
+  ).length;
+
+  const severityClass = (severity) => {
+    const value = String(severity || "INFO").toUpperCase();
+
+    if (value === "CRITICAL") return "text-red-400";
+    if (value === "HIGH") return "text-orange-400";
+    if (value === "MEDIUM") return "text-yellow-400";
+    if (value === "LOW") return "text-blue-400";
+
+    return "text-gray-500";
+  };
+
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        <div className="border border-white/10 bg-[#0d0d0d] px-6 py-12 text-center">
+          <p className="text-sm text-gray-400">
+            Loading SSH security telemetry...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col justify-between gap-4 xl:flex-row xl:items-end">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.28em] text-red-500">
+            Server Security
+          </p>
+
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">
+            SSH Security
+          </h1>
+
+          <p className="mt-1 text-xs text-gray-500">
+            Real SSH and authentication telemetry associated with registered
+            Linux assets.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadSSHSecurity(true)}
+          disabled={refreshing}
+          className="border border-white/10 bg-[#0d0d0d] px-4 py-2 text-xs text-gray-400 transition hover:border-red-500/40 hover:text-white disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="border border-red-500/20 bg-red-500/5 px-5 py-4">
+          <p className="text-sm text-red-400">{error}</p>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+        {[
+          ["Linux Assets", endpoints.length],
+          ["Online", online],
+          ["SSH Events", events.length],
+          ["Failed Attempts", failedAttempts],
+          ["Critical / High", `${criticalEvents} / ${highEvents}`],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            className="border border-white/10 bg-[#0d0d0d] px-5 py-5"
+          >
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              {label}
+            </p>
+
+            <p className="mt-3 text-2xl font-semibold text-white">{value}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-6 py-5">
+          <p className="text-sm font-semibold">SSH Activity Overview</p>
+
+          <p className="mt-1 text-xs text-gray-600">
+            Counts are derived only from persisted endpoint telemetry.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-3">
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Successful Logins
+            </p>
+            <p className="mt-2 text-xl font-semibold text-white">
+              {successfulLogins}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Failed / Suspicious Attempts
+            </p>
+            <p className="mt-2 text-xl font-semibold text-white">
+              {failedAttempts}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              High / Critical Events
+            </p>
+            <p className="mt-2 text-xl font-semibold text-white">
+              {highEvents + criticalEvents}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-6 py-5">
+          <p className="text-sm font-semibold">Recent SSH Security Events</p>
+
+          <p className="mt-1 text-xs text-gray-600">
+            Authentication and SSH events linked to registered Linux assets.
+          </p>
+        </div>
+
+        {events.length === 0 ? (
+          <div className="px-6 py-12 text-center">
+            <p className="text-sm text-gray-400">
+              No SSH security events recorded.
+            </p>
+
+            <p className="mt-2 text-xs text-gray-600">
+              This section will populate automatically when Linux SSH
+              telemetry is received. No synthetic events are generated.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1200px] text-left">
+              <thead>
+                <tr className="border-b border-white/10 text-[10px] uppercase tracking-wider text-gray-600">
+                  <th className="px-6 py-4">Time</th>
+                  <th className="px-6 py-4">Event Type</th>
+                  <th className="px-6 py-4">Severity</th>
+                  <th className="px-6 py-4">Source</th>
+                  <th className="px-6 py-4">Message</th>
+                  <th className="px-6 py-4">Status</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {events.slice(0, 100).map((event) => (
+                  <tr
+                    key={event.id}
+                    className="border-b border-white/5 transition hover:bg-white/[0.02]"
+                  >
+                    <td className="px-6 py-5 text-xs text-gray-500">
+                      {event.timestamp
+                        ? new Date(event.timestamp).toLocaleString()
+                        : "Unknown"}
+                    </td>
+
+                    <td className="px-6 py-5 text-sm text-gray-300">
+                      {event.event_type || "Unknown"}
+                    </td>
+
+                    <td className="px-6 py-5">
+                      <span
+                        className={`text-xs font-semibold ${severityClass(
+                          event.severity
+                        )}`}
+                      >
+                        {String(event.severity || "INFO").toUpperCase()}
+                      </span>
+                    </td>
+
+                    <td className="px-6 py-5 text-sm text-gray-400">
+                      {event.source || "Unknown"}
+                    </td>
+
+                    <td className="max-w-[520px] px-6 py-5 text-sm text-gray-400">
+                      <div className="truncate" title={event.message || ""}>
+                        {event.message || "No message"}
+                      </div>
+                    </td>
+
+                    <td className="px-6 py-5 text-xs text-gray-500">
+                      {event.alert_status || "ACTIVE"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-6 py-5">
+          <p className="text-sm font-semibold">Linux SSH Coverage</p>
+
+          <p className="mt-1 text-xs text-gray-600">
+            Linux assets currently registered for endpoint telemetry.
+          </p>
+        </div>
+
+        {endpoints.length === 0 ? (
+          <div className="px-6 py-12 text-center">
+            <p className="text-sm text-gray-400">
+              No Linux assets are currently registered.
+            </p>
+
+            <p className="mt-2 text-xs text-gray-600">
+              SSH monitoring becomes active when a Linux endpoint is
+              registered and begins sending telemetry.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] text-left">
+              <thead>
+                <tr className="border-b border-white/10 text-[10px] uppercase tracking-wider text-gray-600">
+                  <th className="px-6 py-4">Endpoint</th>
+                  <th className="px-6 py-4">IP Address</th>
+                  <th className="px-6 py-4">Operating System</th>
+                  <th className="px-6 py-4">Status</th>
+                  <th className="px-6 py-4">Last Seen</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {endpoints.map((endpoint) => (
+                  <tr
+                    key={endpoint.id}
+                    className="border-b border-white/5 transition hover:bg-white/[0.02]"
+                  >
+                    <td className="px-6 py-5">
+                      <p className="text-sm font-medium text-gray-200">
+                        {endpoint.hostname ||
+                          endpoint.endpoint_id ||
+                          "Unknown"}
+                      </p>
+                    </td>
+
+                    <td className="px-6 py-5 text-sm text-gray-400">
+                      {endpoint.ip_address || "Unknown"}
+                    </td>
+
+                    <td className="px-6 py-5 text-sm text-gray-400">
+                      {endpoint.os_name || "Unknown"}
+                      {endpoint.os_version ? ` ${endpoint.os_version}` : ""}
+                    </td>
+
+                    <td className="px-6 py-5 text-xs text-gray-500">
+                      {String(endpoint.status || "UNKNOWN").toUpperCase()}
+                    </td>
+
+                    <td className="px-6 py-5 text-xs text-gray-500">
+                      {endpoint.last_seen
+                        ? new Date(endpoint.last_seen).toLocaleString()
+                        : "Never"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LinuxSecurity() {
+  const [endpoints, setEndpoints] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadLinuxSecurity = async (manual = false) => {
+    try {
+      manual ? setRefreshing(true) : setLoading(true);
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Your session has expired. Please login again.");
+      }
+
+      const config = {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      };
+
+      const [endpointResponse, eventResponse] = await Promise.all([
+        axios.get(`${API_URL}/client/endpoints`, config),
+        axios.get(`${API_URL}/client/security-events`, config),
+      ]);
+
+      const allEndpoints = Array.isArray(endpointResponse.data?.endpoints)
+        ? endpointResponse.data.endpoints
+        : [];
+
+      const allEvents = Array.isArray(eventResponse.data?.events)
+        ? eventResponse.data.events
+        : [];
+
+      const linuxEndpoints = allEndpoints.filter((endpoint) => {
+        const os = String(endpoint.os_name || "").toLowerCase();
+
+        return [
+          "linux",
+          "ubuntu",
+          "debian",
+          "rhel",
+          "red hat",
+          "centos",
+          "fedora",
+          "rocky",
+          "alma",
+          "opensuse",
+          "open suse",
+          "suse",
+          "arch",
+          "amazon linux",
+          "alpine",
+        ].some((name) => os.includes(name));
+      });
+
+      const linuxEndpointIds = new Set(
+        linuxEndpoints.map((endpoint) => endpoint.id)
+      );
+
+      const linuxEvents = allEvents.filter((event) =>
+        linuxEndpointIds.has(event.endpoint_asset_id)
+      );
+
+      setEndpoints(linuxEndpoints);
+      setEvents(linuxEvents);
+    } catch (err) {
+      setError(
+        err?.response?.data?.detail ||
+          err?.message ||
+          "Unable to load Linux security telemetry."
+      );
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadLinuxSecurity();
+
+    const interval = setInterval(() => {
+      loadLinuxSecurity(true);
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const online = endpoints.filter((endpoint) =>
+    ["online", "active", "up", "alive"].includes(
+      String(endpoint.status || "").toLowerCase()
+    )
+  ).length;
+
+  const offline = endpoints.filter((endpoint) =>
+    ["offline", "down", "failed", "error"].includes(
+      String(endpoint.status || "").toLowerCase()
+    )
+  ).length;
+
+  const unknown = endpoints.length - online - offline;
+
+  const authenticationEvents = events.filter((event) => {
+    const type = String(event.event_type || "").toLowerCase();
+    const message = String(event.message || "").toLowerCase();
+
+    return (
+      type.includes("ssh") ||
+      type.includes("auth") ||
+      type.includes("login") ||
+      type.includes("authentication") ||
+      message.includes("ssh") ||
+      message.includes("authentication") ||
+      message.includes("login")
+    );
+  });
+
+  const privilegeEvents = events.filter((event) => {
+    const type = String(event.event_type || "").toLowerCase();
+    const message = String(event.message || "").toLowerCase();
+
+    return (
+      type.includes("sudo") ||
+      type.includes("privilege") ||
+      type.includes("root") ||
+      type.includes("su") ||
+      message.includes("sudo") ||
+      message.includes("privilege") ||
+      message.includes("root access") ||
+      message.includes("su:")
+    );
+  });
+
+  const serviceEvents = events.filter((event) => {
+    const type = String(event.event_type || "").toLowerCase();
+    const message = String(event.message || "").toLowerCase();
+
+    if (type === "authentication_session") {
+      return false;
+    }
+
+    return (
+      type.includes("service") ||
+      type.includes("systemd") ||
+      type.includes("kernel") ||
+      type.includes("daemon") ||
+      type.includes("system") ||
+      message.includes("systemd") ||
+      message.includes("service") ||
+      message.includes("kernel")
+    );
+  });
+
+  const criticalEvents = events.filter(
+    (event) => String(event.severity || "").toUpperCase() === "CRITICAL"
+  ).length;
+
+  const highEvents = events.filter(
+    (event) => String(event.severity || "").toUpperCase() === "HIGH"
+  ).length;
+
+  const severityClass = (severity) => {
+    const value = String(severity || "INFO").toUpperCase();
+
+    if (value === "CRITICAL") return "text-red-400";
+    if (value === "HIGH") return "text-orange-400";
+    if (value === "MEDIUM") return "text-yellow-400";
+    if (value === "LOW") return "text-blue-400";
+
+    return "text-gray-500";
+  };
+
+  const statusClass = (status) => {
+    const value = String(status || "").toLowerCase();
+
+    if (["online", "active", "up", "alive"].includes(value)) {
+      return "text-emerald-400";
+    }
+
+    if (["offline", "down", "failed", "error"].includes(value)) {
+      return "text-red-400";
+    }
+
+    return "text-gray-500";
+  };
+
+  const statusLabel = (status) => {
+    const value = String(status || "").toUpperCase();
+    return value || "UNKNOWN";
+  };
+
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        <div className="border border-white/10 bg-[#0d0d0d] px-6 py-12 text-center">
+          <p className="text-sm text-gray-400">
+            Loading Linux security telemetry...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col justify-between gap-4 xl:flex-row xl:items-end">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.28em] text-red-500">
+            Server Security
+          </p>
+
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">
+            Linux Security
+          </h1>
+
+          <p className="mt-1 text-xs text-gray-500">
+            Real Linux endpoint inventory and security telemetry from your
+            registered environment.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadLinuxSecurity(true)}
+          disabled={refreshing}
+          className="border border-white/10 bg-[#0d0d0d] px-4 py-2 text-xs text-gray-400 transition hover:border-red-500/40 hover:text-white disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="border border-red-500/20 bg-red-500/5 px-5 py-4">
+          <p className="text-sm text-red-400">{error}</p>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+        {[
+          ["Linux Assets", endpoints.length],
+          ["Online", online],
+          ["Offline", offline],
+          ["Security Events", events.length],
+          ["Critical / High", `${criticalEvents} / ${highEvents}`],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            className="border border-white/10 bg-[#0d0d0d] px-5 py-5"
+          >
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              {label}
+            </p>
+
+            <p className="mt-3 text-2xl font-semibold text-white">{value}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-6 py-5">
+          <p className="text-sm font-semibold">Linux Security Telemetry</p>
+
+          <p className="mt-1 text-xs text-gray-600">
+            Telemetry is sourced from registered Linux endpoint assets and
+            persisted security events.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-4">
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Authentication / SSH
+            </p>
+            <p className="mt-2 text-xl font-semibold text-white">
+              {authenticationEvents.length}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Privilege / Sudo
+            </p>
+            <p className="mt-2 text-xl font-semibold text-white">
+              {privilegeEvents.length}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Services / System
+            </p>
+            <p className="mt-2 text-xl font-semibold text-white">
+              {serviceEvents.length}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-gray-600">
+              Unknown Asset Status
+            </p>
+            <p className="mt-2 text-xl font-semibold text-white">{unknown}</p>
+          </div>
+        </div>
+
+        {endpoints.length === 0 && (
+          <div className="border-t border-white/10 px-6 py-5">
+            <p className="text-xs text-gray-500">
+              No Linux endpoint assets are currently registered. This page
+              does not generate synthetic Linux telemetry.
+            </p>
+          </div>
+        )}
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-6 py-5">
+          <p className="text-sm font-semibold">Recent Linux Security Events</p>
+
+          <p className="mt-1 text-xs text-gray-600">
+            Persisted events associated with registered Linux endpoint assets.
+          </p>
+        </div>
+
+        {events.length === 0 ? (
+          <div className="px-6 py-12 text-center">
+            <p className="text-sm text-gray-400">
+              No Linux security events recorded.
+            </p>
+
+            <p className="mt-2 text-xs text-gray-600">
+              This section will populate automatically when Linux endpoint
+              telemetry is received.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1100px] text-left">
+              <thead>
+                <tr className="border-b border-white/10 text-[10px] uppercase tracking-wider text-gray-600">
+                  <th className="px-6 py-4">Time</th>
+                  <th className="px-6 py-4">Event Type</th>
+                  <th className="px-6 py-4">Severity</th>
+                  <th className="px-6 py-4">Source</th>
+                  <th className="px-6 py-4">Message</th>
+                  <th className="px-6 py-4">Status</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {events.slice(0, 100).map((event) => (
+                  <tr
+                    key={event.id}
+                    className="border-b border-white/5 transition hover:bg-white/[0.02]"
+                  >
+                    <td className="px-6 py-5 text-xs text-gray-500">
+                      {event.timestamp
+                        ? new Date(event.timestamp).toLocaleString()
+                        : "Unknown"}
+                    </td>
+
+                    <td className="px-6 py-5 text-sm text-gray-300">
+                      {event.event_type || "Unknown"}
+                    </td>
+
+                    <td className="px-6 py-5">
+                      <span
+                        className={`text-xs font-semibold ${severityClass(
+                          event.severity
+                        )}`}
+                      >
+                        {String(event.severity || "INFO").toUpperCase()}
+                      </span>
+                    </td>
+
+                    <td className="px-6 py-5 text-sm text-gray-400">
+                      {event.source || "Unknown"}
+                    </td>
+
+                    <td className="max-w-[480px] px-6 py-5 text-sm text-gray-400">
+                      <div className="truncate" title={event.message || ""}>
+                        {event.message || "No message"}
+                      </div>
+                    </td>
+
+                    <td className="px-6 py-5 text-xs text-gray-500">
+                      {event.alert_status || "ACTIVE"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d]">
+        <div className="border-b border-white/10 px-6 py-5">
+          <p className="text-sm font-semibold">Linux Endpoint Inventory</p>
+
+          <p className="mt-1 text-xs text-gray-600">
+            Real Linux endpoint assets registered through the telemetry
+            pipeline.
+          </p>
+        </div>
+
+        {endpoints.length === 0 ? (
+          <div className="px-6 py-12 text-center">
+            <p className="text-sm text-gray-400">
+              No Linux endpoint assets discovered.
+            </p>
+
+            <p className="mt-2 text-xs text-gray-600">
+              Linux Security will populate when a Linux endpoint is registered
+              in your environment.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1100px] text-left">
+              <thead>
+                <tr className="border-b border-white/10 text-[10px] uppercase tracking-wider text-gray-600">
+                  <th className="px-6 py-4">Endpoint</th>
+                  <th className="px-6 py-4">IP Address</th>
+                  <th className="px-6 py-4">Operating System</th>
+                  <th className="px-6 py-4">Status</th>
+                  <th className="px-6 py-4">Telemetry Source</th>
+                  <th className="px-6 py-4">Last Seen</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {endpoints.map((endpoint) => (
+                  <tr
+                    key={endpoint.id}
+                    className="border-b border-white/5 transition hover:bg-white/[0.02]"
+                  >
+                    <td className="px-6 py-5">
+                      <p className="text-sm font-medium text-gray-200">
+                        {endpoint.hostname ||
+                          endpoint.endpoint_id ||
+                          "Unknown"}
+                      </p>
+
+                      <p className="mt-1 text-xs text-gray-600">
+                        {endpoint.endpoint_id || "No endpoint ID"}
+                      </p>
+                    </td>
+
+                    <td className="px-6 py-5 text-sm text-gray-400">
+                      {endpoint.ip_address || "Unknown"}
+                    </td>
+
+                    <td className="px-6 py-5 text-sm text-gray-400">
+                      {endpoint.os_name || "Unknown"}
+                      {endpoint.os_version ? ` ${endpoint.os_version}` : ""}
+                    </td>
+
+                    <td className="px-6 py-5">
+                      <span
+                        className={`text-xs font-semibold ${statusClass(
+                          endpoint.status
+                        )}`}
+                      >
+                        {statusLabel(endpoint.status)}
+                      </span>
+                    </td>
+
+                    <td className="px-6 py-5 text-sm text-gray-400">
+                      {endpoint.telemetry_source_id
+                        ? `Source ${endpoint.telemetry_source_id}`
+                        : "Not registered"}
+                    </td>
+
+                    <td className="px-6 py-5 text-xs text-gray-500">
+                      {endpoint.last_seen
+                        ? new Date(endpoint.last_seen).toLocaleString()
+                        : "Never"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function LogSources() {
+  const [sources, setSources] = useState([]);
+  const [newName, setNewName] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [actionId, setActionId] = useState(null);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [issuedKey, setIssuedKey] = useState(null);
+  const [copied, setCopied] = useState(false);
+
+  const authConfig = () => {
+    const token = localStorage.getItem("token");
+    if (!token) throw new Error("Your session has expired. Please log in again.");
+    return { headers: { Authorization: `Bearer ${token}` } };
+  };
+
+  const loadSources = async (manual = false) => {
+    try {
+      if (manual) setLoading(true);
+      setError("");
+      const response = await axios.get(
+        `${API_URL}/telemetry/sources`,
+        authConfig()
+      );
+      setSources(Array.isArray(response.data) ? response.data : []);
+    } catch (err) {
+      setError(
+        err?.response?.data?.detail ||
+        err?.message ||
+        "Unable to load telemetry sources."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadSources();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleCreate = async (event) => {
+    event.preventDefault();
+    const name = newName.trim();
+    if (!name) {
+      setError("Enter a name for the telemetry source.");
+      return;
+    }
+
+    setSubmitting(true);
+    setError("");
+    setNotice("");
+    setIssuedKey(null);
+    setCopied(false);
+
+    try {
+      const response = await axios.post(
+        `${API_URL}/telemetry/sources`,
+        { name },
+        authConfig()
+      );
+      const result = response.data;
+      setIssuedKey({
+        sourceId: result.source_id ?? result.id,
+        sourceName: result.name || name,
+        apiKey: result.api_key,
+        action: "created",
+      });
+      setNewName("");
+      setNotice("Telemetry source created. Save its API key now; it will not be shown again.");
+      await loadSources();
+    } catch (err) {
+      setError(
+        err?.response?.data?.detail ||
+        err?.message ||
+        "Unable to create telemetry source."
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleRotate = async (source) => {
+    const confirmed = window.confirm(
+      `Regenerate the API key for "${source.name}"?\n\nThe current key will stop working immediately. Update every collector using this source.`
+    );
+    if (!confirmed) return;
+
+    setActionId(source.id);
+    setError("");
+    setNotice("");
+    setIssuedKey(null);
+    setCopied(false);
+
+    try {
+      const response = await axios.post(
+        `${API_URL}/telemetry/sources/${source.id}/regenerate-key`,
+        {},
+        authConfig()
+      );
+      setIssuedKey({
+        sourceId: source.id,
+        sourceName: source.name,
+        apiKey: response.data.api_key,
+        action: "rotated",
+      });
+      setNotice("API key regenerated. Update every collector using this source immediately.");
+      await loadSources();
+    } catch (err) {
+      setError(
+        err?.response?.data?.detail ||
+        err?.message ||
+        "Unable to regenerate the API key."
+      );
+    } finally {
+      setActionId(null);
+    }
+  };
+
+  const handleRevoke = async (source) => {
+    const confirmed = window.confirm(
+      `Revoke "${source.name}"?\n\nCollectors using this source will no longer be able to submit telemetry. This action cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    setActionId(source.id);
+    setError("");
+    setNotice("");
+
+    try {
+      await axios.delete(
+        `${API_URL}/telemetry/sources/${source.id}`,
+        authConfig()
+      );
+      if (issuedKey?.sourceId === source.id) setIssuedKey(null);
+      setNotice(`Telemetry source "${source.name}" has been revoked.`);
+      await loadSources();
+    } catch (err) {
+      setError(
+        err?.response?.data?.detail ||
+        err?.message ||
+        "Unable to revoke telemetry source."
+      );
+    } finally {
+      setActionId(null);
+    }
+  };
+
+  const copyIssuedKey = async () => {
+    if (!issuedKey?.apiKey) return;
+    try {
+      await navigator.clipboard.writeText(issuedKey.apiKey);
+      setCopied(true);
+      setNotice("API key copied. Store it securely in the endpoint collector configuration.");
+    } catch {
+      setError("Clipboard access was blocked. Select and copy the key manually.");
+    }
+  };
+
+  const activeCount = sources.filter((source) => source.enabled).length;
+  const inactiveCount = sources.length - activeCount;
+  const formatDate = (value) => {
+    if (!value) return "Never";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
+  };
+
+  return (
+    <div className="min-h-screen bg-[#080808] px-6 py-8 text-white">
+      <div className="mx-auto max-w-[1500px] space-y-6">
+        <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.25em] text-red-500">
+              SIEM / TELEMETRY MANAGEMENT
+            </p>
+            <h1 className="mt-2 text-3xl font-bold">Log Sources</h1>
+            <p className="mt-2 max-w-2xl text-sm text-gray-500">
+              Manage authenticated telemetry producers connected to your SOC workspace.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => loadSources(true)}
+            disabled={loading}
+            className="border border-white/10 px-5 py-3 text-xs text-gray-400 transition hover:border-red-600 hover:text-white disabled:opacity-50"
+          >
+            {loading ? "Loading..." : "Refresh Sources"}
+          </button>
+        </div>
+
+        {error && (
+          <div className="border border-red-600/30 bg-red-600/5 px-5 py-4 text-sm text-red-400">
+            {error}
+          </div>
+        )}
+        {notice && (
+          <div className="border border-white/10 bg-white/[0.03] px-5 py-4 text-sm text-gray-300">
+            {notice}
+          </div>
+        )}
+
+        <div className="grid gap-4 sm:grid-cols-3">
+          <div className="border border-white/10 bg-[#0d0d0d] p-5">
+            <p className="text-[10px] uppercase tracking-wider text-gray-500">Total Sources</p>
+            <p className="mt-2 text-3xl font-semibold tabular-nums">{sources.length}</p>
+          </div>
+          <div className="border border-white/10 bg-[#0d0d0d] p-5">
+            <p className="text-[10px] uppercase tracking-wider text-gray-500">Enabled Sources</p>
+            <p className="mt-2 text-3xl font-semibold tabular-nums text-emerald-400">{activeCount}</p>
+          </div>
+          <div className="border border-white/10 bg-[#0d0d0d] p-5">
+            <p className="text-[10px] uppercase tracking-wider text-gray-500">Disabled Sources</p>
+            <p className="mt-2 text-3xl font-semibold tabular-nums text-gray-400">{inactiveCount}</p>
+          </div>
+        </div>
+
+        <form
+          onSubmit={handleCreate}
+          className="space-y-4 border border-white/10 bg-[#0d0d0d] p-6"
+        >
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wider text-gray-300">
+              Register a Log Source
+            </p>
+            <p className="mt-1 text-xs text-gray-600">
+              Create an authenticated source for a Linux endpoint, Windows agent, network device, or another telemetry producer.
+            </p>
+          </div>
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <input
+              value={newName}
+              onChange={(event) => setNewName(event.target.value)}
+              maxLength={150}
+              placeholder="Example: Linux Security Telemetry"
+              className="min-w-0 flex-1 border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none focus:border-red-600"
+            />
+            <button
+              type="submit"
+              disabled={submitting || !newName.trim()}
+              className="bg-red-600 px-6 py-3 text-xs font-semibold uppercase tracking-wider text-white transition hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {submitting ? "Creating..." : "Create Source"}
+            </button>
+          </div>
+        </form>
+
+        {issuedKey?.apiKey && (
+          <div className="border border-amber-500/30 bg-amber-500/[0.04] p-6">
+            <p className="text-xs font-semibold uppercase tracking-wider text-amber-400">
+              API Key {issuedKey.action === "created" ? "Created" : "Regenerated"}
+            </p>
+            <p className="mt-2 text-sm text-gray-300">
+              {issuedKey.sourceName} · Source ID {issuedKey.sourceId}
+            </p>
+            <p className="mt-2 text-xs text-amber-300">
+              This is the only time this key will be displayed. Save it in a protected endpoint configuration file. Do not put it in source code or screenshots.
+            </p>
+            <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+              <input
+                type="password"
+                readOnly
+                value={issuedKey.apiKey}
+                onFocus={(event) => event.target.select()}
+                aria-label="New telemetry API key"
+                className="min-w-0 flex-1 border border-white/10 bg-[#080808] px-4 py-3 font-mono text-xs text-gray-300"
+              />
+              <button
+                type="button"
+                onClick={copyIssuedKey}
+                className="border border-white/20 px-5 py-3 text-xs text-white transition hover:border-amber-500"
+              >
+                {copied ? "Copied" : "Copy API Key"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIssuedKey(null);
+                  setCopied(false);
+                }}
+                className="border border-white/10 px-5 py-3 text-xs text-gray-400 hover:text-white"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="overflow-hidden border border-white/10 bg-[#0d0d0d]">
+          <div className="flex flex-col justify-between gap-2 border-b border-white/10 px-6 py-5 sm:flex-row sm:items-center">
+            <div>
+              <h2 className="text-sm font-semibold">Registered Sources</h2>
+              <p className="mt-1 text-xs text-gray-600">
+                Source metadata from your authenticated telemetry configuration.
+              </p>
+            </div>
+            <span className="text-xs text-gray-500">{sources.length} source(s)</span>
+          </div>
+
+          {loading ? (
+            <div className="px-6 py-14 text-center text-sm text-gray-500">
+              Loading registered telemetry sources...
+            </div>
+          ) : sources.length === 0 ? (
+            <div className="px-6 py-14 text-center text-sm text-gray-500">
+              No telemetry sources are registered for this account.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[900px] text-left text-sm">
+                <thead className="border-b border-white/10 bg-[#0a0a0a] text-[10px] uppercase tracking-wider text-gray-600">
+                  <tr>
+                    <th className="px-6 py-4">Source</th>
+                    <th className="px-6 py-4">Source ID</th>
+                    <th className="px-6 py-4">Status</th>
+                    <th className="px-6 py-4">Last Seen</th>
+                    <th className="px-6 py-4">Created</th>
+                    <th className="px-6 py-4">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {sources.map((source) => (
+                    <tr key={source.id} className="transition hover:bg-white/[0.02]">
+                      <td className="px-6 py-5">
+                        <p className="font-medium text-gray-200">{source.name}</p>
+                        <p className="mt-1 text-[10px] text-gray-600">
+                          API key stored as a one-way hash
+                        </p>
+                      </td>
+                      <td className="px-6 py-5 font-mono text-xs text-gray-500">
+                        #{source.id}
+                      </td>
+                      <td className="px-6 py-5">
+                        <span className={`inline-flex items-center gap-2 text-xs ${source.enabled ? "text-emerald-400" : "text-gray-500"}`}>
+                          <span className={`h-1.5 w-1.5 rounded-full ${source.enabled ? "bg-emerald-500" : "bg-gray-600"}`} />
+                          {source.enabled ? "Enabled" : "Disabled"}
+                        </span>
+                      </td>
+                      <td className="px-6 py-5 text-xs text-gray-400">
+                        {formatDate(source.last_seen_at)}
+                      </td>
+                      <td className="px-6 py-5 text-xs text-gray-500">
+                        {formatDate(source.created_at)}
+                      </td>
+                      <td className="px-6 py-5">
+                        {source.enabled ? (
+                          <div className="flex items-center gap-3">
+                            <button
+                              type="button"
+                              onClick={() => handleRotate(source)}
+                              disabled={actionId === source.id}
+                              className="text-xs text-amber-400 transition hover:text-amber-300 disabled:opacity-40"
+                            >
+                              {actionId === source.id ? "Working..." : "Rotate Key"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRevoke(source)}
+                              disabled={actionId === source.id}
+                              className="text-xs text-red-400 transition hover:text-red-300 disabled:opacity-40"
+                            >
+                              Revoke
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-gray-600">No actions</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div className="border border-white/10 bg-[#0d0d0d] p-5">
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-300">
+            Security Notes
+          </p>
+          <ul className="mt-3 space-y-2 text-xs leading-relaxed text-gray-500">
+            <li>• Source listing is restricted to your personal account or client tenant.</li>
+            <li>• The backend stores only a SHA-256 hash of each API key.</li>
+            <li>• Regenerating a key immediately invalidates the previous key. Update the associated collectors before they send more events.</li>
+            <li>• Revoking a source disables further ingestion using its key. Existing persisted events are not deleted.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LinuxLogs() {
+  const [endpoints, setEndpoints] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [search, setSearch] = useState("");
+  const [severity, setSeverity] = useState("all");
+  const [source, setSource] = useState("all");
+  const [endpointId, setEndpointId] = useState("all");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [liveConnected, setLiveConnected] = useState(false);
+
+  const loadLinuxLogs = async (manual = false) => {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setError("Session expired. Please log in again.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      if (manual) setRefreshing(true);
+      setError("");
+      const config = { headers: { Authorization: `Bearer ${token}` } };
+      const [endpointRes, eventRes] = await Promise.all([
+        axios.get(`${API_URL}/client/endpoints`, config),
+        axios.get(`${API_URL}/client/security-events`, config),
+      ]);
+
+      const allEndpoints = Array.isArray(endpointRes.data?.endpoints)
+        ? endpointRes.data.endpoints : [];
+      const linuxEndpoints = allEndpoints.filter((endpoint) => {
+        const os = String(endpoint.os_name || "").toLowerCase();
+        return ["linux", "ubuntu", "debian", "rhel", "red hat",
+          "centos", "fedora", "rocky", "alma", "opensuse",
+          "open suse", "suse", "arch", "amazon linux", "alpine"]
+          .some((name) => os.includes(name));
+      });
+
+      const ids = new Set(linuxEndpoints.map((item) => String(item.id)));
+      const allEvents = Array.isArray(eventRes.data?.events)
+        ? eventRes.data.events : [];
+      const linuxEvents = allEvents.filter((event) =>
+        event.endpoint_asset_id != null &&
+        ids.has(String(event.endpoint_asset_id))
+      );
+
+      setEndpoints(linuxEndpoints);
+      setEvents(linuxEvents);
+      setLastUpdated(new Date());
+    } catch (err) {
+      setError(err?.response?.data?.detail ||
+        err?.message || "Unable to load Linux endpoint logs.");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadLinuxLogs();
+
+    // Retain polling as a fallback if the WebSocket is unavailable.
+    const pollTimer = setInterval(() => loadLinuxLogs(), 15000);
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      return () => clearInterval(pollTimer);
+    }
+
+    let socket = null;
+    let reconnectTimer = null;
+    let stopped = false;
+
+    const connect = () => {
+      if (stopped) return;
+
+      const protocol =
+        window.location.protocol === "https:" ? "wss:" : "ws:";
+      const host = API_URL.replace(/^https?:\/\//, "").replace(/\/$/, "");
+
+      socket = new WebSocket(
+        `${protocol}//${host}/ws/client/security-events?token=${encodeURIComponent(token)}`
+      );
+
+      socket.onopen = () => setLiveConnected(true);
+
+      socket.onmessage = (message) => {
+        try {
+          const incoming = JSON.parse(message.data);
+          if (incoming.type === "security_event") {
+            loadLinuxLogs();
+          }
+        } catch (err) {
+          console.error("Invalid Linux security event WebSocket payload:", err);
+        }
+      };
+
+      socket.onclose = () => {
+        setLiveConnected(false);
+        if (!stopped) reconnectTimer = setTimeout(connect, 3000);
+      };
+
+      socket.onerror = () => {
+        setLiveConnected(false);
+        socket?.close();
+      };
+    };
+
+    connect();
+
+    return () => {
+      stopped = true;
+      clearInterval(pollTimer);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (socket) socket.close();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const sources = [...new Set(events.map((e) => e.source).filter(Boolean))].sort();
+  const filtered = events.filter((event) => {
+    const text = [
+      event.event_type, event.source, event.message,
+      event.target, event.severity,
+    ].join(" ").toLowerCase();
+    return (
+      (!search.trim() || text.includes(search.trim().toLowerCase())) &&
+      (severity === "all" ||
+        String(event.severity || "INFO").toUpperCase() === severity) &&
+      (source === "all" || event.source === source) &&
+      (endpointId === "all" ||
+        String(event.endpoint_asset_id) === endpointId)
+    );
+  });
+  const highRisk = filtered.filter((e) =>
+    ["HIGH", "CRITICAL", "ERROR"].includes(
+      String(e.severity || "").toUpperCase()
+    )
+  ).length;
+
+  if (loading) {
+    return <div className="border border-white/10 bg-[#0d0d0d] p-12 text-center text-sm text-gray-400">Loading Linux endpoint logs...</div>;
+  }
+
+  return (
+    <div className="min-h-screen bg-[#080808] px-6 py-8 text-white">
+      <div className="mx-auto max-w-[1600px] space-y-6">
+        <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.25em] text-red-500">SIEM / ENDPOINT TELEMETRY</p>
+            <h1 className="mt-2 text-3xl font-bold">Linux Logs</h1>
+            <p className="mt-2 text-sm text-gray-500">Persisted security events from registered Linux endpoints.</p>
+            <p className="mt-1 text-[11px] text-gray-600"><span className={liveConnected ? "text-emerald-500" : "text-amber-500"}>{liveConnected ? "LIVE CONNECTED" : "RECONNECTING · POLLING FALLBACK"}</span> · 15-second fallback · Last updated: {lastUpdated ? lastUpdated.toLocaleTimeString() : "—"}</p>
+          </div>
+          <button type="button" onClick={() => loadLinuxLogs(true)} disabled={refreshing} className="border border-white/10 px-5 py-3 text-xs text-gray-400 hover:border-red-600 hover:text-white disabled:opacity-50">
+            {refreshing ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
+
+        {error && <div className="border border-red-600/20 bg-red-600/5 px-5 py-4 text-sm text-red-400">{error}</div>}
+
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <LogStat label="Linux Endpoints" value={endpoints.length} />
+          <LogStat label="Total Linux Logs" value={events.length} />
+          <LogStat label="High Risk" value={highRisk} critical={highRisk > 0} />
+          <LogStat label="Displayed Logs" value={filtered.length} />
+        </div>
+
+        <div className="grid gap-4 border border-white/10 bg-[#0d0d0d] p-6 md:grid-cols-2 xl:grid-cols-4">
+          <div>
+            <label className="text-[10px] uppercase text-gray-600">Search</label>
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search event or message..." className="mt-2 w-full border border-white/10 bg-[#080808] px-3 py-3 text-sm text-white outline-none focus:border-red-600" />
+          </div>
+          <div>
+            <label className="text-[10px] uppercase text-gray-600">Severity</label>
+            <select value={severity} onChange={(e) => setSeverity(e.target.value)} className="mt-2 w-full border border-white/10 bg-[#080808] px-3 py-3 text-sm text-gray-300">
+              <option value="all">All Levels</option>
+              {["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL", "WARNING", "ERROR"].map((v) => <option key={v}>{v}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-[10px] uppercase text-gray-600">Source</label>
+            <select value={source} onChange={(e) => setSource(e.target.value)} className="mt-2 w-full border border-white/10 bg-[#080808] px-3 py-3 text-sm text-gray-300">
+              <option value="all">All Sources</option>
+              {sources.map((v) => <option key={v}>{v}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-[10px] uppercase text-gray-600">Linux Endpoint</label>
+            <select value={endpointId} onChange={(e) => setEndpointId(e.target.value)} className="mt-2 w-full border border-white/10 bg-[#080808] px-3 py-3 text-sm text-gray-300">
+              <option value="all">All Linux Endpoints</option>
+              {endpoints.map((ep) => <option key={ep.id} value={String(ep.id)}>{ep.hostname || ep.endpoint_id || `Endpoint ${ep.id}`}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto border border-white/10 bg-[#0d0d0d]">
+          <table className="w-full min-w-[1100px] text-left text-sm">
+            <thead className="border-b border-white/10 bg-[#0a0a0a] text-[10px] uppercase text-gray-600">
+              <tr>
+                <th className="px-5 py-4">Time</th>
+                <th className="px-5 py-4">Severity</th>
+                <th className="px-5 py-4">Endpoint</th>
+                <th className="px-5 py-4">Source</th>
+                <th className="px-5 py-4">Event Type</th>
+                <th className="px-5 py-4">Message</th>
+                <th className="px-5 py-4">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/5">
+              {filtered.map((event) => {
+                const ep = endpoints.find((item) =>
+                  String(item.id) === String(event.endpoint_asset_id)
+                );
+                return (
+                  <tr key={event.id || event.event_id} className="hover:bg-white/[0.02]">
+                    <td className="whitespace-nowrap px-5 py-4 text-xs text-gray-500">{event.timestamp ? new Date(event.timestamp).toLocaleString() : "—"}</td>
+                    <td className="px-5 py-4"><LogLevel level={event.severity} /></td>
+                    <td className="px-5 py-4 text-xs text-gray-400">{ep?.hostname || ep?.endpoint_id || `Endpoint ${event.endpoint_asset_id}`}</td>
+                    <td className="px-5 py-4 text-xs text-gray-400">{event.source || "—"}</td>
+                    <td className="px-5 py-4 text-xs text-gray-300">{event.event_type || "—"}</td>
+                    <td className="max-w-xl px-5 py-4 text-xs text-gray-400">{event.message || "—"}</td>
+                    <td className="px-5 py-4 text-xs text-gray-500">{event.alert_status || "ACTIVE"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {filtered.length === 0 && (
+            <div className="px-6 py-12 text-center text-sm text-gray-400">
+              {events.length ? "No logs match the selected filters." : "No Linux endpoint logs have been received yet."}
+              <p className="mt-2 text-xs text-gray-600">Only persisted events linked to registered Linux endpoints are displayed.</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WindowsEvents() {
+  const [endpoints, setEndpoints] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [telemetrySources, setTelemetrySources] = useState([]);
+  const [sourceError, setSourceError] = useState("");
+  const [executionRuns, setExecutionRuns] = useState([]);
+  const [executionHistoryError, setExecutionHistoryError] = useState("");
+  const [search, setSearch] = useState("");
+  const [eventType, setEventType] = useState("all");
+  const [severity, setSeverity] = useState("all");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+
+  const loadWindowsEvents = async ({ silent = false } = {}) => {
+    try {
+      if (silent) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Your session has expired. Please login again.");
+      }
+
+      const config = {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      };
+
+      const [endpointResponse, eventResponse] = await Promise.all([
+        axios.get(`${API_URL}/client/endpoints`, config),
+        axios.get(`${API_URL}/client/security-events`, config),
+      ]);
+
+      try {
+        const sourceResponse = await axios.get(
+          `${API_URL}/telemetry/sources`,
+          config
+        );
+        setTelemetrySources(
+          Array.isArray(sourceResponse.data) ? sourceResponse.data : []
+        );
+        setSourceError("");
+      } catch (sourceErr) {
+        console.error("Windows telemetry source health fetch error:", sourceErr);
+        setTelemetrySources([]);
+        setSourceError(
+          "Telemetry source health is currently unavailable. Endpoint and event data are still available."
+        );
+      }
+
+      try {
+        const executionResponse = await axios.get(
+          `${API_URL}/telemetry/execution-runs?limit=50`,
+          config
+        );
+        setExecutionRuns(
+          Array.isArray(executionResponse.data?.runs)
+            ? executionResponse.data.runs
+            : []
+        );
+        setExecutionHistoryError("");
+      } catch (historyErr) {
+        console.error("Windows collector execution history fetch error:", historyErr);
+        setExecutionHistoryError(
+          "Collector execution history is currently unavailable."
+        );
+      }
+
+      const allEndpoints = Array.isArray(endpointResponse.data?.endpoints)
+        ? endpointResponse.data.endpoints
+        : [];
+
+      const allEvents = Array.isArray(eventResponse.data?.events)
+        ? eventResponse.data.events
+        : [];
+
+      const windowsEndpoints = allEndpoints.filter((endpoint) => {
+        const os = String(endpoint.os_name || "").toLowerCase();
+
+        return (
+          os.includes("windows") ||
+          os.includes("microsoft") ||
+          os.includes("win32") ||
+          os.includes("win64")
+        );
+      });
+
+      const windowsEndpointIds = new Set(
+        windowsEndpoints.map((endpoint) => endpoint.id)
+      );
+
+      const windowsEvents = allEvents.filter((event) =>
+        windowsEndpointIds.has(event.endpoint_asset_id)
+      );
+
+      setEndpoints(windowsEndpoints);
+      setEvents(windowsEvents);
+      setLastUpdated(new Date());
+    } catch (err) {
+      console.error("Windows Events fetch error:", err);
+
+      if (err.response?.status === 401) {
+        setError("Your session has expired. Please login again.");
+      } else if (err.response?.status === 403) {
+        setError("You are not authorized to view Windows Events.");
+      } else {
+        setError(
+          err.response?.data?.detail ||
+            err.message ||
+            "Unable to load Windows Events."
+        );
+      }
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadWindowsEvents();
+
+    const interval = setInterval(() => {
+      loadWindowsEvents({ silent: true });
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const endpointMap = new Map(
+    endpoints.map((endpoint) => [
+      endpoint.id,
+      endpoint.hostname ||
+        endpoint.endpoint_name ||
+        endpoint.name ||
+        endpoint.os_name ||
+        `Endpoint ${endpoint.id}`,
+    ])
+  );
+
+  const eventTypes = [...new Set(
+    events
+      .map((event) => event?.event_type)
+      .filter(Boolean)
+  )].sort();
+
+  const filteredEvents = events.filter((event) => {
+    const type = event?.event_type || "";
+
+    const haystack = [
+      event?.event_id,
+      event?.message,
+      event?.source,
+      event?.target,
+      event?.event_type,
+      event?.mitre_technique_id,
+      event?.mitre_technique_name,
+      endpointMap.get(event?.endpoint_asset_id),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    const matchesSearch =
+      !search.trim() ||
+      haystack.includes(search.trim().toLowerCase());
+
+    const matchesType =
+      eventType === "all" || type === eventType;
+
+    const matchesSeverity =
+      severity === "all" ||
+      String(event?.severity || "").toUpperCase() === severity;
+
+    return matchesSearch && matchesType && matchesSeverity;
+  });
+
+  const criticalEvents = events.filter(
+    (event) => String(event?.severity || "").toUpperCase() === "CRITICAL"
+  ).length;
+
+  const highEvents = events.filter(
+    (event) => String(event?.severity || "").toUpperCase() === "HIGH"
+  ).length;
+
+  const mediumEvents = events.filter(
+    (event) => String(event?.severity || "").toUpperCase() === "MEDIUM"
+  ).length;
+
+  const formatEventType = (value) =>
+    String(value || "—")
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+
+  const formatTime = (value) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+
+    return date.toLocaleString("en-IN", {
+      dateStyle: "medium",
+      timeStyle: "medium",
+    });
+  };
+
+  const severityClass = (value) => {
+    const normalized = String(value || "").toUpperCase();
+
+    if (normalized === "CRITICAL") {
+      return "border-red-500/30 bg-red-500/10 text-red-300";
+    }
+
+    if (normalized === "HIGH") {
+      return "border-orange-500/30 bg-orange-500/10 text-orange-300";
+    }
+
+    if (normalized === "MEDIUM") {
+      return "border-yellow-500/30 bg-yellow-500/10 text-yellow-300";
+    }
+
+    if (normalized === "LOW") {
+      return "border-blue-500/30 bg-blue-500/10 text-blue-300";
+    }
+
+    return "border-gray-700 bg-gray-900 text-gray-300";
+  };
+
+  const parseSourceTimestamp = (value) => {
+    if (!value) return null;
+
+    const timestamp = String(value);
+    const normalized = /(?:Z|[+-]\\d{2}:\\d{2})$/i.test(timestamp)
+      ? timestamp
+      : `${timestamp}Z`;
+    const date = new Date(normalized);
+
+    return Number.isNaN(date.getTime()) ? null : date;
+  };
+
+  const sourceMap = new Map(
+    telemetrySources.map((source) => [Number(source.id), source])
+  );
+
+  const latestRunBySource = new Map();
+  executionRuns.forEach((run) => {
+    const sourceId = Number(run.telemetry_source_id);
+    if (!latestRunBySource.has(sourceId)) {
+      latestRunBySource.set(sourceId, run);
+    }
+  });
+
+  const getSourceHealth = (endpoint) => {
+    if (sourceError) {
+      return { status: "Unknown", detail: "Telemetry source data unavailable" };
+    }
+
+    const source = sourceMap.get(Number(endpoint.telemetry_source_id));
+
+    if (!source) {
+      return { status: "Unknown", detail: "Telemetry source unavailable" };
+    }
+
+    if (!source.enabled) {
+      return { status: "Disabled", detail: "Telemetry source is disabled" };
+    }
+
+    const latestRun = latestRunBySource.get(Number(source.id));
+
+    if (latestRun) {
+      const runTime = parseSourceTimestamp(
+        latestRun.completed_at || latestRun.started_at
+      );
+
+      if (!runTime) {
+        return { status: "Unknown", detail: "Invalid execution timestamp" };
+      }
+
+      const ageMinutes = Math.max(0, (Date.now() - runTime.getTime()) / 60000);
+      const runStatus = String(latestRun.status || "").toUpperCase();
+
+      if (runStatus === "FAILED") {
+        return { status: "Offline", detail: `Latest execution failed · ${Math.floor(ageMinutes)} min ago` };
+      }
+
+      if (runStatus === "PARTIAL") {
+        return { status: "Degraded", detail: `Latest execution partially completed · ${Math.floor(ageMinutes)} min ago` };
+      }
+
+      if (ageMinutes <= 10) {
+        return { status: "Online", detail: `Latest execution ${Math.floor(ageMinutes)} min ago` };
+      }
+
+      if (ageMinutes <= 30) {
+        return { status: "Stale", detail: `Latest execution ${Math.floor(ageMinutes)} min ago` };
+      }
+
+      return { status: "Offline", detail: `No recent execution · ${Math.floor(ageMinutes)} min ago` };
+    }
+
+    if (!source.last_seen_at) {
+      return { status: "Never connected", detail: "No successful ingestion or execution report recorded" };
+    }
+
+    const lastSeen = parseSourceTimestamp(source.last_seen_at);
+
+    if (!lastSeen) {
+      return { status: "Unknown", detail: "Invalid last-ingestion timestamp" };
+    }
+
+    const ageMinutes = Math.max(0, (Date.now() - lastSeen.getTime()) / 60000);
+
+    if (ageMinutes <= 10) {
+      return { status: "Online", detail: `Last ingestion ${Math.floor(ageMinutes)} min ago · No execution report yet` };
+    }
+
+    if (ageMinutes <= 30) {
+      return { status: "Stale", detail: `Last ingestion ${Math.floor(ageMinutes)} min ago · No execution report yet` };
+    }
+
+    return { status: "Offline", detail: `Last ingestion ${Math.floor(ageMinutes)} min ago · No execution report yet` };
+  };
+
+  const healthStatusClass = (status) => {
+    if (status === "Online") return "border-green-500/30 bg-green-500/10 text-green-300";
+    if (status === "Stale" || status === "Degraded") return "border-yellow-500/30 bg-yellow-500/10 text-yellow-300";
+    if (status === "Offline" || status === "Disabled" || status === "Never connected") {
+      return "border-red-500/30 bg-red-500/10 text-red-300";
+    }
+    return "border-gray-700 bg-gray-900 text-gray-300";
+  };
+
+  const sourceHealth = endpoints.map((endpoint) => ({
+    endpoint,
+    health: getSourceHealth(endpoint),
+  }));
+
+  const sourceHealthCounts = ["Online", "Degraded", "Stale", "Offline", "Disabled"].map((status) => ({
+    status,
+    count: sourceHealth.filter((item) => item.health.status === status).length,
+  }));
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-white">
+            Windows Events
+          </h1>
+          <p className="mt-1 text-sm text-gray-400">
+            Persisted Windows endpoint security events collected from tenant-scoped endpoint telemetry.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadWindowsEvents({ silent: true })}
+          disabled={refreshing}
+          className="border border-white/10 bg-white/[0.03] px-4 py-2 text-sm text-gray-200 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="border border-white/10 bg-[#0d0d0d] p-5">
+        <div className="mb-4">
+          <h2 className="text-sm font-semibold text-white">
+            Windows Telemetry Health
+          </h2>
+          <p className="mt-1 text-xs text-gray-500">
+            Status is based on the latest collector execution report. Ingestion time is used as a fallback when no execution report exists.
+          </p>
+        </div>
+
+        {sourceError && (
+          <div className="mb-4 border border-yellow-500/20 bg-yellow-500/5 px-3 py-2 text-xs text-yellow-300">
+            {sourceError}
+          </div>
+        )}
+
+        <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+          {sourceHealthCounts.map(({ status, count }) => (
+            <div key={status} className="border border-white/10 bg-black/30 p-3">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">
+                {status}
+              </p>
+              <p className="mt-1 text-xl font-semibold text-white">{count}</p>
+            </div>
+          ))}
+        </div>
+
+        {sourceHealth.length === 0 ? (
+          <p className="py-4 text-sm text-gray-500">
+            No Windows endpoints are currently registered.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {sourceHealth.map(({ endpoint, health }) => (
+              <div
+                key={endpoint.id}
+                className="flex flex-col gap-2 border border-white/10 bg-black/20 p-3 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div>
+                  <p className="text-sm font-medium text-gray-200">
+                    {endpoint.hostname || endpoint.endpoint_name || endpoint.name || `Endpoint ${endpoint.id}`}
+                  </p>
+                  <p className="mt-1 text-xs text-gray-500">
+                    {endpoint.ip_address || "IP unavailable"} · Source ID: {endpoint.telemetry_source_id ?? "Unavailable"}
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span
+                    className={`inline-flex border px-2 py-1 text-[10px] uppercase tracking-wider ${healthStatusClass(health.status)}`}
+                  >
+                    {health.status}
+                  </span>
+                  <span className="text-xs text-gray-500">{health.detail}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d] p-5">
+        <div className="mb-4">
+          <h2 className="text-sm font-semibold text-white">Collector Execution History</h2>
+          <p className="mt-1 text-xs text-gray-500">
+            Latest persisted execution reports from registered Windows collectors.
+          </p>
+        </div>
+
+        {executionHistoryError && (
+          <div className="mb-4 border border-yellow-500/20 bg-yellow-500/5 px-3 py-2 text-xs text-yellow-300">
+            {executionHistoryError}
+          </div>
+        )}
+
+        {executionRuns.length === 0 ? (
+          <p className="py-5 text-center text-sm text-gray-500">
+            {executionHistoryError
+              ? "Execution history could not be loaded."
+              : "No collector execution reports are available yet."}
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-[1050px] w-full text-left">
+              <thead className="border-b border-white/10 bg-white/[0.02]">
+                <tr className="text-[10px] uppercase tracking-wider text-gray-500">
+                  <th className="px-3 py-3">Started</th>
+                  <th className="px-3 py-3">Endpoint</th>
+                  <th className="px-3 py-3">Status</th>
+                  <th className="px-3 py-3">Collected</th>
+                  <th className="px-3 py-3">Accepted</th>
+                  <th className="px-3 py-3">Duplicates</th>
+                  <th className="px-3 py-3">Errors</th>
+                  <th className="px-3 py-3">Duration</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {executionRuns.map((run) => {
+                  const status = String(run.status || "").toUpperCase();
+                  const statusClass =
+                    status === "SUCCESS"
+                      ? "border-green-500/30 bg-green-500/10 text-green-300"
+                      : status === "PARTIAL"
+                        ? "border-yellow-500/30 bg-yellow-500/10 text-yellow-300"
+                        : "border-red-500/30 bg-red-500/10 text-red-300";
+                  const start = parseSourceTimestamp(run.started_at);
+                  const finish = parseSourceTimestamp(run.completed_at);
+                  const duration = start && finish
+                    ? `${Math.max(0, Math.round((finish - start) / 1000))} sec`
+                    : "—";
+
+                  return (
+                    <tr key={run.id || run.run_id}>
+                      <td className="whitespace-nowrap px-3 py-3 text-xs text-gray-400">
+                        {formatTime(run.started_at)}
+                      </td>
+                      <td className="px-3 py-3 text-xs text-gray-200">
+                        {run.hostname || run.endpoint_id || `Endpoint ${run.endpoint_asset_id}`}
+                      </td>
+                      <td className="px-3 py-3">
+                        <span className={`inline-flex border px-2 py-1 text-[10px] uppercase ${statusClass}`}>
+                          {status || "UNKNOWN"}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3 text-xs tabular-nums text-gray-300">{run.collected_count}</td>
+                      <td className="px-3 py-3 text-xs tabular-nums text-gray-300">{run.accepted_count}</td>
+                      <td className="px-3 py-3 text-xs tabular-nums text-gray-300">{run.duplicate_count}</td>
+                      <td className="px-3 py-3 text-xs tabular-nums text-gray-300">{run.error_count}</td>
+                      <td className="px-3 py-3 text-xs text-gray-400">{duration}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+        {[
+          ["Windows Endpoints", endpoints.length],
+          ["Windows Events", events.length],
+          ["Critical", criticalEvents],
+          ["High", highEvents],
+          ["Medium", mediumEvents],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            className="border border-white/10 bg-[#0d0d0d] p-5"
+          >
+            <p className="text-[10px] uppercase tracking-wider text-gray-500">
+              {label}
+            </p>
+            <p className="mt-2 text-2xl font-semibold text-white">
+              {value}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <div className="border border-white/10 bg-[#0d0d0d] p-5">
+        <div className="mb-4">
+          <h2 className="text-sm font-semibold text-white">
+            Windows Event Activity
+          </h2>
+          <p className="mt-1 text-xs text-gray-500">
+            Only persisted Windows endpoint security telemetry is shown. No synthetic events are generated.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
+          <input
+            type="text"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search Windows events..."
+            className="border border-white/10 bg-black px-3 py-2 text-sm text-gray-200 outline-none placeholder:text-gray-600 focus:border-white/20"
+          />
+
+          <select
+            value={eventType}
+            onChange={(event) => setEventType(event.target.value)}
+            className="border border-white/10 bg-black px-3 py-2 text-sm text-gray-200 outline-none"
+          >
+            <option value="all">All event types</option>
+            {eventTypes.map((type) => (
+              <option key={type} value={type}>
+                {formatEventType(type)}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={severity}
+            onChange={(event) => setSeverity(event.target.value)}
+            className="border border-white/10 bg-black px-3 py-2 text-sm text-gray-200 outline-none"
+          >
+            <option value="all">All severities</option>
+            <option value="CRITICAL">Critical</option>
+            <option value="HIGH">High</option>
+            <option value="MEDIUM">Medium</option>
+            <option value="LOW">Low</option>
+            <option value="INFO">Info</option>
+          </select>
+
+          <div className="flex items-center justify-end text-xs text-gray-500">
+            {lastUpdated
+              ? `Updated ${formatTime(lastUpdated)}`
+              : "Not updated yet"}
+          </div>
+        </div>
+      </div>
+
+      <div className="overflow-hidden border border-white/10 bg-[#0d0d0d]">
+        <div className="overflow-x-auto">
+          <table className="min-w-[1250px] w-full text-left">
+            <thead className="border-b border-white/10 bg-white/[0.02]">
+              <tr className="text-[10px] uppercase tracking-wider text-gray-500">
+                <th className="px-5 py-4">Time</th>
+                <th className="px-5 py-4">Severity</th>
+                <th className="px-5 py-4">Event</th>
+                <th className="px-5 py-4">Endpoint</th>
+                <th className="px-5 py-4">Source</th>
+                <th className="px-5 py-4">Target</th>
+                <th className="px-5 py-4">Message</th>
+              </tr>
+            </thead>
+
+            <tbody className="divide-y divide-white/5">
+              {filteredEvents.map((event) => (
+                <tr key={event.id || event.event_id} className="align-top">
+                  <td className="whitespace-nowrap px-5 py-4 text-xs text-gray-400">
+                    {formatTime(event.timestamp)}
+                  </td>
+
+                  <td className="px-5 py-4">
+                    <span
+                      className={`inline-flex border px-2 py-1 text-[10px] uppercase tracking-wider ${severityClass(event.severity)}`}
+                    >
+                      {event.severity || "INFO"}
+                    </span>
+                  </td>
+
+                  <td className="px-5 py-4 text-sm text-gray-200">
+                    {formatEventType(event.event_type)}
+                  </td>
+
+                  <td className="px-5 py-4 text-xs text-gray-400">
+                    {endpointMap.get(event.endpoint_asset_id) || "—"}
+                  </td>
+
+                  <td className="px-5 py-4 text-xs text-gray-400">
+                    {event.source || "—"}
+                  </td>
+
+                  <td className="px-5 py-4 text-xs text-gray-400">
+                    {event.target || "—"}
+                  </td>
+
+                  <td className="max-w-xl px-5 py-4 text-xs leading-5 text-gray-400">
+                    {event.message || "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {!loading && filteredEvents.length === 0 && (
+            <div className="px-6 py-12 text-center">
+              <p className="text-sm text-gray-500">
+                {search.trim() || eventType !== "all" || severity !== "all"
+                  ? "No persisted Windows events match the current filters."
+                  : "No persisted Windows events are currently available."}
+              </p>
+            </div>
+          )}
+
+          {loading && (
+            <div className="px-6 py-12 text-center text-sm text-gray-500">
+              Loading Windows Events...
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function WindowsSecurity() {
+  const [endpoints, setEndpoints] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadWindowsSecurity = async (manual = false) => {
+    try {
+      manual ? setRefreshing(true) : setLoading(true);
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("Your session has expired. Please login again.");
+      }
+
+      const config = {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      };
+
+      const [endpointResponse, eventResponse] = await Promise.all([
+        axios.get(`${API_URL}/client/endpoints`, config),
+        axios.get(`${API_URL}/client/security-events`, config),
+      ]);
+
+      const allEndpoints = Array.isArray(endpointResponse.data?.endpoints)
+        ? endpointResponse.data.endpoints
+        : [];
+
+      const allEvents = Array.isArray(eventResponse.data?.events)
+        ? eventResponse.data.events
+        : [];
+
+      const windowsEndpoints = allEndpoints.filter((endpoint) => {
+        const os = String(endpoint.os_name || "").toLowerCase();
+
+        return (
+          os.includes("windows") ||
+          os.includes("microsoft") ||
+          os.includes("win32") ||
+          os.includes("win64")
+        );
+      });
+
+      const windowsEndpointIds = new Set(
+        windowsEndpoints.map((endpoint) => endpoint.id)
+      );
+
+      const windowsEvents = allEvents.filter((event) =>
+        windowsEndpointIds.has(event.endpoint_asset_id)
+      );
+
+      setEndpoints(windowsEndpoints);
+      setEvents(windowsEvents);
+    } catch (err) {
+      console.error("Windows security load error:", err);
+
+      if (err.response?.status === 401) {
+        setError("Your session has expired. Please login again.");
+      } else if (err.response?.status === 403) {
+        setError("You are not authorized to view Windows security data.");
+      } else {
+        setError(
+          err.response?.data?.detail ||
+            err.message ||
+            "Unable to load Windows security data."
+        );
+      }
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadWindowsSecurity();
+
+    const interval = setInterval(() => {
+      loadWindowsSecurity(true);
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const online = endpoints.filter((endpoint) =>
+    ["online", "active", "up", "alive"].includes(
+      String(endpoint.status || "").toLowerCase()
+    )
+  ).length;
+
+  const offline = endpoints.filter((endpoint) =>
+    ["offline", "down", "failed", "error"].includes(
+      String(endpoint.status || "").toLowerCase()
+    )
+  ).length;
+
+  const criticalEvents = events.filter(
+    (event) => String(event.severity || "").toUpperCase() === "CRITICAL"
+  ).length;
+
+  const highEvents = events.filter(
+    (event) => String(event.severity || "").toUpperCase() === "HIGH"
+  ).length;
+
+  const statusLabel = (status) => {
+    const value = String(status || "").toLowerCase();
+
+    if (["online", "active", "up", "alive"].includes(value)) {
+      return "ONLINE";
+    }
+
+    if (["offline", "down", "failed", "error"].includes(value)) {
+      return "OFFLINE";
+    }
+
+    return "UNKNOWN";
+  };
+
+  const statusClass = (status) => {
+    const value = String(status || "").toLowerCase();
+
+    if (["online", "active", "up", "alive"].includes(value)) {
+      return "text-green-400";
+    }
+
+    if (["offline", "down", "failed", "error"].includes(value)) {
+      return "text-red-400";
+    }
+
+    return "text-yellow-400";
+  };
+
+  const severityClass = (severity) => {
+    const value = String(severity || "").toUpperCase();
+
+    if (value === "CRITICAL") {
+      return "text-red-400";
+    }
+
+    if (value === "HIGH") {
+      return "text-orange-400";
+    }
+
+    if (value === "MEDIUM") {
+      return "text-yellow-400";
+    }
+
+    if (value === "LOW") {
+      return "text-blue-400";
+    }
+
+    return "text-gray-400";
+  };
+
+  return (
+    <div>
+      <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-red-500">
+            Server Security
+          </p>
+
+          <h1 className="mt-2 text-3xl font-bold">
+            Windows Security
+          </h1>
+
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-500">
+            Monitor tenant-scoped Windows endpoints and their real security
+            telemetry received through the SOC Platform.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadWindowsSecurity(true)}
+          disabled={loading || refreshing}
+          className="border border-white/10 bg-[#111111] px-4 py-2 text-sm text-gray-300 transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="mt-6 border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-400">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="mt-8 border border-white/10 bg-[#0d0d0d] p-10 text-center text-sm text-gray-500">
+          Loading Windows security data...
+        </div>
+      ) : (
+        <>
+          <div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Windows Endpoints
+              </p>
+              <p className="mt-2 text-3xl font-bold">{endpoints.length}</p>
+              <p className="mt-1 text-xs text-gray-600">
+                Tenant-scoped endpoint assets
+              </p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Online
+              </p>
+              <p className="mt-2 text-3xl font-bold text-green-400">
+                {online}
+              </p>
+              <p className="mt-1 text-xs text-gray-600">
+                Endpoint agent status
+              </p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Security Events
+              </p>
+              <p className="mt-2 text-3xl font-bold">{events.length}</p>
+              <p className="mt-1 text-xs text-gray-600">
+                Persisted Windows telemetry
+              </p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Critical / High
+              </p>
+              <p className="mt-2 text-3xl font-bold text-red-400">
+                {criticalEvents + highEvents}
+              </p>
+              <p className="mt-1 text-xs text-gray-600">
+                Critical {criticalEvents} · High {highEvents}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-8 border border-white/10 bg-[#0d0d0d] p-5">
+            <div className="flex items-start gap-3">
+              <span
+                className={`mt-1 h-2 w-2 shrink-0 rounded-full ${
+                  events.length > 0 ? "bg-green-500" : "bg-yellow-500"
+                }`}
+              />
+
+              <div>
+                <p
+                  className={`text-xs uppercase tracking-wider ${
+                    events.length > 0 ? "text-green-500" : "text-yellow-500"
+                  }`}
+                >
+                  Windows Security Telemetry
+                </p>
+
+                {events.length > 0 ? (
+                  <>
+                    <p className="mt-2 text-sm leading-6 text-gray-400">
+                      Real Windows security events are being received and
+                      persisted for the tenant-scoped endpoint assets.
+                    </p>
+
+                    <p className="mt-2 text-xs text-gray-600">
+                      {events.length} persisted event
+                      {events.length === 1 ? "" : "s"} available from the
+                      connected endpoint telemetry pipeline.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="mt-2 text-sm leading-6 text-gray-400">
+                      No Windows security events have been received for the
+                      tenant-scoped endpoints yet.
+                    </p>
+
+                    <p className="mt-2 text-xs text-gray-600">
+                      No event counts are fabricated. Counts will appear when
+                      the connected Windows security telemetry source sends
+                      persisted events.
+                    </p>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-8 border border-white/10 bg-[#0d0d0d]">
+            <div className="border-b border-white/10 px-6 py-5">
+              <p className="text-sm font-semibold">
+                Recent Windows Security Events
+              </p>
+
+              <p className="mt-1 text-xs text-gray-600">
+                Real persisted security events associated with Windows
+                endpoint assets.
+              </p>
+            </div>
+
+            {events.length === 0 ? (
+              <div className="px-6 py-12 text-center">
+                <p className="text-sm text-gray-400">
+                  No Windows security events recorded.
+                </p>
+
+                <p className="mt-2 text-xs text-gray-600">
+                  This section will populate automatically when endpoint
+                  telemetry is received.
+                </p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[1100px] text-left">
+                  <thead>
+                    <tr className="border-b border-white/10 text-[10px] uppercase tracking-wider text-gray-600">
+                      <th className="px-6 py-4">Time</th>
+                      <th className="px-6 py-4">Event Type</th>
+                      <th className="px-6 py-4">Severity</th>
+                      <th className="px-6 py-4">Source</th>
+                      <th className="px-6 py-4">Message</th>
+                      <th className="px-6 py-4">Status</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {events.slice(0, 100).map((event) => (
+                      <tr
+                        key={event.id}
+                        className="border-b border-white/5 transition hover:bg-white/[0.02]"
+                      >
+                        <td className="px-6 py-5 text-xs text-gray-500">
+                          {event.timestamp
+                            ? new Date(event.timestamp).toLocaleString()
+                            : "Unknown"}
+                        </td>
+
+                        <td className="px-6 py-5 text-sm text-gray-300">
+                          {event.event_type || "Unknown"}
+                        </td>
+
+                        <td className="px-6 py-5">
+                          <span
+                            className={`text-xs font-semibold ${severityClass(
+                              event.severity
+                            )}`}
+                          >
+                            {String(event.severity || "INFO").toUpperCase()}
+                          </span>
+                        </td>
+
+                        <td className="px-6 py-5 text-sm text-gray-400">
+                          {event.source || "Unknown"}
+                        </td>
+
+                        <td className="max-w-[480px] px-6 py-5 text-sm text-gray-400">
+                          <div className="truncate" title={event.message || ""}>
+                            {event.message || "No message"}
+                          </div>
+                        </td>
+
+                        <td className="px-6 py-5 text-xs text-gray-500">
+                          {event.alert_status || "ACTIVE"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-8 border border-white/10 bg-[#0d0d0d]">
+            <div className="border-b border-white/10 px-6 py-5">
+              <p className="text-sm font-semibold">
+                Windows Endpoint Inventory
+              </p>
+
+              <p className="mt-1 text-xs text-gray-600">
+                Real Windows endpoint assets registered through the telemetry
+                pipeline.
+              </p>
+            </div>
+
+            {endpoints.length === 0 ? (
+              <div className="px-6 py-12 text-center">
+                <p className="text-sm text-gray-400">
+                  No Windows endpoint assets discovered.
+                </p>
+
+                <p className="mt-2 text-xs text-gray-600">
+                  Windows Security will populate when a Windows endpoint is
+                  registered in your environment.
+                </p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[1100px] text-left">
+                  <thead>
+                    <tr className="border-b border-white/10 text-[10px] uppercase tracking-wider text-gray-600">
+                      <th className="px-6 py-4">Endpoint</th>
+                      <th className="px-6 py-4">IP Address</th>
+                      <th className="px-6 py-4">Operating System</th>
+                      <th className="px-6 py-4">Status</th>
+                      <th className="px-6 py-4">Telemetry Source</th>
+                      <th className="px-6 py-4">Last Seen</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {endpoints.map((endpoint) => (
+                      <tr
+                        key={endpoint.id}
+                        className="border-b border-white/5 transition hover:bg-white/[0.02]"
+                      >
+                        <td className="px-6 py-5">
+                          <p className="text-sm font-medium text-gray-200">
+                            {endpoint.hostname ||
+                              endpoint.endpoint_id ||
+                              "Unknown"}
+                          </p>
+
+                          <p className="mt-1 break-all text-xs text-gray-600">
+                            {endpoint.endpoint_id || "No endpoint ID"}
+                          </p>
+                        </td>
+
+                        <td className="px-6 py-5 text-sm text-gray-400">
+                          {endpoint.ip_address || "Unknown"}
+                        </td>
+
+                        <td className="px-6 py-5 text-sm text-gray-400">
+                          {endpoint.os_name || "Unknown"}
+                          {endpoint.os_version
+                            ? ` ${endpoint.os_version}`
+                            : ""}
+                        </td>
+
+                        <td className="px-6 py-5">
+                          <span
+                            className={`text-xs font-semibold ${statusClass(
+                              endpoint.status
+                            )}`}
+                          >
+                            {statusLabel(endpoint.status)}
+                          </span>
+                        </td>
+
+                        <td className="px-6 py-5 text-sm text-gray-400">
+                          {endpoint.telemetry_source_id || "Unknown"}
+                        </td>
+
+                        <td className="px-6 py-5 text-xs text-gray-500">
+                          {endpoint.last_seen
+                            ? new Date(endpoint.last_seen).toLocaleString()
+                            : "Unknown"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ServerDashboard() {
+  const [servers, setServers] = useState([]);
+  const [scope, setScope] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadDashboard = async (manual = false) => {
+    try {
+      manual ? setRefreshing(true) : setLoading(true);
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("No authentication token found.");
+      }
+
+      const response = await axios.get(`${API_URL}/client/servers`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      setServers(
+        Array.isArray(response.data?.servers)
+          ? response.data.servers
+          : []
+      );
+      setScope(response.data?.scope || "");
+    } catch (err) {
+      console.error("Server dashboard load error:", err);
+
+      if (err.response?.status === 401) {
+        setError("Your session has expired. Please login again.");
+      } else if (err.response?.status === 403) {
+        setError("You are not authorized to view server data.");
+      } else {
+        setError(
+          err.response?.data?.detail ||
+            err.message ||
+            "Unable to load server dashboard."
+        );
+      }
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadDashboard();
+
+    const interval = setInterval(() => {
+      loadDashboard(true);
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const online = servers.filter(
+    (server) =>
+      ["up", "online", "active"].includes(
+        String(server.host_status || "").toLowerCase()
+      )
+  ).length;
+
+  const offline = servers.filter(
+    (server) =>
+      ["down", "offline", "failed", "error"].includes(
+        String(server.host_status || "").toLowerCase()
+      )
+  ).length;
+
+  const unknown = Math.max(servers.length - online - offline, 0);
+
+  const totalPorts = servers.reduce(
+    (total, server) => total + Number(server.open_port_count || 0),
+    0
+  );
+
+  const osCounts = servers.reduce((acc, server) => {
+    const os = server.os_name || "Unknown";
+    acc[os] = (acc[os] || 0) + 1;
+    return acc;
+  }, {});
+
+  const topOperatingSystems = Object.entries(osCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6);
+
+  const statusClass = (status) => {
+    const value = String(status || "").toLowerCase();
+
+    if (["up", "online", "active"].includes(value)) {
+      return "text-green-400";
+    }
+
+    if (["down", "offline", "failed", "error"].includes(value)) {
+      return "text-red-400";
+    }
+
+    return "text-gray-400";
+  };
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) return "—";
+
+    return date.toLocaleString();
+  };
+
+  return (
+    <div>
+      <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-red-500">
+            Server Security
+          </p>
+
+          <h1 className="mt-2 text-3xl font-bold">
+            Server Dashboard
+          </h1>
+
+          <p className="mt-2 max-w-3xl text-sm text-gray-500">
+            Real-time overview of authenticated server assets discovered
+            within your client scope.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadDashboard(true)}
+          disabled={refreshing || loading}
+          className="border border-white/10 bg-[#111111] px-4 py-2 text-sm text-gray-300 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="mt-6 border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-400">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="mt-8 border border-white/10 bg-[#0d0d0d] p-10 text-center text-sm text-gray-500">
+          Loading server security data...
+        </div>
+      ) : (
+        <>
+          <div className="mt-8 grid gap-4 md:grid-cols-4">
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Total Servers
+              </p>
+              <p className="mt-2 text-3xl font-bold">{servers.length}</p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Online
+              </p>
+              <p className="mt-2 text-3xl font-bold text-green-400">
+                {online}
+              </p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Offline
+              </p>
+              <p className="mt-2 text-3xl font-bold text-red-400">
+                {offline}
+              </p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Open Ports
+              </p>
+              <p className="mt-2 text-3xl font-bold">{totalPorts}</p>
+            </div>
+          </div>
+
+          <div className="mt-6 grid gap-6 lg:grid-cols-3">
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <h2 className="font-semibold text-white">
+                Server Health
+              </h2>
+
+              <div className="mt-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-400">Online</span>
+                  <span className="font-semibold text-green-400">
+                    {online}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-400">Offline</span>
+                  <span className="font-semibold text-red-400">
+                    {offline}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-400">Unknown</span>
+                  <span className="font-semibold text-gray-400">
+                    {unknown}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5 lg:col-span-2">
+              <h2 className="font-semibold text-white">
+                Operating Systems
+              </h2>
+
+              {topOperatingSystems.length === 0 ? (
+                <p className="mt-5 text-sm text-gray-500">
+                  No operating-system data available.
+                </p>
+              ) : (
+                <div className="mt-5 space-y-3">
+                  {topOperatingSystems.map(([os, count]) => (
+                    <div
+                      key={os}
+                      className="flex items-center justify-between border-b border-white/5 pb-3"
+                    >
+                      <span className="truncate pr-4 text-sm text-gray-300">
+                        {os}
+                      </span>
+                      <span className="font-semibold text-gray-200">
+                        {count}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-6 overflow-hidden border border-white/10 bg-[#0d0d0d]">
+            <div className="border-b border-white/10 px-5 py-4">
+              <h2 className="font-semibold text-white">
+                Server Security Overview
+              </h2>
+              <p className="mt-1 text-xs text-gray-600">
+                {servers.length} persisted server asset
+                {servers.length === 1 ? "" : "s"} in {scope || "personal"} scope
+              </p>
+            </div>
+
+            {servers.length === 0 ? (
+              <div className="p-10 text-center text-sm text-gray-500">
+                No persisted server assets are available in your scope.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[900px] text-left text-sm">
+                  <thead className="border-b border-white/10 text-xs uppercase tracking-wider text-gray-500">
+                    <tr>
+                      <th className="px-5 py-4">Server</th>
+                      <th className="px-5 py-4">IP</th>
+                      <th className="px-5 py-4">Status</th>
+                      <th className="px-5 py-4">OS</th>
+                      <th className="px-5 py-4">Ports</th>
+                      <th className="px-5 py-4">Last Seen</th>
+                    </tr>
+                  </thead>
+
+                  <tbody className="divide-y divide-white/5">
+                    {servers.map((server) => (
+                      <tr
+                        key={server.id}
+                        className="hover:bg-white/[0.02]"
+                      >
+                        <td className="px-5 py-4">
+                          <div className="font-medium text-gray-200">
+                            {server.hostname ||
+                              server.target ||
+                              `Server #${server.id}`}
+                          </div>
+                          <div className="mt-1 text-xs text-gray-600">
+                            {server.target || "—"}
+                          </div>
+                        </td>
+
+                        <td className="px-5 py-4 text-gray-400">
+                          {server.ip_address || "—"}
+                        </td>
+
+                        <td className={`px-5 py-4 font-medium ${statusClass(server.host_status)}`}>
+                          {server.host_status || "Unknown"}
+                        </td>
+
+                        <td className="max-w-[260px] truncate px-5 py-4 text-gray-400">
+                          {server.os_name || "Unknown"}
+                        </td>
+
+                        <td className="px-5 py-4 text-gray-300">
+                          {Number(server.open_port_count || 0)}
+                        </td>
+
+                        <td className="px-5 py-4 text-gray-500">
+                          {formatDate(server.last_seen)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Servers() {
+  const [servers, setServers] = useState([]);
+  const [scope, setScope] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadServers = async (manual = false) => {
+    try {
+      if (manual) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      setError("");
+
+      const token = localStorage.getItem("token");
+
+      if (!token) {
+        throw new Error("No authentication token found.");
+      }
+
+      const response = await axios.get(
+        `${API_URL}/client/servers`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setServers(
+        Array.isArray(response.data?.servers)
+          ? response.data.servers
+          : []
+      );
+      setScope(response.data?.scope || "");
+    } catch (err) {
+      console.error("Servers load error:", err);
+
+      if (err.response?.status === 401) {
+        setError("Your session has expired. Please login again.");
+      } else if (err.response?.status === 403) {
+        setError("You are not authorized to view servers.");
+      } else {
+        setError(
+          err.response?.data?.detail ||
+            err.message ||
+            "Unable to load servers."
+        );
+      }
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadServers();
+
+    const interval = setInterval(() => {
+      loadServers(true);
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) return "—";
+
+    return date.toLocaleString();
+  };
+
+  const getStatusClass = (status) => {
+    const normalized = String(status || "").toLowerCase();
+
+    if (["up", "online", "active"].includes(normalized)) {
+      return "bg-green-500/10 text-green-400 border-green-500/20";
+    }
+
+    if (["down", "offline", "failed", "error"].includes(normalized)) {
+      return "bg-red-500/10 text-red-400 border-red-500/20";
+    }
+
+    return "bg-gray-500/10 text-gray-400 border-gray-500/20";
+  };
+
+  const totalPorts = servers.reduce(
+    (total, server) => total + Number(server.open_port_count || 0),
+    0
+  );
+
+  const onlineServers = servers.filter(
+    (server) => ["up", "online", "active"].includes(
+      String(server.host_status || "").toLowerCase()
+    )
+  ).length;
+
+
+  // ASSET_OBSERVATION_AGE
+  const observationNow = Date.now();
+  const observationTimes = servers.map((asset) => {
+    if (!asset.last_seen) return null;
+    const raw = String(asset.last_seen);
+    const timestamp = Date.parse(
+      /(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(raw) ? raw : `${raw}Z`
+    );
+    return Number.isFinite(timestamp) ? timestamp : null;
+  });
+  const pastObservations = observationTimes.filter(
+    (timestamp) => timestamp !== null && timestamp <= observationNow
+  );
+  const newestObservation = pastObservations.length
+    ? Math.max(...pastObservations)
+    : null;
+  const missingObservationCount = observationTimes.filter(
+    (timestamp) => timestamp === null
+  ).length;
+  const futureObservationCount = observationTimes.filter(
+    (timestamp) => timestamp !== null && timestamp > observationNow
+  ).length;
+
+  const observationAge = (() => {
+    if (newestObservation === null) return "No valid past timestamp";
+    const seconds = Math.floor((observationNow - newestObservation) / 1000);
+    if (seconds < 60) return "Less than a minute ago";
+    if (seconds < 3600) return `${Math.floor(seconds / 60)} minute(s) ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)} hour(s) ago`;
+    return `${Math.floor(seconds / 86400)} day(s) ago`;
+  })();
+
+
+  return (
+    <div>
+
+      <div className="mb-6 border border-yellow-600/30 bg-yellow-600/5 p-5">
+        <p className="text-sm font-semibold text-yellow-400">
+          Stored observations do not verify current availability
+        </p>
+        <p className="mt-2 text-sm leading-6 text-gray-300">
+          Server status reflects the stored discovery observation. A host observed UP during a scan is not proof of current availability. Page refresh does not run another discovery scan.
+        </p>
+        {!loading && !error && (
+          <div className="mt-3 space-y-1 text-xs leading-5 text-gray-400">
+            <p>Newest observation in this result: {observationAge}.</p>
+            <p>
+              Missing or invalid observation timestamps: {missingObservationCount}.
+            </p>
+            {futureObservationCount > 0 && (
+              <p className="text-yellow-400">
+                Future-dated observations: {futureObservationCount}.
+                Check the source clock.
+              </p>
+            )}
+            <p>
+              Timestamp age is shown as evidence; no automatic offline
+              classification is inferred from missing reports.
+            </p>
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-red-500">
+            Asset Management
+          </p>
+
+          <h1 className="mt-2 text-3xl font-bold">
+            Servers
+          </h1>
+
+          <p className="mt-2 max-w-3xl text-sm text-gray-500">
+            Verified server assets materialized from your authenticated Asset
+            Discovery runs. Only real discovered host data is displayed.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadServers(true)}
+          disabled={refreshing || loading}
+          className="border border-white/10 bg-[#111111] px-4 py-2 text-sm text-gray-300 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="mt-6 border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-400">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="mt-8 border border-white/10 bg-[#0d0d0d] p-10 text-center text-sm text-gray-500">
+          Loading verified servers...
+        </div>
+      ) : (
+        <>
+          <div className="mt-8 grid gap-4 md:grid-cols-4">
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Total Servers
+              </p>
+              <p className="mt-2 text-3xl font-bold">{servers.length}</p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Observed Up
+              </p>
+              <p className="mt-2 text-3xl font-bold">{onlineServers}</p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Open Ports
+              </p>
+              <p className="mt-2 text-3xl font-bold">{totalPorts}</p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Scope
+              </p>
+              <p className="mt-2 text-lg font-semibold capitalize">
+                {scope || "personal"}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-8 overflow-hidden border border-white/10 bg-[#0d0d0d]">
+            <div className="border-b border-white/10 px-5 py-4">
+              <h2 className="font-semibold text-white">
+                Discovered Servers
+              </h2>
+              <p className="mt-1 text-xs text-gray-600">
+                {servers.length} persisted server asset{servers.length === 1 ? "" : "s"} in your authenticated scope
+              </p>
+            </div>
+
+            {servers.length === 0 ? (
+              <div className="p-10 text-center text-sm text-gray-500">
+                No persisted server assets are available in your scope.
+                Run Asset Discovery against an eligible target to populate
+                this inventory.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[1250px] text-left text-sm">
+                  <thead className="border-b border-white/10 text-xs uppercase tracking-wider text-gray-500">
+                    <tr>
+                      <th className="px-5 py-4">Server</th>
+                      <th className="px-5 py-4">IP Address</th>
+                      <th className="px-5 py-4">Observed Status</th>
+                      <th className="px-5 py-4">OS</th>
+                      <th className="px-5 py-4">Open Ports</th>
+                      <th className="px-5 py-4">Assessment</th>
+                      <th className="px-5 py-4">Last Observed</th>
+                    </tr>
+                  </thead>
+
+                  <tbody className="divide-y divide-white/5">
+                    {servers.map((server) => {
+                      const ports = Array.isArray(server.services?.ports)
+                        ? server.services.ports
+                        : [];
+
+                      return (
+                        <tr
+                          key={server.id}
+                          className="hover:bg-white/[0.02]"
+                        >
+                          <td className="px-5 py-4">
+                            <div className="font-medium text-gray-200">
+                              {server.hostname || server.target || "Unnamed server"}
+                            </div>
+                            <div className="mt-1 text-xs text-gray-600">
+                              Target: {server.target || "—"}
+                            </div>
+                          </td>
+
+                          <td className="px-5 py-4 font-mono text-xs text-gray-400">
+                            {server.ip_address || "—"}
+                          </td>
+
+                          <td className="px-5 py-4">
+                            <span
+                              className={`border px-2 py-1 text-xs ${getStatusClass(
+                                server.host_status
+                              )}`}
+                            >
+                              {server.host_status || "unknown"}
+                            </span>
+                          </td>
+
+                          <td className="px-5 py-4 text-gray-400">
+                            {server.os_name || "Not detected"}
+                          </td>
+
+                          <td className="px-5 py-4">
+                            <div className="font-semibold text-gray-300">
+                              {Number(server.open_port_count || 0)}
+                            </div>
+
+                            {ports.length > 0 && (
+                              <div className="mt-2 flex flex-wrap gap-1">
+                                {ports.slice(0, 8).map((port) => (
+                                  <span
+                                    key={`${server.id}-${port.protocol}-${port.port}`}
+                                    className="border border-white/10 bg-white/[0.02] px-2 py-0.5 font-mono text-[10px] text-gray-500"
+                                  >
+                                    {port.port}/{port.protocol}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+
+                          <td className="px-5 py-4 text-xs text-gray-500">
+                            #{server.assessment_id}
+                          </td>
+
+                          <td className="px-5 py-4 text-xs text-gray-500">
+                            {formatDate(server.last_seen)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function AssetInventory() {
+  const [assets, setAssets] = useState([]);
+  const [scope, setScope] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadAssets = async (manual = false) => {
+    try {
+      if (manual) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      setError("");
+
+      const token = localStorage.getItem("token");
+      if (!token) {
+        throw new Error("No authentication token found.");
+      }
+
+      const response = await axios.get(
+        `${API_URL}/client/asset-inventory`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setAssets(
+        Array.isArray(response.data?.assets)
+          ? response.data.assets
+          : []
+      );
+      setScope(response.data?.scope || "");
+    } catch (err) {
+      console.error("Asset inventory load error:", err);
+
+      if (err.response?.status === 401) {
+        setError("Your session has expired. Please login again.");
+      } else if (err.response?.status === 403) {
+        setError("You are not authorized to view asset inventory.");
+      } else {
+        setError(
+          err.response?.data?.detail ||
+            err.message ||
+            "Unable to load asset inventory."
+        );
+      }
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadAssets();
+
+    const interval = setInterval(() => {
+      loadAssets(true);
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const codeAssessments = assets.filter(
+    (asset) => asset.asset_type === "Code Assessment"
+  ).length;
+
+  const targetAssessments = assets.filter(
+    (asset) => asset.asset_type === "Target Assessment"
+  ).length;
+
+  const totalFindings = assets.reduce(
+    (total, asset) => total + Number(asset.finding_count || 0),
+    0
+  );
+
+  const statusClass = (value) => {
+    const status = String(value || "unknown").toLowerCase();
+
+    if (["active", "completed", "complete", "success", "ready"].includes(status)) {
+      return "bg-green-500/10 text-green-400 border-green-500/20";
+    }
+
+    if (["running", "queued", "pending", "in_progress", "in-progress"].includes(status)) {
+      return "bg-yellow-500/10 text-yellow-400 border-yellow-500/20";
+    }
+
+    if (["failed", "error", "cancelled", "canceled"].includes(status)) {
+      return "bg-red-500/10 text-red-400 border-red-500/20";
+    }
+
+    return "bg-gray-500/10 text-gray-400 border-gray-500/20";
+  };
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "—";
+
+    return date.toLocaleString();
+  };
+
+  return (
+    <div>
+      <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-red-500">
+            Asset Management
+          </p>
+
+          <h1 className="mt-2 text-3xl font-bold">
+            Asset Inventory
+          </h1>
+
+          <p className="mt-2 max-w-3xl text-sm text-gray-500">
+            Verified inventory derived from your persisted VAPT assessments.
+            No synthetic host, IP, operating-system, or discovery data is shown.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadAssets(true)}
+          disabled={refreshing || loading}
+          className="border border-white/10 bg-[#111111] px-4 py-2 text-sm text-gray-300 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="mt-6 border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-400">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="mt-8 border border-white/10 bg-[#0d0d0d] p-10 text-center text-sm text-gray-500">
+          Loading verified asset inventory...
+        </div>
+      ) : (
+        <>
+          <div className="mt-8 grid gap-4 md:grid-cols-4">
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Total Assets
+              </p>
+              <p className="mt-2 text-3xl font-bold">{assets.length}</p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Target Assessments
+              </p>
+              <p className="mt-2 text-3xl font-bold">{targetAssessments}</p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Code Assessments
+              </p>
+              <p className="mt-2 text-3xl font-bold">{codeAssessments}</p>
+            </div>
+
+            <div className="border border-white/10 bg-[#0d0d0d] p-5">
+              <p className="text-xs uppercase tracking-wider text-gray-500">
+                Findings
+              </p>
+              <p className="mt-2 text-3xl font-bold">{totalFindings}</p>
+            </div>
+          </div>
+
+          <div className="mt-8 overflow-hidden border border-white/10 bg-[#0d0d0d]">
+            <div className="border-b border-white/10 px-5 py-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="font-semibold text-white">
+                    Verified Inventory
+                  </h2>
+                  <p className="mt-1 text-xs text-gray-600">
+                    Scope: {scope || "personal"} · {assets.length} persisted records
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {assets.length === 0 ? (
+              <div className="p-10 text-center text-sm text-gray-500">
+                No persisted assessment assets are available in your scope.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[1100px] text-left text-sm">
+                  <thead className="border-b border-white/10 text-xs uppercase tracking-wider text-gray-500">
+                    <tr>
+                      <th className="px-5 py-4">Asset</th>
+                      <th className="px-5 py-4">Type</th>
+                      <th className="px-5 py-4">VAPT</th>
+                      <th className="px-5 py-4">QA</th>
+                      <th className="px-5 py-4">Monitoring</th>
+                      <th className="px-5 py-4">Overall</th>
+                      <th className="px-5 py-4">Findings</th>
+                      <th className="px-5 py-4">Last Updated</th>
+                    </tr>
+                  </thead>
+
+                  <tbody className="divide-y divide-white/5">
+                    {assets.map((asset) => (
+                      <tr key={asset.asset_id} className="hover:bg-white/[0.02]">
+                        <td className="px-5 py-4">
+                          <div className="font-medium text-gray-200">
+                            {asset.target || "Unnamed target"}
+                          </div>
+                          <div className="mt-1 text-xs text-gray-600">
+                            Assessment #{asset.assessment_id}
+                          </div>
+                        </td>
+
+                        <td className="px-5 py-4 text-gray-400">
+                          {asset.asset_type}
+                        </td>
+
+                        <td className="px-5 py-4">
+                          <span className={`border px-2 py-1 text-xs ${statusClass(asset.vapt_status)}`}>
+                            {asset.vapt_status || "unknown"}
+                          </span>
+                        </td>
+
+                        <td className="px-5 py-4">
+                          <span className={`border px-2 py-1 text-xs ${statusClass(asset.qa_status)}`}>
+                            {asset.qa_status || "unknown"}
+                          </span>
+                        </td>
+
+                        <td className="px-5 py-4">
+                          <span className={`border px-2 py-1 text-xs ${statusClass(asset.monitoring_status)}`}>
+                            {asset.monitoring_status || "unknown"}
+                          </span>
+                        </td>
+
+                        <td className="px-5 py-4">
+                          <span className={`border px-2 py-1 text-xs ${statusClass(asset.overall_status)}`}>
+                            {asset.overall_status || "unknown"}
+                          </span>
+                        </td>
+
+                        <td className="px-5 py-4 font-semibold text-gray-300">
+                          {Number(asset.finding_count || 0)}
+                        </td>
+
+                        <td className="px-5 py-4 text-xs text-gray-500">
+                          {formatDate(asset.last_updated)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+function EnvironmentHealth() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadEnvironmentHealth = async (silent = false) => {
+      try {
+        if (!silent && !cancelled) setLoading(true);
+
+        const token = localStorage.getItem("token");
+        if (!token) {
+          throw new Error("Your session has expired. Please log in again.");
+        }
+
+        const response = await axios.get(
+          `${API_URL}/client/environment-health`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        if (!cancelled) {
+          setData(response.data);
+          setLastUpdated(new Date());
+          setError("");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            err.response?.data?.detail ||
+            err.message ||
+            "Unable to load environment health."
+          );
+        }
+      } finally {
+        if (!cancelled && !silent) setLoading(false);
+      }
+    };
+
+    loadEnvironmentHealth();
+
+    const timer = window.setInterval(
+      () => loadEnvironmentHealth(true),
+      15000
+    );
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [reloadKey]);
+
+  const environments = Array.isArray(data?.environments)
+    ? data.environments
+    : [];
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime())
+      ? "—"
+      : parsed.toLocaleString();
+  };
+
+  const isCodeAssessment = (target) =>
+    typeof target === "string" && target.startsWith("code://");
+
+  const getStatusClass = (status) => {
+    const normalized = String(status || "").toLowerCase();
+
+    if (["active", "completed", "online", "healthy"].includes(normalized)) {
+      return "text-emerald-400";
+    }
+
+    if (["failed", "critical", "offline", "error"].includes(normalized)) {
+      return "text-red-400";
+    }
+
+    if (["running", "in_progress", "pending"].includes(normalized)) {
+      return "text-yellow-300";
+    }
+
+    return "text-gray-400";
+  };
+
+  const activeCount = environments.filter(
+    (environment) =>
+      String(environment.overall_status || "").toLowerCase() === "active"
+  ).length;
+
+  const codeAssessmentCount = environments.filter((environment) =>
+    isCodeAssessment(environment.target)
+  ).length;
+
+  const targetCount = environments.length - codeAssessmentCount;
+
+  return (
+    <div className="min-h-full bg-black p-6 text-white">
+      <div className="mx-auto max-w-7xl">
+        <div className="mb-7 flex flex-wrap items-start justify-between gap-4 border-b border-white/10 pb-5">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-widest text-red-500">
+              SOC Overview
+            </p>
+            <h1 className="mt-2 text-2xl font-bold">Environment Health</h1>
+            <p className="mt-2 text-sm text-gray-400">
+              Live health view of persisted assessments in your authenticated scope.
+            </p>
+            <p className="mt-2 text-xs text-gray-600">
+              Scope: {data?.scope || "Loading"} · Last refreshed:{" "}
+              {formatDate(lastUpdated)}
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setReloadKey((value) => value + 1)}
+            disabled={loading}
+            className="border border-white/15 px-4 py-2 text-xs text-gray-300 hover:border-red-500/50 disabled:opacity-50"
+          >
+            {loading ? "Loading…" : "Refresh now"}
+          </button>
+        </div>
+
+        {error && (
+          <div className="mb-5 border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300">
+            {error}
+          </div>
+        )}
+
+        {loading && !data ? (
+          <div className="border border-white/10 p-8 text-sm text-gray-400">
+            Loading environment health from the backend…
+          </div>
+        ) : data ? (
+          <>
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              {[
+                ["Total Assessments", environments.length, "Persisted scoped assessments"],
+                ["Active", activeCount, "Current overall status"],
+                ["Network / Web Targets", targetCount, "Non-code assessment targets"],
+                ["Code Assessments", codeAssessmentCount, "Persisted code:// assessments"],
+              ].map(([label, value, description]) => (
+                <div
+                  key={label}
+                  className="border border-white/10 bg-[#0b0b0b] p-5"
+                >
+                  <p className="text-xs text-gray-500">{label}</p>
+                  <p className="mt-3 text-3xl font-bold text-white">{value}</p>
+                  <p className="mt-2 text-xs text-gray-600">{description}</p>
+                </div>
+              ))}
+            </div>
+
+            <section className="mt-7 border border-white/10 bg-[#0b0b0b]">
+              <div className="border-b border-white/10 p-5">
+                <h2 className="text-lg font-semibold">Environment Status</h2>
+                <p className="mt-1 text-xs text-gray-500">
+                  Real persisted assessment state. No synthetic uptime or service-health values are shown.
+                </p>
+              </div>
+
+              {environments.length === 0 ? (
+                <div className="p-6 text-sm text-gray-500">
+                  No persisted environments or assessments are available in this scope.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[1000px] text-left text-sm">
+                    <thead className="border-b border-white/10 text-xs text-gray-500">
+                      <tr>
+                        <th className="px-5 py-3 font-medium">Target</th>
+                        <th className="px-5 py-3 font-medium">Type</th>
+                        <th className="px-5 py-3 font-medium">Overall</th>
+                        <th className="px-5 py-3 font-medium">VAPT</th>
+                        <th className="px-5 py-3 font-medium">QA</th>
+                        <th className="px-5 py-3 font-medium">Monitoring</th>
+                        <th className="px-5 py-3 font-medium">Findings</th>
+                        <th className="px-5 py-3 font-medium">Updated</th>
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {environments.map((environment) => {
+                        const codeAssessment = isCodeAssessment(environment.target);
+
+                        return (
+                          <tr
+                            key={environment.assessment_id}
+                            className="border-b border-white/5 last:border-0"
+                          >
+                            <td className="max-w-[360px] px-5 py-4">
+                              <div className="break-all text-white">
+                                {environment.target ||
+                                  `Assessment #${environment.assessment_id}`}
+                              </div>
+                              <div className="mt-1 text-xs text-gray-600">
+                                Assessment #{environment.assessment_id}
+                              </div>
+                            </td>
+
+                            <td className="px-5 py-4 text-xs text-gray-400">
+                              {codeAssessment ? "Code assessment" : "Target assessment"}
+                            </td>
+
+                            <td
+                              className={`px-5 py-4 font-medium ${getStatusClass(
+                                environment.overall_status
+                              )}`}
+                            >
+                              {environment.overall_status || "Unknown"}
+                            </td>
+
+                            <td
+                              className={`px-5 py-4 ${getStatusClass(
+                                environment.vapt_status
+                              )}`}
+                            >
+                              {environment.vapt_status || "Unknown"}
+                            </td>
+
+                            <td
+                              className={`px-5 py-4 ${getStatusClass(
+                                environment.qa_status
+                              )}`}
+                            >
+                              {environment.qa_status || "Unknown"}
+                            </td>
+
+                            <td
+                              className={`px-5 py-4 ${getStatusClass(
+                                environment.monitoring_status
+                              )}`}
+                            >
+                              {environment.monitoring_status || "Unknown"}
+                            </td>
+
+                            <td className="px-5 py-4 tabular-nums">
+                              {environment.finding_count ?? 0}
+                            </td>
+
+                            <td className="px-5 py-4 text-xs text-gray-400">
+                              {formatDate(environment.updated_at)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          </>
+        ) : !error ? (
+          <div className="border border-white/10 p-8 text-sm text-gray-500">
+            No environment health data is available.
+          </div>
+        ) : null}
       </div>
     </div>
   );

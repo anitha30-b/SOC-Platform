@@ -8,6 +8,10 @@ from zap_router import router as zap_router
 from juice_shop_router import router as juice_shop_router
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime, timezone
+from pathlib import Path
+import json
+import time
 
 from database import Base, engine
 
@@ -46,6 +50,8 @@ from mitre_router import router as mitre_router
 from security_events_router import router as security_events_router
 from ioc_router import router as ioc_router
 from sigma_router import router as sigma_router
+from telemetry_router import router as telemetry_router
+from saved_searches_router import router as saved_searches_router
 from siem_correlation_engine import load_persistent_rule_configs
 
 # SOC Real-Time Events
@@ -53,6 +59,10 @@ from realtime_router import router as realtime_router
 
 # SOC PostgreSQL Real-Time Event Listener
 from postgres_event_listener import postgres_event_listener
+from client_realtime_events import (
+    client_security_event_listener,
+    router as client_realtime_events_router,
+)
 from realtime_journal_listener import start_listener as start_realtime_journal_listener
 from admin_notifications_router import router as admin_notifications_router
 from user_notifications_router import router as user_notifications_router
@@ -113,6 +123,75 @@ def start_postgres_event_listener():
 
     postgres_event_listener.start()
     start_realtime_journal_listener()
+    client_security_event_listener.start()
+
+
+# ============================================================
+# LIVE APPLICATION ACCESS LOGGING
+# ============================================================
+
+ACCESS_LOG_FILE = (
+    Path(__file__).resolve().parent
+    / "runtime_logs"
+    / "access.log"
+)
+
+ACCESS_LOG_FILE.parent.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+
+@app.middleware("http")
+async def application_access_log(request, call_next):
+    started = time.perf_counter()
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = round(
+            (time.perf_counter() - started) * 1000,
+            2,
+        )
+
+        record = {
+            "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": 500,
+            "duration_ms": duration_ms,
+            "client_ip": request.client.host if request.client else None,
+        }
+
+        with ACCESS_LOG_FILE.open(
+            "a",
+            encoding="utf-8",
+        ) as file:
+            file.write(json.dumps(record) + "\n")
+
+        raise
+
+    duration_ms = round(
+        (time.perf_counter() - started) * 1000,
+        2,
+    )
+
+    record = {
+        "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
+        "method": request.method,
+        "path": request.url.path,
+        "status_code": response.status_code,
+        "duration_ms": duration_ms,
+        "client_ip": request.client.host if request.client else None,
+    }
+
+    with ACCESS_LOG_FILE.open(
+        "a",
+        encoding="utf-8",
+    ) as file:
+        file.write(json.dumps(record) + "\n")
+
+    return response
 
 
 # ============================================================
@@ -212,10 +291,17 @@ app.include_router(mitre_router)
 # SOC Security Events
 app.include_router(security_events_router)
 app.include_router(ioc_router)
+from hunting_router import router as hunting_router
+app.include_router(hunting_router)
+from threat_knowledge_router import router as threat_knowledge_router
+app.include_router(threat_knowledge_router)
 app.include_router(sigma_router)
+app.include_router(telemetry_router)
+app.include_router(saved_searches_router)
 
 # SOC Real-Time Events
 app.include_router(realtime_router)
+app.include_router(client_realtime_events_router)
 app.include_router(admin_notifications_router)
 app.include_router(user_notifications_router)
 app.include_router(user_notifications_realtime_router)

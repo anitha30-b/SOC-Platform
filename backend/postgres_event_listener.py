@@ -6,7 +6,7 @@ import threading
 import psycopg2
 
 from database import DATABASE_URL
-from realtime_broadcaster import security_event_broadcaster
+from client_realtime_events import client_siem_event_broadcaster
 from notification_service import create_notification
 
 
@@ -83,10 +83,13 @@ class PostgreSQLEventListener:
                     # from the same real-time security event.
                     create_notification(event)
 
-                    # Preserve the existing security-event stream.
-                    security_event_broadcaster.publish(
-                        event
-                    )
+                    # Publish only a minimal signal. Each connected SIEM
+                    # WebSocket independently verifies persisted event ownership.
+                    event_id = str(event.get("event_id") or "").strip()
+                    if event_id:
+                        client_siem_event_broadcaster.publish({
+                            "event_id": event_id,
+                        })
 
                 except json.JSONDecodeError:
                     print(

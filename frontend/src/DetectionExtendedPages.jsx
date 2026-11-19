@@ -10,7 +10,7 @@ const PAGE_INFO = {
   },
   "anomaly-detection": {
     title: "Anomaly Detection",
-    description: "Event-volume patterns for analyst review. This is heuristic analysis, not a trained anomaly model.",
+    description: "Historical event-volume baselines for analyst review, calculated from persisted security events.",
   },
   "ioc-detection": {
     title: "IOC Detection",
@@ -31,6 +31,8 @@ export default function DetectionExtendedPages({ view }) {
     tactics: [],
     mappedEvents: [],
     iocs: [],
+    anomalyBaseline: null,
+    mitreCoverage: null,
   });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -77,6 +79,18 @@ export default function DetectionExtendedPages({ view }) {
           run: () => axios.get(`${API_URL}/security-events?limit=500`, auth()),
           extract: (d) => Array.isArray(d) ? d : [],
         },
+        ...(view === "anomaly-detection" ? [{
+          key: "anomalyBaseline",
+          name: "historical anomaly baseline",
+          run: () => axios.get(`${API_URL}/security-events/anomaly/baseline`, auth()),
+          extract: (d) => d && typeof d === "object" ? d : null,
+        }] : []),
+        ...(view === "detection-coverage" ? [{
+          key: "mitreCoverage",
+          name: "MITRE ATT&CK coverage catalogue",
+          run: () => axios.get(`${API_URL}/security-events/coverage/mitre`, auth()),
+          extract: (d) => d && typeof d === "object" ? d : null,
+        }] : []),
         {
           key: "rules",
           name: "SIEM rules",
@@ -155,7 +169,7 @@ export default function DetectionExtendedPages({ view }) {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [refreshKey]);
+  }, [refreshKey, view]);
 
   const fmt = (value) => Number(value || 0).toLocaleString("en-IN");
   const fmtTime = (value) => {
@@ -265,41 +279,10 @@ export default function DetectionExtendedPages({ view }) {
       ruleName.includes("authentication");
   });
 
-  const volumeRows = (() => {
-    const counts = new Map();
-    for (const event of data.events) {
-      const kind = event.event_type || "unknown";
-      counts.set(kind, (counts.get(kind) || 0) + 1);
-    }
-
-    const values = [...counts.values()];
-    const medianOf = (items) => {
-      if (!items.length) return 0;
-      const middle = Math.floor(items.length / 2);
-      return items.length % 2
-        ? items[middle]
-        : (items[middle - 1] + items[middle]) / 2;
-    };
-    const sortedValues = [...values].sort((a, b) => a - b);
-    const median = medianOf(sortedValues);
-    const deviations = sortedValues
-      .map((value) => Math.abs(value - median))
-      .sort((a, b) => a - b);
-    const mad = medianOf(deviations);
-    const threshold = values.length
-      ? Math.max(5, mad > 0
-          ? median + 3 * 1.4826 * mad
-          : median * 1.5)
-      : 5;
-
-    return [...counts.entries()]
-      .map(([event_type, count]) => ({
-        event_type,
-        count,
-        candidate: count >= threshold && count > 1,
-      }))
-      .sort((a, b) => b.count - a.count);
-  })();
+  const anomalyBaseline = data.anomalyBaseline;
+  const volumeRows = Array.isArray(anomalyBaseline?.event_types)
+    ? anomalyBaseline.event_types
+    : [];
 
   const filteredIocs = data.iocs.filter((item) =>
     [
@@ -317,6 +300,14 @@ export default function DetectionExtendedPages({ view }) {
       (alert) => alert.detection?.rule_id === rule.rule_id
     ).length,
   }));
+
+  const mitreCoverage = data.mitreCoverage;
+  const mappedCoverageTechniques = Array.isArray(mitreCoverage?.techniques)
+    ? mitreCoverage.techniques.filter((technique) => technique.configured)
+    : [];
+  const unmappedSiemRules = Array.isArray(mitreCoverage?.siem_rules_without_explicit_mapping)
+    ? mitreCoverage.siem_rules_without_explicit_mapping
+    : [];
 
   const card = (label, value, note) => (
     <div key={label} className="border border-white/10 bg-white/[0.02] p-4">
@@ -413,47 +404,76 @@ export default function DetectionExtendedPages({ view }) {
 
           {view === "anomaly-detection" && (
             <>
-              <div className="border border-yellow-500/30 bg-yellow-500/5 p-4">
-                <p className="text-xs font-semibold text-yellow-200">Heuristic review only</p>
+              <div className="border border-sky-500/30 bg-sky-500/5 p-4">
+                <p className="text-xs font-semibold text-sky-200">Historical baseline review</p>
                 <p className="mt-2 text-xs leading-5 text-gray-400">
-                  Event types above the sample-volume threshold are review candidates,
-                  not confirmed security anomalies. This page does not use a trained model
-                  or a historical behavioral baseline.
+                  The latest completed 15-minute window is compared with seven days of historical
+                  15-minute buckets from PostgreSQL. Volume outliers are review candidates, not
+                  confirmed malicious activity. This is statistical thresholding, not a trained model.
                 </p>
+                {anomalyBaseline?.window_start && (
+                  <p className="mt-2 text-[10px] text-gray-500">
+                    Current window: {fmtTime(anomalyBaseline.window_start)} – {fmtTime(anomalyBaseline.window_end)}
+                  </p>
+                )}
               </div>
+
               <div className="grid gap-3 sm:grid-cols-3">
                 {[
-                  ["Events sampled", data.events.length],
-                  ["Event types", volumeRows.length],
-                  ["Volume review candidates", volumeRows.filter((r) => r.candidate).length],
-                ].map(([label, value]) => card(label, value, "Latest events returned by the API"))}
+                  ["Events in latest 15 min", anomalyBaseline?.events_in_current_window ?? 0],
+                  ["Event types evaluated", anomalyBaseline?.event_type_count ?? 0],
+                  ["Volume review candidates", anomalyBaseline?.flagged_count ?? 0],
+                ].map(([label, value]) => card(label, value, "Historical baseline API results"))}
               </div>
+
               <section className="border border-white/10">
                 <div className="border-b border-white/10 p-4">
-                  <h2 className="text-sm font-semibold text-white">Event-Volume Review</h2>
+                  <h2 className="text-sm font-semibold text-white">Historical Event-Volume Review</h2>
                   <p className="mt-1 text-[10px] text-gray-500">
-                    Heuristic threshold: median + 3 scaled MAD; minimum 5, or 1.5× median when MAD is zero.
+                    Threshold: median + 3 scaled MAD; minimum 5, or 1.5× median when MAD is zero.
+                    Each event type uses 672 historical 15-minute buckets.
                   </p>
                 </div>
-                {volumeRows.length === 0 ? (
-                  <p className="p-5 text-xs text-gray-500">No security events were returned.</p>
+
+                {!anomalyBaseline ? (
+                  <p className="p-5 text-xs text-gray-500">
+                    Historical baseline data is unavailable. Check the API error above and refresh.
+                  </p>
+                ) : volumeRows.length === 0 ? (
+                  <p className="p-5 text-xs text-gray-500">
+                    No stored event types were found in the comparison window.
+                  </p>
                 ) : (
                   <div className="divide-y divide-white/5">
-                    {volumeRows.slice(0, 20).map((row) => (
+                    {volumeRows.slice(0, 30).map((row) => (
                       <div key={row.event_type} className="flex flex-wrap items-center justify-between gap-3 p-4">
-                        <div>
+                        <div className="min-w-0">
                           <p className="text-xs text-gray-200">{row.event_type}</p>
-                          <p className="mt-1 text-[10px] text-gray-600">Count in returned sample</p>
+                          <p className="mt-1 text-[10px] leading-4 text-gray-500">
+                            Baseline median: {fmt(row.baseline_median)}
+                            {" · "}MAD: {fmt(row.baseline_mad)}
+                            {" · "}Threshold: {fmt(row.threshold)}
+                            {" · "}Buckets: {fmt(row.historical_buckets)}
+                          </p>
                         </div>
                         <div className="flex items-center gap-3">
-                          <span className="text-sm tabular-nums text-white">{fmt(row.count)}</span>
-                          <span className={`border px-2 py-1 text-[9px] ${row.candidate ? "border-yellow-500/30 text-yellow-200" : "border-white/10 text-gray-500"}`}>
-                            {row.candidate ? "REVIEW CANDIDATE" : "NO VOLUME FLAG"}
+                          <span className="text-sm tabular-nums text-white">{fmt(row.current_count)}</span>
+                          <span className={`border px-2 py-1 text-[9px] ${
+                            row.flagged
+                              ? "border-yellow-500/30 text-yellow-200"
+                              : "border-white/10 text-gray-500"
+                          }`}>
+                            {row.flagged ? "ANOMALY CANDIDATE" : "WITHIN THRESHOLD"}
                           </span>
                         </div>
                       </div>
                     ))}
                   </div>
+                )}
+                {anomalyBaseline?.interpretation && (
+                  <p className="border-t border-white/10 p-4 text-[10px] leading-4 text-gray-500">
+                    {anomalyBaseline.interpretation}
+                  </p>
                 )}
               </section>
             </>
@@ -464,9 +484,10 @@ export default function DetectionExtendedPages({ view }) {
               <div className="border border-yellow-500/30 bg-yellow-500/5 p-4">
                 <p className="text-xs font-semibold text-yellow-200">Indicator matching limitations</p>
                 <p className="mt-2 text-xs leading-5 text-gray-400">
-                  Match checks search the latest 500 persisted security events and return
-                  aggregate counts only. Matches are candidates, not proof of malicious activity.
-                  The event table is not currently client-tagged, and no external threat feed is connected.
+                  Match checks scan up to 500 persisted events linked to assessments owned by your
+                  user/client. Events without an ownership-linked assessment are excluded to protect
+                  tenant isolation. No external threat-intelligence feed is connected. Matches are
+                  candidates, not proof of malicious activity.
                 </p>
               </div>
 
@@ -536,7 +557,14 @@ export default function DetectionExtendedPages({ view }) {
                                     Candidate matches: <strong>{fmt(match.candidate_match_count)}</strong>
                                     {" · "}Events scanned: {fmt(match.events_scanned)}
                                   </p>
-                                  <p className="mt-2 text-[10px] leading-4 text-gray-500">{match.tenant_scope_note}</p>
+                                  {match.scope_status === "NO_SCOPED_EVENTS" && (
+                                    <p className="mt-2 border border-yellow-500/30 bg-yellow-500/5 p-3 text-[10px] leading-4 text-yellow-200">
+                                      {match.scope_message}
+                                    </p>
+                                  )}
+                                  <p className="mt-2 text-[10px] leading-4 text-gray-500">
+                                    {match.tenant_scope_note || match.scope_message}
+                                  </p>
                                 </>
                               )}
                             </div>
@@ -568,6 +596,112 @@ export default function DetectionExtendedPages({ view }) {
                   ["Recent mapped events returned", data.mappedEvents.length],
                 ].map(([label, value]) => card(label, value))}
               </div>
+              {mitreCoverage ? (
+                <>
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    {[
+                      ["ATT&CK catalogue techniques", mitreCoverage.catalogue_technique_count],
+                      ["Explicitly mapped techniques", mitreCoverage.configured_technique_count],
+                      ["Observed techniques in scope", mitreCoverage.observed_catalogue_technique_count],
+                      ["Without explicit mapping", mitreCoverage.catalogue_techniques_without_explicit_mapping],
+                    ].map(([label, value]) => card(label, value, `Enterprise ATT&CK ${mitreCoverage.version}`))}
+                  </div>
+
+                  <section className="border border-white/10">
+                    <div className="border-b border-white/10 p-4">
+                      <h2 className="text-sm font-semibold text-white">Explicit ATT&CK Rule Mappings</h2>
+                      <p className="mt-1 text-[10px] leading-4 text-gray-500">
+                        Only explicit ATT&CK technique tags on valid Sigma rules count as configured
+                        mappings. Observed counts use assessment-linked events in your user/client scope.
+                      </p>
+                    </div>
+                    {mappedCoverageTechniques.length === 0 ? (
+                      <p className="p-4 text-xs text-gray-500">No explicit Sigma technique mappings were found.</p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full min-w-[700px] text-left text-xs">
+                          <thead className="bg-black/30 text-[9px] uppercase tracking-wider text-gray-500">
+                            <tr>
+                              {["Technique", "Configured rule(s)", "Execution status", "Observed events", "Coverage status"].map((heading) => (
+                                <th key={heading} className="px-4 py-3">{heading}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-white/5">
+                            {mappedCoverageTechniques.map((technique) => (
+                              <tr key={technique.technique_id}>
+                                <td className="px-4 py-3">
+                                  <p className="font-mono text-red-300">{technique.technique_id}</p>
+                                  <p className="mt-1 text-gray-300">{technique.name}</p>
+                                  <p className="mt-1 text-[10px] text-gray-500">
+                                    {(technique.tactics || []).join(", ") || "Tactic unavailable"}
+                                  </p>
+                                </td>
+                                <td className="px-4 py-3 text-gray-300">
+                                  {(technique.configured_by || []).map((rule) => (
+                                    <p key={`${rule.rule_type}-${rule.rule_id}`} className="mb-1">
+                                      {rule.rule_name}
+                                      <span className="mt-1 block font-mono text-[10px] text-gray-500">{rule.rule_id}</span>
+                                    </p>
+                                  ))}
+                                </td>
+                                <td className="px-4 py-3 text-gray-400">
+                                  {(technique.configured_by || []).map((rule) => (
+                                    <p key={`${rule.rule_type}-${rule.rule_id}-status`}>
+                                      {rule.integration_status}
+                                    </p>
+                                  ))}
+                                </td>
+                                <td className="px-4 py-3 tabular-nums text-gray-300">
+                                  {fmt(technique.observed_event_count)}
+                                </td>
+                                <td className="px-4 py-3 text-gray-300">
+                                  {technique.coverage_status.replace(/_/g, " ")}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </section>
+
+                  <section className="border border-white/10">
+                    <div className="border-b border-white/10 p-4">
+                      <h2 className="text-sm font-semibold text-white">SIEM Rules Without Explicit ATT&CK Mapping</h2>
+                      <p className="mt-1 text-[10px] leading-4 text-gray-500">
+                        These rules have no technique ID configured in their definitions. No mapping is inferred
+                        from their names or event types.
+                      </p>
+                    </div>
+                    {unmappedSiemRules.length === 0 ? (
+                      <p className="p-4 text-xs text-gray-500">All current SIEM rules have explicit mapping metadata.</p>
+                    ) : (
+                      <div className="divide-y divide-white/5">
+                        {unmappedSiemRules.map((rule) => (
+                          <div key={rule.rule_id} className="flex flex-wrap items-start justify-between gap-3 p-4">
+                            <div>
+                              <p className="text-xs text-gray-200">{rule.rule_name}</p>
+                              <p className="mt-1 font-mono text-[10px] text-gray-500">{rule.rule_id}</p>
+                            </div>
+                            <p className="max-w-xl text-[10px] leading-4 text-gray-500">{rule.reason}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                  <p className="text-[10px] leading-4 text-gray-500">
+                    {mitreCoverage.interpretation}
+                  </p>
+                </>
+              ) : (
+                <section className="border border-white/10 p-4">
+                  <p className="text-xs text-gray-400">
+                    MITRE coverage data is unavailable. Check the API error above and refresh.
+                  </p>
+                </section>
+              )}
+
 
               <section className="border border-white/10">
                 <div className="border-b border-white/10 p-4">

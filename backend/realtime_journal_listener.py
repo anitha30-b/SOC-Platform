@@ -1,3 +1,4 @@
+import os
 import json
 import re
 import shlex
@@ -27,6 +28,113 @@ from security_events import (
     generate_event_id,
     normalize_log_event,
 )
+from models import SecurityEvent
+from sigma_evaluator import evaluate_sigma_event
+TSHARK_TELEMETRY_SOURCE_ID = os.getenv("TSHARK_TELEMETRY_SOURCE_ID")
+
+
+def process_sigma_detections(event):
+    """Evaluate and persist supported Sigma matches for one event."""
+    try:
+        matches = evaluate_sigma_event(event)
+    except Exception as exc:
+        print(f"[SOC SIGMA ERROR] Evaluation failed: {exc}", flush=True)
+        return 0
+
+    persisted = 0
+    severity_map = {
+        "informational": "INFO",
+        "low": "LOW",
+        "medium": "MEDIUM",
+        "high": "HIGH",
+        "critical": "CRITICAL",
+    }
+
+    for match in matches:
+        rule = match["rule"]
+        trigger_id = str(
+            event.get("event_id")
+            or generate_event_id(json.dumps(event, sort_keys=True, default=str))
+        )
+        sigma_event_id = generate_event_id(json.dumps(
+            {
+                "sigma_rule_id": rule["id"],
+                "trigger_event_id": trigger_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ))
+
+        detection_event = {
+            "event_id": sigma_event_id,
+            "timestamp": event.get("timestamp"),
+            "source": "sigma-detection-engine",
+            "event_type": "sigma_detection",
+            "severity": severity_map.get(
+                str(rule.get("level", "informational")).casefold(), "INFO"
+            ),
+            "message": f"Sigma rule matched: {rule.get('title', rule['id'])}",
+            "target": event.get("target"),
+            "assessment_id": event.get("assessment_id"),
+            "raw_event": {
+                "rule": f"SIGMA-{rule['id']}",
+                "rule_id": rule["id"],
+                "rule_name": rule.get("title", rule["id"]),
+                "sigma_rule_id": rule["id"],
+                "sigma_filename": match.get("filename"),
+                "integration_status": "LIVE_ENABLED",
+                "trigger_event_id": trigger_id,
+                "trigger_event": {
+                    "event_id": trigger_id,
+                    "source": event.get("source"),
+                    "event_type": event.get("event_type"),
+                    "message": str(event.get("message") or "")[:4000],
+                },
+                "matched_selectors": match.get("matched_selectors", []),
+                "evidence": match.get("evidence", ""),
+                "condition": (rule.get("detection") or {}).get("condition"),
+                "logsource": rule.get("logsource", {}),
+                "tags": rule.get("tags", []),
+                "response_actions": [],
+            },
+        }
+
+        db = SessionLocal()
+        try:
+            existing = (
+                db.query(SecurityEvent)
+                .filter(SecurityEvent.event_id == sigma_event_id)
+                .first()
+            )
+            if existing:
+                continue
+
+            mapping = map_security_event(detection_event)
+            store_security_event(db, detection_event, mapping)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            print(
+                f"[SOC SIGMA ERROR] {rule.get('title', rule['id'])}: {exc}",
+                flush=True,
+            )
+            continue
+        finally:
+            db.close()
+
+        try:
+            notify_security_event(detection_event)
+        except Exception as exc:
+            print(f"[SOC SIGMA ERROR] Notification failed: {exc}", flush=True)
+
+        persisted += 1
+        print(
+            f"[SOC SIGMA] {rule.get('title', rule['id'])} | "
+            f"trigger={trigger_id}",
+            flush=True,
+        )
+
+    return persisted
 
 
 AUTHENTICATION_EVENT_WINDOW = timedelta(
@@ -561,6 +669,7 @@ def process_linux_security_event(raw_line):
         db.close()
 
     notify_security_event(event)
+    process_sigma_detections(event)
 
     generic_detections = evaluate_event(event)
 
@@ -796,6 +905,7 @@ def run_listener():
             # Publish the original authentication
             # event only after successful database commit.
             notify_security_event(event)
+            process_sigma_detections(event)
 
             detection_events = (
                 process_authentication_correlation(
@@ -932,6 +1042,49 @@ _dns_listener_thread = None
 _listener_lock = threading.Lock()
 
 
+
+def _attach_registered_tshark_scope(event):
+    """Resolve ownership from the registered local collector, not event input."""
+    from models import TelemetrySource
+
+    try:
+        source_id = int(TSHARK_TELEMETRY_SOURCE_ID)
+        if source_id <= 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+
+    db = SessionLocal()
+    try:
+        registered = (
+            db.query(TelemetrySource)
+            .filter(
+                TelemetrySource.id == source_id,
+                TelemetrySource.enabled.is_(True),
+            )
+            .first()
+        )
+        if registered is None:
+            return False
+
+        if registered.client_id is not None:
+            scope = f"client:{registered.client_id}"
+        elif registered.owner_user_id is not None:
+            scope = f"user:{registered.owner_user_id}"
+        else:
+            return False
+
+        event.update({
+            "telemetry_source_id": registered.id,
+            "client_id": registered.client_id,
+            "owner_user_id": registered.owner_user_id,
+            "_tenant_scope_key": scope,
+        })
+        return True
+    finally:
+        db.close()
+
+
 def run_tshark_security_listener():
     """Capture real TCP connection attempts and feed them into the SIEM engine."""
     command = [
@@ -989,6 +1142,14 @@ def run_tshark_security_listener():
         event["destination_port"] = destination_port
         event["protocol"] = protocol
         event["message"] = info
+        try:
+            scoped = _attach_registered_tshark_scope(event)
+        except Exception as exc:
+            print(f"[SOC TSHARK SCOPE] Ownership lookup failed: {exc}", flush=True)
+            continue
+        if not scoped:
+            print("[SOC TSHARK SCOPE] Event skipped: missing, disabled, or unowned source.", flush=True)
+            continue
 
         detections = evaluate_event(event)
 
@@ -1024,6 +1185,10 @@ def run_tshark_security_listener():
                             f"from {detection['group_value']}"
                         ),
                         "target": destination_ip,
+                        "client_id": event.get("client_id"),
+                        "owner_user_id": event.get("owner_user_id"),
+                        "_tenant_scope_key": event.get("_tenant_scope_key"),
+                        "telemetry_source_id": event.get("telemetry_source_id"),
                         "raw_event": {
                             "rule": detection["rule_id"],
                             "rule_name": detection["rule_name"],
@@ -1144,6 +1309,15 @@ def run_tshark_dns_listener():
                 "message": message,
             })
 
+            try:
+                scoped = _attach_registered_tshark_scope(event)
+            except Exception as exc:
+                print(f"[SOC TSHARK SCOPE] Ownership lookup failed: {exc}", flush=True)
+                continue
+            if not scoped:
+                print("[SOC TSHARK SCOPE] Event skipped: missing, disabled, or unowned source.", flush=True)
+                continue
+
             # Persist the structured DNS evidence for investigation.
             original_raw = event.get("raw_event")
             event["raw_event"] = {
@@ -1199,6 +1373,10 @@ def run_tshark_dns_listener():
                         f"from {detection['group_value']}"
                     ),
                     "target": destination_ip or None,
+                    "client_id": event.get("client_id"),
+                        "owner_user_id": event.get("owner_user_id"),
+                        "_tenant_scope_key": event.get("_tenant_scope_key"),
+                        "telemetry_source_id": event.get("telemetry_source_id"),
                     "raw_event": {
                         "rule": detection["rule_id"],
                         "rule_name": detection["rule_name"],

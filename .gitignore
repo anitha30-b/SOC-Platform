@@ -49,3 +49,10 @@ temp/
 backend/runtime_state/
 backend/data/
 *.zip
+
+# SOC local verification backups
+/.backups/
+*.py.bak*
+*.jsx.bak*
+*.py.*-backup
+*.jsx.*-backup

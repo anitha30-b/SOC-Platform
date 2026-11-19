@@ -212,6 +212,7 @@ async def run_report(
     job_id = f"REPORT-{uuid4().hex[:12].upper()}"
 
     REPORT_JOBS[job_id] = {
+        "user_id": current_user.id,
         "status": "queued",
         "progress": 0,
         "stage": "Queued",
@@ -233,35 +234,63 @@ async def run_report(
 
 
 @router.get("/{job_id}/progress")
+
 def report_progress(
     job_id: str,
     current_user=Depends(require_role(1)),
+    db: Session = Depends(get_db),
 ):
     job = REPORT_JOBS.get(job_id)
+    if job and job.get("user_id") == current_user.id:
+        return {
+            "job_id": job_id,
+            "status": job.get("status"),
+            "stage": job.get("stage"),
+            "progress": job.get("progress", 0),
+            "error": job.get("error"),
+        }
 
-    if not job:
+    # A persisted completed report remains accessible after a restart.
+    record = (
+        db.query(VAPTReportRun)
+        .filter(
+            VAPTReportRun.job_id == job_id,
+            VAPTReportRun.user_id == current_user.id,
+            VAPTReportRun.status == "COMPLETED",
+        )
+        .first()
+    )
+    if record is None:
         raise HTTPException(404, "Report job not found.")
 
     return {
         "job_id": job_id,
-        "status": job.get("status"),
-        "stage": job.get("stage"),
-        "progress": job.get("progress", 0),
-        "error": job.get("error"),
+        "status": "completed",
+        "stage": "Stored report ready",
+        "progress": 100,
+        "error": None,
     }
 
 
 @router.get("/{job_id}/results")
+
 def report_results(
     job_id: str,
     current_user=Depends(require_role(1)),
+    db: Session = Depends(get_db),
 ):
-    job = REPORT_JOBS.get(job_id)
-
-    if not job or job.get("status") != "completed":
+    record = (
+        db.query(VAPTReportRun)
+        .filter(
+            VAPTReportRun.job_id == job_id,
+            VAPTReportRun.user_id == current_user.id,
+            VAPTReportRun.status == "COMPLETED",
+        )
+        .first()
+    )
+    if record is None:
         raise HTTPException(404, "Completed report not found.")
-
-    return job["result"]
+    return _serialize(record)
 
 
 def _build_canonical_pdf(canonical):
@@ -330,6 +359,8 @@ def _build_canonical_pdf(canonical):
     risk_levels = risk.get("risk_levels", {})
     validation = risk.get("validation", {})
     findings = canonical.get("findings", [])
+    from report_cvss import report_cvss_summary
+    cvss_summary = report_cvss_summary(findings)
 
     story = []
 
@@ -360,8 +391,17 @@ def _build_canonical_pdf(canonical):
         ["Metric", "Value"],
         ["Overall Risk", str(risk.get("overall_risk", "N/A"))],
         ["Total Findings", str(risk.get("total_findings", 0))],
-        ["Average CVSS", str(risk.get("average_cvss", 0.0))],
-        ["Highest CVSS", str(risk.get("highest_cvss", 0.0))],
+        ["Average CVSS", (
+            f"{cvss_summary['average']:.2f}"
+            if cvss_summary["average"] is not None
+            else "Not available"
+        )],
+        ["Highest CVSS", (
+            f"{cvss_summary['highest']:.1f}"
+            if cvss_summary["highest"] is not None
+            else "Not available"
+        )],
+        ["Scored Report Findings", str(cvss_summary["scored_count"])],
         ["Risk Assessment Status", str(risk.get("status", "N/A"))],
     ]
 
@@ -378,6 +418,11 @@ def _build_canonical_pdf(canonical):
         ])
     )
     story.append(summary_table)
+    story.append(Paragraph(
+        "CVSS summary uses valid scores from the findings captured in this "
+        "report. Unscored findings are excluded; a genuine score of zero is included.",
+        body_style,
+    ))
 
     story.append(Paragraph("Severity Distribution", heading_style))
 
@@ -500,16 +545,12 @@ def download_report(
     current_user=Depends(require_role(1)),
     db: Session = Depends(get_db),
 ):
-    job = REPORT_JOBS.get(job_id)
-
-    if not job or job.get("status") != "completed":
-        raise HTTPException(404, "Completed report not found.")
-
     record = (
         db.query(VAPTReportRun)
         .filter(
             VAPTReportRun.job_id == job_id,
             VAPTReportRun.user_id == current_user.id,
+            VAPTReportRun.status == "COMPLETED",
         )
         .first()
     )
@@ -564,3 +605,80 @@ def download_report(
         )
 
     raise HTTPException(400, "Supported formats: JSON, XML, PDF.")
+
+
+@router.get("/history")
+def user_report_history(
+    search: str = "",
+    offset: int = 0,
+    page_size: int = 25,
+    current_user=Depends(require_role(1)),
+    db: Session = Depends(get_db),
+):
+    if len(search) > 200 or offset < 0 or not 1 <= page_size <= 100:
+        raise HTTPException(422, "Invalid search or pagination.")
+
+    # Select metadata only; canonical report content is not part of this list.
+    columns = [
+        VAPTReportRun.id,
+        VAPTReportRun.report_run_id,
+        VAPTReportRun.job_id,
+        VAPTReportRun.assessment_id,
+        VAPTReportRun.risk_assessment_run_id,
+        VAPTReportRun.status,
+        VAPTReportRun.report_type,
+        VAPTReportRun.formats,
+        VAPTReportRun.started_at,
+        VAPTReportRun.completed_at,
+        VAPTReportRun.created_at,
+    ]
+    query = (
+        db.query(*columns)
+        .filter(VAPTReportRun.user_id == current_user.id)
+        .order_by(VAPTReportRun.created_at.desc(), VAPTReportRun.id.desc())
+    )
+    needle = search.strip().casefold()
+    total = 0
+    matched = 0
+    page = []
+
+    for record in query.yield_per(200):
+        item = dict(record._mapping)
+        total += 1
+        try:
+            formats = json.loads(item["formats"] or "[]")
+        except (TypeError, ValueError):
+            formats = []
+        item["formats"] = [
+            value for value in ("PDF", "JSON", "XML")
+            if isinstance(formats, list) and value in formats
+        ]
+        for key in ("started_at", "completed_at", "created_at"):
+            value = item[key]
+            item[key] = (
+                value.isoformat() + ("Z" if value.tzinfo is None else "")
+                if value else None
+            )
+
+        searchable = " ".join(
+            str(item[key] or "")
+            for key in (
+                "report_run_id", "assessment_id", "status", "report_type",
+                "completed_at", "created_at",
+            )
+        ).casefold()
+        if needle and needle not in searchable:
+            continue
+        if offset <= matched < offset + page_size:
+            page.append(item)
+        matched += 1
+
+    return {
+        "scope": "personal",
+        "source": "persisted_vapt_report_runs",
+        "total": total,
+        "matched_total": matched,
+        "offset": offset,
+        "next_offset": offset + page_size if offset + page_size < matched else None,
+        "reports": page,
+    }

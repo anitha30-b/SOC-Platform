@@ -9,7 +9,9 @@ logsource:
   service: sudo
 detection:
   selection_sudo:
-    message|contains: 'sudo:'
+    message|contains:
+      - 'sudo:'
+      - 'sudo['
   selection_command:
     message|contains: 'COMMAND='
   condition: selection_sudo and selection_command

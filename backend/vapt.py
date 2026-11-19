@@ -23,6 +23,7 @@ from database import get_db, SessionLocal
 from cve import fetch_cve_information
 from models import (
     Assessment,
+    AssetDiscoveryRun,
     SecurityFinding,
     SecurityTool,
     SecurityEvent,
@@ -2025,7 +2026,7 @@ async def _execute_nmap_command(
 # ==================================================
 
 
-def _new_nmap_job(target: str, scan_type: str, user_id: int) -> str:
+def _new_nmap_job(target: str, scan_type: str, user_id: int, client_id: int | None = None) -> str:
     import uuid
 
     job_id = str(uuid.uuid4())
@@ -2034,6 +2035,7 @@ def _new_nmap_job(target: str, scan_type: str, user_id: int) -> str:
         "target": target,
         "scan_type": scan_type,
         "user_id": user_id,
+        "client_id": client_id,
         "status": "queued",
         "progress": 0,
         "stage": "Queued",
@@ -2097,6 +2099,8 @@ async def _run_nmap_job(job_id: str, target: str, scan_type: str):
                     f"Nmap {scan_type} scan completed for {target}"
                 ),
                 target=target,
+                owner_user_id=job.get("user_id"),
+                client_id=job.get("client_id"),
                 raw_event=json.dumps(result, default=str),
                 mitre_technique_id="T1046",
                 mitre_technique_name="Network Service Discovery",
@@ -2622,7 +2626,7 @@ async def run_vapt_tool_async(
     if request.scan_type not in NMAP_PROFILES:
         raise HTTPException(status_code=400, detail="Unsupported Nmap scan request.")
 
-    job_id = _new_nmap_job(target, request.scan_type, current_user.id)
+    job_id = _new_nmap_job(target, request.scan_type, current_user.id, current_user.client_id)
     asyncio.create_task(_run_nmap_job(job_id, target, request.scan_type))
 
     return {
@@ -2870,12 +2874,12 @@ async def _execute_nikto_scan(target_url: str, scan_type: str = "quick", progres
             except (FileNotFoundError,OSError): pass
 
 
-def _new_nikto_job(target_url: str, scan_type: str, user_id: int) -> str:
+def _new_nikto_job(target_url: str, scan_type: str, user_id: int, client_id: int | None = None) -> str:
     import uuid
     job_id=str(uuid.uuid4())
     NIKTO_JOBS[job_id]={
         "job_id":job_id,"target":target_url,"scan_type":scan_type,
-        "user_id":user_id,"status":"queued","progress":0,"stage":"Queued",
+        "user_id":user_id,"client_id":client_id,"status":"queued","progress":0,"stage":"Queued",
         "result":None,"error":None,"created_at":time.time(),"updated_at":time.time()
     }
     return job_id
@@ -2958,6 +2962,8 @@ async def _run_nikto_job(job_id: str, target_url: str, scan_type: str):
                         f"for {target_url}"
                     ),
                     target=target_url,
+                    owner_user_id=job.get("user_id"),
+                    client_id=job.get("client_id"),
                     raw_event=json.dumps(
                         result,
                         default=str,
@@ -3059,7 +3065,7 @@ async def run_nikto_tool_async(
 ):
     require_user_tool_permission(db,current_user,"Nikto")
     target_url=validate_nikto_target(str(request.target_url))
-    job_id=_new_nikto_job(target_url,request.scan_type,current_user.id)
+    job_id=_new_nikto_job(target_url,request.scan_type,current_user.id,current_user.client_id)
     asyncio.create_task(_run_nikto_job(job_id,target_url,request.scan_type))
     return {
         "message":"Nikto scan started","tool":"Nikto","username":current_user.username,

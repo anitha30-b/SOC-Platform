@@ -1085,3 +1085,68 @@ async def get_code_security_progress(
         )
 
     return job
+
+
+@router.get("/secrets-registry")
+def secrets_registry(
+    category: str = "all",
+    search: str = "",
+    offset: int = 0,
+    page_size: int = 25,
+    current_user: User = Depends(require_role(1)),
+    db: Session = Depends(get_db),
+):
+    """Personal-user-scoped Gitleaks metadata; no raw finding evidence returned."""
+    from sqlalchemy import func
+    from secrets_metadata import CATEGORIES, secret_metadata
+
+    if category not in ("all", *CATEGORIES):
+        raise HTTPException(status_code=422, detail="Unsupported secret category")
+    if len(search) > 200 or offset < 0 or not 1 <= page_size <= 100:
+        raise HTTPException(status_code=422, detail="Invalid search or pagination")
+
+    query = db.query(
+        SecurityFinding.id,
+        SecurityFinding.assessment_id,
+        SecurityFinding.evidence,
+        SecurityFinding.severity,
+        SecurityFinding.status,
+    ).filter(
+        SecurityFinding.user_id == current_user.id,
+        func.lower(SecurityFinding.tool_name) == "gitleaks",
+    ).order_by(SecurityFinding.id.desc())
+
+    totals = {name: 0 for name in CATEGORIES}
+    total = 0
+    matched = 0
+    high_critical = 0
+    page = []
+    needle = search.strip().casefold()
+
+    for item in query.yield_per(200):
+        row = secret_metadata(item)
+        total += 1
+        totals[row["category"]] += 1
+        high_critical += row["severity"] in {"HIGH", "CRITICAL"}
+
+        if category != "all" and row["category"] != category:
+            continue
+        if needle and needle not in json.dumps(row, ensure_ascii=False).casefold():
+            continue
+
+        if offset <= matched < offset + page_size:
+            page.append(row)
+        matched += 1
+
+    return {
+        "scope": "personal",
+        "total": total,
+        "high_critical": high_critical,
+        "by_category": totals,
+        "matched_total": matched,
+        "offset": offset,
+        "next_offset": (
+            offset + page_size if offset + page_size < matched else None
+        ),
+        "findings": page,
+    }
