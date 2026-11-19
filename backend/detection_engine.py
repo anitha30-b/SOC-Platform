@@ -3,8 +3,10 @@ import logging
 from datetime import datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import and_, or_, false
 
 from models import (
+    Assessment, TelemetrySource, User,
     SecurityEvent,
     DetectionConfiguration,
     AlertConfiguration,
@@ -104,6 +106,87 @@ def evaluate_condition(event, condition):
     return False
 
 
+def _detection_history_filter(db, event):
+    """Partition aggregate evidence by tenant, personal owner, or global origin.
+
+    Explicit event ownership wins. Legacy assessment/source links are used only
+    when direct ownership is absent. Unresolved links never become global data.
+    This scopes inference evidence; it does not restrict admin event visibility.
+    """
+    client_id = getattr(event, "client_id", None)
+    owner_id = getattr(event, "owner_user_id", None)
+    assessment_id = getattr(event, "assessment_id", None)
+    source_id = getattr(event, "telemetry_source_id", None)
+    endpoint_id = getattr(event, "endpoint_asset_id", None)
+
+    if client_id is not None:
+        kind, identity = "client", client_id
+    elif owner_id is not None:
+        kind, identity = "user", owner_id
+    elif assessment_id is not None:
+        owner = (
+            db.query(User.id, User.client_id)
+            .join(Assessment, Assessment.user_id == User.id)
+            .filter(Assessment.id == assessment_id)
+            .first()
+        )
+        if owner is None:
+            return false()
+        kind, identity = ("client", owner[1]) if owner[1] is not None else ("user", owner[0])
+    elif source_id is not None:
+        source = db.query(TelemetrySource.client_id, TelemetrySource.owner_user_id).filter(
+            TelemetrySource.id == source_id
+        ).first()
+        if source is None:
+            return false()
+        if source[0] is not None:
+            kind, identity = "client", source[0]
+        elif source[1] is not None:
+            kind, identity = "user", source[1]
+        else:
+            return false()
+    elif endpoint_id is not None:
+        # An unresolved endpoint link is not evidence of a global collector.
+        return false()
+    else:
+        kind, identity = "global", None
+
+    no_direct_owner = and_(
+        SecurityEvent.client_id.is_(None),
+        SecurityEvent.owner_user_id.is_(None),
+    )
+    source_only = and_(no_direct_owner, SecurityEvent.assessment_id.is_(None))
+    if kind == "client":
+        assessments = db.query(Assessment.id).join(User, Assessment.user_id == User.id).filter(
+            User.client_id == identity
+        )
+        sources = db.query(TelemetrySource.id).filter(TelemetrySource.client_id == identity)
+        return or_(
+            SecurityEvent.client_id == identity,
+            and_(no_direct_owner, SecurityEvent.assessment_id.in_(assessments)),
+            and_(source_only, SecurityEvent.telemetry_source_id.in_(sources)),
+        )
+    if kind == "user":
+        assessments = db.query(Assessment.id).join(User, Assessment.user_id == User.id).filter(
+            User.id == identity, User.client_id.is_(None)
+        )
+        sources = db.query(TelemetrySource.id).filter(
+            TelemetrySource.owner_user_id == identity,
+            TelemetrySource.client_id.is_(None),
+        )
+        return or_(
+            and_(SecurityEvent.client_id.is_(None), SecurityEvent.owner_user_id == identity),
+            and_(no_direct_owner, SecurityEvent.assessment_id.in_(assessments)),
+            and_(source_only, SecurityEvent.telemetry_source_id.in_(sources)),
+        )
+    return and_(
+        no_direct_owner,
+        SecurityEvent.assessment_id.is_(None),
+        SecurityEvent.telemetry_source_id.is_(None),
+        SecurityEvent.endpoint_asset_id.is_(None),
+    )
+
+
 def correlation_reached(db, event, rule):
     """
     Detect an ordered pair of related events.
@@ -158,6 +241,7 @@ def correlation_reached(db, event, rule):
         start_time = event_time - timedelta(minutes=window)
 
         query = db.query(SecurityEvent).filter(
+            _detection_history_filter(db, event),
             SecurityEvent.timestamp >= start_time,
             SecurityEvent.timestamp <= event_time,
             SecurityEvent.id != event.id,
@@ -225,6 +309,7 @@ def anomaly_reached(db, event, rule):
         group_column = getattr(SecurityEvent, group_by)
 
         base_query = db.query(SecurityEvent).filter(
+            _detection_history_filter(db, event),
             group_column == group_value,
             SecurityEvent.source == event.source,
             SecurityEvent.event_type == event.event_type,
@@ -299,6 +384,7 @@ def threshold_reached(db, event, threshold, window_minutes):
     start_time = event.timestamp - timedelta(minutes=window_minutes)
 
     query = db.query(SecurityEvent).filter(
+        _detection_history_filter(db, event),
         SecurityEvent.timestamp >= start_time,
         SecurityEvent.timestamp <= event.timestamp,
     )
