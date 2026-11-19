@@ -3,8 +3,9 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import User
+from models import User, UserSession
 from security import decode_access_token
+from datetime import datetime
 
 
 security = HTTPBearer()
@@ -31,6 +32,23 @@ def get_current_user(
             status_code=401,
             detail="Invalid token"
         )
+
+    session_jti = payload.get("jti")
+    if session_jti:
+        tracked_session = db.query(UserSession).filter(
+            UserSession.jti == session_jti,
+            UserSession.user_id == int(user_id),
+        ).first()
+
+        if (
+            not tracked_session
+            or tracked_session.revoked_at is not None
+            or tracked_session.expires_at <= datetime.utcnow()
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="Session has expired or been terminated. Please log in again."
+            )
 
     user = db.query(User).filter(
         User.id == int(user_id)

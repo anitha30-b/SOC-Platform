@@ -117,5 +117,29 @@ def store_security_event(
     )
 
     db.add(security_event)
+    db.flush()
+
+    # Evaluate enabled detection and alert rules after the event
+    # has received its database ID.
+    try:
+        from detection_engine import evaluate_event
+
+        result = evaluate_event(db, security_event)
+
+        print(
+            "[SOC DETECTION ENGINE] "
+            f"Event={security_event.event_id}; "
+            f"Detections={result['detections_matched']}; "
+            f"Alerts={result['alerts_generated']}",
+            flush=True,
+        )
+
+    except Exception as exc:
+        # Detection failures must not prevent normal event storage.
+        print(
+            "[SOC DETECTION ENGINE] Evaluation failed: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
 
     return security_event

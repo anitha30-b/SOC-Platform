@@ -139,6 +139,8 @@ def serialize_event(event):
             "event_count": event_count,
         },
         "response_actions": response_actions,
+        "raw_event": raw_event if event.source == "snort" else None,
+        "correlation": raw_event.get("correlation") if event.source == "snort" else None,
     }
 
 

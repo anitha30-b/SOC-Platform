@@ -50,12 +50,19 @@ def system_health(current_user=Depends(require_role(3))):
         )
 
     # PostgreSQL real-time event listener
-    listener_running = bool(postgres_event_listener.running)
     listener_thread_alive = bool(
         postgres_event_listener.thread
         and postgres_event_listener.thread.is_alive()
     )
-    listener_connected = bool(postgres_event_listener.connection)
+    listener_running = bool(
+        listener_thread_alive
+        and not postgres_event_listener.stop_event.is_set()
+    )
+    listener_connection = postgres_event_listener.connection
+    listener_connected = bool(
+        listener_connection
+        and not listener_connection.closed
+    )
 
     if listener_running and listener_thread_alive and listener_connected:
         listener = _component(
@@ -127,6 +134,80 @@ def system_health(current_user=Depends(require_role(3))):
             "uptime_seconds": uptime_seconds,
         },
     }
+
+
+@router.get("/log-pipeline")
+def log_pipeline_health(current_user=Depends(require_role(3))):
+    import subprocess
+    from pathlib import Path
+
+    checked_at = datetime.now(timezone.utc).isoformat()
+
+    # PostgreSQL event listener
+    listener_thread_alive = bool(
+        postgres_event_listener.thread
+        and postgres_event_listener.thread.is_alive()
+    )
+    listener_connection = postgres_event_listener.connection
+
+    listener = bool(
+        listener_thread_alive
+        and not postgres_event_listener.stop_event.is_set()
+        and listener_connection
+        and not listener_connection.closed
+    )
+
+    # System journal: verify that journalctl can be queried.
+    try:
+        result = subprocess.run(
+            ["journalctl", "--no-pager", "-n", "1", "-o", "short-iso"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        journal_ok = result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        journal_ok = False
+
+    # Application access log
+    access_log = Path(__file__).resolve().parent / "runtime_logs" / "access.log"
+    access_exists = access_log.is_file()
+    access_readable = access_exists and access_log.stat().st_mode is not None
+
+    components = {
+        "postgres_event_listener": {
+            "status": "HEALTHY" if listener else "CRITICAL",
+            "message": "PostgreSQL event listener is running."
+            if listener else "PostgreSQL event listener is not healthy.",
+        },
+        "system_journal": {
+            "status": "HEALTHY" if journal_ok else "CRITICAL",
+            "message": "System journal query succeeded."
+            if journal_ok else "System journal query failed.",
+        },
+        "application_access_log": {
+            "status": "HEALTHY" if access_exists and access_readable else "WARNING",
+            "message": "Application access log exists."
+            if access_exists and access_readable else "Application access log is missing or unavailable.",
+            "exists": access_exists,
+            "readable": access_readable,
+        },
+    }
+
+    statuses = [component["status"] for component in components.values()]
+    overall = (
+        "CRITICAL" if "CRITICAL" in statuses
+        else "WARNING" if "WARNING" in statuses
+        else "HEALTHY"
+    )
+
+    return {
+        "status": overall,
+        "checked_at": checked_at,
+        "components": components,
+    }
+
 
 @router.get("/search-index-metrics")
 def search_index_metrics(current_user=Depends(require_role(3))):
@@ -226,3 +307,4 @@ def search_index_metrics(current_user=Depends(require_role(3))):
         ],
         "search_query_statistics": query_stats,
     }
+

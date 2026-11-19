@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     Numeric,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -40,6 +41,13 @@ class Role(Base):
     users = relationship(
         "User",
         back_populates="role",
+    )
+
+
+    tool_permissions = relationship(
+        "RoleToolPermission",
+        back_populates="role",
+        cascade="all, delete-orphan",
     )
 
 
@@ -574,6 +582,13 @@ class SecurityTool(Base):
 
     permissions = relationship(
         "UserToolPermission",
+        back_populates="tool",
+        cascade="all, delete-orphan",
+    )
+
+
+    role_permissions = relationship(
+        "RoleToolPermission",
         back_populates="tool",
         cascade="all, delete-orphan",
     )
@@ -4036,3 +4051,463 @@ class IPIntelligence(Base):
             name="uq_ip_intelligence_user_ip",
         ),
     )
+
+
+class RoleToolPermission(Base):
+    __tablename__ = "role_tool_permissions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    role_id = Column(Integer, ForeignKey("roles.id"), nullable=False, index=True)
+    tool_id = Column(Integer, ForeignKey("security_tools.id"), nullable=False, index=True)
+    allowed = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    role = relationship("Role", back_populates="tool_permissions")
+    tool = relationship("SecurityTool", back_populates="role_permissions")
+
+    __table_args__ = (
+        UniqueConstraint("role_id", "tool_id", name="uq_role_tool_permission"),
+    )
+
+
+
+class BackgroundJob(Base):
+    __tablename__ = "soc_background_jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(String(36), unique=True, nullable=False, index=True)
+    tool = Column(String(50), nullable=False, index=True)
+    target = Column(String(2048), nullable=False)
+    scan_type = Column(String(50), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    status = Column(String(40), nullable=False, default="queued", index=True)
+    progress = Column(Integer, nullable=False, default=0)
+    stage = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    error = Column(Text, nullable=True)
+    result_json = Column(Text, nullable=True)
+
+
+
+class SecurityPolicy(Base):
+    __tablename__ = "security_policies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), unique=True, nullable=False, index=True)
+    category = Column(String(100), nullable=False, index=True)
+    description = Column(Text, nullable=False)
+    severity = Column(String(50), nullable=False, default="MEDIUM", index=True)
+    enabled = Column(Boolean, nullable=False, default=True, index=True)
+    policy_content = Column(Text, nullable=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
+
+class SecurityBaseline(Base):
+    __tablename__ = "security_baselines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), unique=True, nullable=False, index=True)
+    framework = Column(String(100), nullable=False, index=True)
+    category = Column(String(100), nullable=False, index=True)
+    description = Column(Text, nullable=False)
+    severity = Column(String(50), nullable=False, default="MEDIUM")
+    enabled = Column(Boolean, nullable=False, default=True, index=True)
+    baseline_content = Column(Text, nullable=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
+
+class DetectionConfiguration(Base):
+    __tablename__ = "detection_configurations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), unique=True, nullable=False, index=True)
+    category = Column(String(100), nullable=False, index=True)
+    description = Column(Text, nullable=False)
+    detection_type = Column(String(100), nullable=False, default="Rule-Based")
+    severity = Column(String(50), nullable=False, default="MEDIUM")
+    conditions = Column(Text, nullable=True)
+    threshold = Column(Integer, nullable=True)
+    time_window_minutes = Column(Integer, nullable=True)
+    source = Column(String(100), nullable=True)
+    event_type = Column(String(100), nullable=True)
+    enabled = Column(Boolean, nullable=False, default=True, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
+
+class AlertConfiguration(Base):
+    __tablename__ = "alert_configurations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), unique=True, nullable=False, index=True)
+    category = Column(String(100), nullable=False, index=True)
+    description = Column(Text, nullable=False)
+    severity = Column(String(50), nullable=False, default="MEDIUM")
+    priority = Column(String(50), nullable=False, default="MEDIUM")
+    source = Column(String(100), nullable=True)
+    event_type = Column(String(100), nullable=True)
+    threshold = Column(Integer, nullable=True)
+    time_window_minutes = Column(Integer, nullable=True)
+    conditions = Column(Text, nullable=True)
+    notification_policy_id = Column(
+        Integer,
+        ForeignKey("notification_policies.id"),
+        nullable=True,
+    )
+    enabled = Column(Boolean, nullable=False, default=True, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
+
+class RetentionPolicy(Base):
+    __tablename__ = "retention_policies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), unique=True, nullable=False, index=True)
+    data_type = Column(String(100), nullable=False, index=True)
+    description = Column(Text, nullable=False)
+    retention_days = Column(Integer, nullable=False, default=90)
+    archive_enabled = Column(Boolean, nullable=False, default=False)
+    archive_after_days = Column(Integer, nullable=True)
+    auto_delete = Column(Boolean, nullable=False, default=False)
+    enabled = Column(Boolean, nullable=False, default=True, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
+
+class PlatformConfiguration(Base):
+    __tablename__ = "platform_configurations"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    session_timeout_minutes = Column(Integer, nullable=False, default=30)
+
+    password_min_length = Column(Integer, nullable=False, default=8)
+    password_require_uppercase = Column(Boolean, nullable=False, default=True)
+    password_require_lowercase = Column(Boolean, nullable=False, default=True)
+    password_require_number = Column(Boolean, nullable=False, default=True)
+    password_require_special = Column(Boolean, nullable=False, default=False)
+
+    max_failed_login_attempts = Column(Integer, nullable=False, default=5)
+    account_lockout_minutes = Column(Integer, nullable=False, default=15)
+
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
+
+class ServiceAccount(Base):
+    __tablename__ = "service_accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), nullable=False, index=True)
+    description = Column(Text, nullable=True)
+    key_prefix = Column(String(24), nullable=False, index=True)
+    key_hash = Column(String(64), nullable=False, unique=True)
+    role_id = Column(Integer, ForeignKey("roles.id"), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True, index=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    role = relationship("Role")
+
+
+
+class APIKey(Base):
+    __tablename__ = "api_keys"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), nullable=False, index=True)
+    description = Column(Text, nullable=True)
+    key_prefix = Column(String(24), nullable=False, index=True)
+    key_hash = Column(String(64), nullable=False, unique=True)
+    enabled = Column(Boolean, nullable=False, default=True, index=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=True, index=True)
+    permissions = Column(JSON, nullable=False, default=list)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    jti = Column(String(128), nullable=False, unique=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    username = Column(String(150), nullable=False, index=True)
+    role_id = Column(Integer, nullable=False, index=True)
+    ip_address = Column(String(100), nullable=True)
+    user_agent = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    last_activity_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    revoked_at = Column(DateTime, nullable=True, index=True)
+    revoked_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    revocation_reason = Column(String(255), nullable=True)
+
+    user = relationship("User", foreign_keys=[user_id])
+    administrator = relationship("User", foreign_keys=[revoked_by])
+
+
+
+class Team(Base):
+    __tablename__ = "teams"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), nullable=False, unique=True, index=True)
+    description = Column(Text, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow,
+                        onupdate=datetime.utcnow)
+
+    members = relationship(
+        "TeamMember",
+        back_populates="team",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    creator = relationship("User", foreign_keys=[created_by])
+
+
+
+class TeamMember(Base):
+    __tablename__ = "team_members"
+
+    id = Column(Integer, primary_key=True, index=True)
+    team_id = Column(Integer, ForeignKey("teams.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    assigned_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("team_id", "user_id", name="uq_team_member"),
+    )
+
+    team = relationship("Team", back_populates="members")
+    user = relationship("User")
+
+
+
+class SIEMIntegration(Base):
+    __tablename__ = "siem_integrations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), nullable=False)
+    provider = Column(String(50), nullable=False, index=True)
+    base_url = Column(String(1000), nullable=False)
+    encrypted_credentials = Column(Text, nullable=True)
+
+    enabled = Column(Boolean, nullable=False, default=True, index=True)
+    status = Column(String(30), nullable=False, default="PENDING")
+    last_tested_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "name",
+            name="uq_siem_provider_name",
+        ),
+    )
+
+
+
+class SIEMIngestionState(Base):
+    __tablename__ = "siem_ingestion_states"
+
+    id = Column(Integer, primary_key=True, index=True)
+    integration_id = Column(
+        Integer,
+        ForeignKey("siem_integrations.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    last_ingested_at = Column(DateTime, nullable=True)
+    last_success_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    total_events = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
+
+class DetectionResult(Base):
+    __tablename__ = "detection_results"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "security_event_id",
+            "detection_config_id",
+            name="uq_detection_event_rule",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    security_event_id = Column(
+        Integer,
+        ForeignKey("security_events.id"),
+        nullable=False,
+        index=True,
+    )
+
+    detection_config_id = Column(
+        Integer,
+        ForeignKey("detection_configurations.id"),
+        nullable=False,
+        index=True,
+    )
+
+    rule_name = Column(String(150), nullable=False)
+    detection_type = Column(String(100), nullable=False)
+    severity = Column(String(50), nullable=False)
+    match_details = Column(Text, nullable=True)
+
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        index=True,
+    )
+
+
+
+class AlertResult(Base):
+    __tablename__ = "alert_results"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "security_event_id",
+            "alert_config_id",
+            name="uq_alert_event_rule",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    security_event_id = Column(
+        Integer,
+        ForeignKey("security_events.id"),
+        nullable=False,
+        index=True,
+    )
+
+    alert_config_id = Column(
+        Integer,
+        ForeignKey("alert_configurations.id"),
+        nullable=False,
+        index=True,
+    )
+
+    alert_name = Column(String(150), nullable=False)
+    severity = Column(String(50), nullable=False)
+    priority = Column(String(50), nullable=False)
+    match_details = Column(Text, nullable=True)
+
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        index=True,
+    )
+
+
+
+class EmailHeaderAnalysis(Base):
+    __tablename__ = "email_header_analyses"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    admin_user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    sender = Column(String(255), nullable=True)
+    reply_to = Column(String(255), nullable=True)
+    subject = Column(String(500), nullable=True)
+    from_domain = Column(String(255), nullable=True)
+
+    risk_score = Column(Integer, nullable=False, default=0)
+    risk_level = Column(String(30), nullable=False, default="LOW")
+
+    indicators = Column(JSON, nullable=False, default=list)
+    authentication_results = Column(JSON, nullable=False, default=dict)
+
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        index=True,
+    )
+

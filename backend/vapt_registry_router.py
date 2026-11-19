@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import time
 import uuid
@@ -8,17 +9,103 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from database import get_db
-from models import User
+from database import get_db, SessionLocal
+from models import User, SecurityEvent
 from rbac import require_role
+from security_event_store import store_security_event
+from security_events import create_security_event, generate_event_id
+from realtime_journal_listener import notify_security_event
 from vapt import (
     ALLOW_LOCAL_TARGETS,
     is_local_host,
     is_private_or_reserved_host,
     require_user_tool_permission,
+    persist_masscan_security_events,
 )
 from vapt_tools.registry import build_registry
 from vapt_tools.scripts.nuclei import NucleiError, run_nuclei
+
+
+
+def _persist_nuclei_security_events(result: dict) -> int:
+    """Persist actual Nuclei findings and publish them after commit."""
+    findings = result.get("findings") or []
+    target = str(result.get("target") or "").strip()
+
+    if not findings:
+        return 0
+
+    db = SessionLocal()
+    notifications = []
+    inserted = 0
+
+    try:
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+
+            name = (
+                finding.get("name")
+                or finding.get("template_id")
+                or "Nuclei finding"
+            )
+            location = (
+                finding.get("matched_at")
+                or finding.get("url")
+                or finding.get("host")
+                or target
+            )
+            severity = str(finding.get("severity") or "INFO").upper()
+
+            identity = {
+                "source": "nuclei",
+                "target": target,
+                "template_id": finding.get("template_id"),
+                "matched_at": finding.get("matched_at"),
+                "url": finding.get("url"),
+                "host": finding.get("host"),
+            }
+            event_id = generate_event_id(
+                json.dumps(identity, sort_keys=True, default=str)
+            )
+
+            if db.query(SecurityEvent).filter(
+                SecurityEvent.event_id == event_id
+            ).first():
+                continue
+
+            event = create_security_event(
+                source="nuclei",
+                event_type="vulnerability_finding",
+                message=f"Nuclei detected {name} at {location}",
+                severity=severity,
+                target=target,
+                raw_event={
+                    "tool": "Nuclei",
+                    "finding": finding,
+                },
+                event_id=event_id,
+            )
+
+            store_security_event(db, event)
+            notifications.append(event)
+            inserted += 1
+
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    for event in notifications:
+        try:
+            notify_security_event(event)
+        except Exception as exc:
+            print(f"[SOC NUCLEI EVENT] Notification failed: {exc}")
+
+    return inserted
 
 
 router = APIRouter(
@@ -156,6 +243,15 @@ async def _run_nuclei_job(
             target,
         )
 
+        try:
+            job["security_events_persisted"] = await asyncio.to_thread(
+                _persist_nuclei_security_events,
+                result,
+            )
+        except Exception as event_exc:
+            job["security_event_persistence_error"] = str(event_exc)
+            print(f"[SOC NUCLEI EVENT] Persistence failed: {event_exc}")
+
         job["result"] = result
 
         job.update(
@@ -280,12 +376,25 @@ async def run_nuclei_tool(
             detail=str(exc),
         ) from exc
 
+    try:
+        security_events_persisted = await asyncio.to_thread(
+            _persist_nuclei_security_events,
+            result,
+        )
+        persistence_error = None
+    except Exception as event_exc:
+        security_events_persisted = 0
+        persistence_error = str(event_exc)
+        print(f"[SOC NUCLEI EVENT] Persistence failed: {event_exc}")
+
     return {
         "message": "Nuclei scan completed",
         "tool": "Nuclei",
         "username": current_user.username,
         "target": target,
         "result": result,
+        "security_events_persisted": security_events_persisted,
+        "security_event_persistence_error": persistence_error,
     }
 
 
@@ -396,6 +505,16 @@ async def _run_generic_job(
             "Finalizing",
             f"Collecting {tool['name']} results.",
         )
+
+        if tool.get("id") == "masscan":
+            try:
+                result["security_events_persisted"] = await asyncio.to_thread(
+                    persist_masscan_security_events,
+                    result,
+                )
+            except Exception as event_exc:
+                job["security_event_persistence_error"] = str(event_exc)
+                print(f"[SOC MASSCAN EVENT] Persistence failed: {event_exc}")
 
         job["result"] = result
         job["status"] = result.get("status", "completed")

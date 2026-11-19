@@ -32,7 +32,38 @@ import CorrelationRulesPage from "./CorrelationRulesPage";
 import DetectionExtendedPages from "./DetectionExtendedPages";
 import { jsPDF } from "jspdf";
 import AdminNotificationPolicies from "./components/AdminNotificationPolicies";
+import AdminSecurityBaselines from "./components/AdminSecurityBaselines";
+import AdminDetectionConfig from "./components/AdminDetectionConfig";
+import AdminAlertConfig from "./components/AdminAlertConfig";
+import AdminSecurityPolicies from "./components/AdminSecurityPolicies";
+import AdminRetentionPolicies from "./components/AdminRetentionPolicies";
 import AdminNotificationChannel from "./components/AdminNotificationChannel";
+import AdminEmailHeaderAnalysis from "./components/AdminEmailHeaderAnalysis";
+import AdminAssetInventory from "./components/AdminAssetInventory";
+import AdminPlatformConfiguration from "./components/AdminPlatformConfiguration";
+import AdminEndpoints from "./components/AdminEndpoints";
+import AdminAssetDiscovery from "./components/AdminAssetDiscovery";
+import AdminServerAssetManagement from "./components/AdminServerAssetManagement";
+import AdminServerMonitoring from "./components/AdminServerMonitoring";
+import AdminNetworkDevices from "./components/AdminNetworkDevices";
+import AdminApplications from "./components/AdminApplications";
+import AdminAssetGroups from "./components/AdminAssetGroups";
+import AdminCloudAssets from "./components/AdminCloudAssets";
+import AdminSystemHealth from "./components/AdminSystemHealth";
+import AdminSecurityPosture from "./components/AdminSecurityPosture";
+import AdminRiskOverview from "./components/AdminRiskOverview";
+import AdminEnvironmentHealth from "./components/AdminEnvironmentHealth";
+import AdminAPIHealth from "./components/AdminAPIHealth";
+import AdminDatabaseHealth from "./components/AdminDatabaseHealth";
+import AdminLogPipelineHealth from "./components/AdminLogPipelineHealth";
+import AdminAgentHealth from "./components/AdminAgentHealth";
+import AdminBackgroundJobs from "./components/AdminBackgroundJobs";
+import AdminSystemLogs from "./components/AdminSystemLogs";
+import AdminBackup from "./components/AdminBackup";
+import AdminComplianceDashboard from "./components/AdminComplianceDashboard";
+import AdminComplianceFramework from "./components/AdminComplianceFramework";
+import AdminComplianceReports from "./components/AdminComplianceReports";
+import AdminLicense from "./components/AdminLicense";
 
 const API_URL = "http://127.0.0.1:8000";
 
@@ -55,12 +86,298 @@ function renderNmapHtmlContent(nmapData) {
   return `
 <h2>Port & Service Results</h2>
 <table><thead><tr><th>Host</th><th>Port</th><th>Protocol</th><th>State</th><th>Service</th><th>Product</th><th>Version</th></tr></thead>
-<tbody>${ports.map((p) => `<tr><td>${escapeHtml(p.host)}</td><td>${escapeHtml(p.port)}</td><td>${escapeHtml(p.protocol)}</td><td>${escapeHtml(p.state)}</td><td>${escapeHtml(p.service?.name)}</td><td>${escapeHtml(p.service?.product)}</td><td>${escapeHtml(p.service?.version)}</td></tr>`).join("") || "<tr><td colspan='7'>No port results.</td></tr>"}</tbody></table>
+<tbody>${ports.map((p) => `<tr><td>${escapeHtml(p.host)}</td><td>${escapeHtml(p.port)}</td><td>${escapeHtml(p.protocol)}</td><td>${escapeHtml(p.state)}</td><td>${escapeHtml(p.service?.name)}</td><td>${escapeHtml(p.service?.product || p.service?.name || "Not identified")}</td><td>${escapeHtml([p.service?.version, p.service?.extrainfo].filter(Boolean).join(" ") || "Version not identified")}</td></tr>`).join("") || "<tr><td colspan='7'>No port results.</td></tr>"}</tbody></table>
 <h2>OS Detection</h2>${osMatches.map((o) => `<div class="card">${escapeHtml(o.name || "Unknown OS")} — Accuracy: ${escapeHtml(o.accuracy || "—")}%</div>`).join("") || "<p>No OS detection results.</p>"}
 <h2>NSE / Security Findings</h2>${scripts.map((s) => `<div class="card"><b>${escapeHtml(s.id || "NSE script")}</b><pre>${escapeHtml(s.output || "No output")}</pre></div>`).join("") || "<p>No NSE results.</p>"}
 <h2>Warnings / Errors</h2>${(Array.isArray(nmapData?.errors) ? nmapData.errors : []).map((e) => `<div class="card">${escapeHtml(e)}</div>`).join("") || "<p>No warnings or errors.</p>"}
 <h2>Raw Nmap Output</h2><pre>${escapeHtml(nmapData?.raw_output || nmapData?.stdout || nmapData?.output || JSON.stringify(nmapData, null, 2))}</pre>`;
 }
+
+
+
+function AdminTeamsManagement({ onBack }) {
+  const [teams, setTeams] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [selectedUsers, setSelectedUsers] = useState({});
+
+  const headers = {
+    Authorization: `Bearer ${localStorage.getItem("token")}`,
+  };
+
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      setError("");
+      const [teamResponse, userResponse] = await Promise.all([
+        axios.get(`${API_URL}/admin/teams`, { headers }),
+        axios.get(`${API_URL}/admin/users`, { headers }),
+      ]);
+      setTeams(teamResponse.data.teams || []);
+      setUsers(userResponse.data.users || []);
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to load teams.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  const saveTeam = async (event) => {
+    event.preventDefault();
+    try {
+      setSaving(true);
+      setError("");
+      const payload = { name: name.trim(), description: description.trim() || null };
+
+      if (editingId) {
+        await axios.put(`${API_URL}/admin/teams/${editingId}`, payload, { headers });
+      } else {
+        await axios.post(`${API_URL}/admin/teams`, payload, { headers });
+      }
+
+      setName("");
+      setDescription("");
+      setEditingId(null);
+      await loadData();
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to save team.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const editTeam = (team) => {
+    setEditingId(team.id);
+    setName(team.name);
+    setDescription(team.description || "");
+  };
+
+  const deleteTeam = async (team) => {
+    if (!window.confirm(`Delete team "${team.name}" and its memberships?`)) return;
+    try {
+      setError("");
+      await axios.delete(`${API_URL}/admin/teams/${team.id}`, { headers });
+      await loadData();
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to delete team.");
+    }
+  };
+
+  const addMember = async (teamId) => {
+    const userId = Number(selectedUsers[teamId]);
+    if (!userId) {
+      setError("Select a user before assigning a team member.");
+      return;
+    }
+    try {
+      setError("");
+      await axios.post(
+        `${API_URL}/admin/teams/${teamId}/members`,
+        { user_id: userId },
+        { headers }
+      );
+      setSelectedUsers((previous) => ({ ...previous, [teamId]: "" }));
+      await loadData();
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to assign team member.");
+    }
+  };
+
+  const removeMember = async (teamId, userId) => {
+    if (!window.confirm("Remove this user from the team?")) return;
+    try {
+      setError("");
+      await axios.delete(
+        `${API_URL}/admin/teams/${teamId}/members/${userId}`,
+        { headers }
+      );
+      await loadData();
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to remove team member.");
+    }
+  };
+
+  const filteredTeams = teams.filter((team) =>
+    `${team.name} ${team.description || ""}`.toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <div>
+      <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.3em] text-red-500">
+            User & Access Management
+          </p>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">Teams</h1>
+          <p className="mt-2 text-xs leading-6 text-gray-500">
+            Organize platform users into operational teams.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button type="button" onClick={loadData}
+            className="border border-white/10 px-4 py-2 text-[10px] uppercase tracking-wider text-gray-400 hover:text-white">
+            Refresh
+          </button>
+          <button type="button" onClick={onBack}
+            className="border border-white/10 px-4 py-2 text-[10px] uppercase tracking-wider text-gray-400 hover:text-white">
+            ← Overview
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="mb-4 rounded-md border border-red-500/25 bg-red-500/10 px-4 py-3 text-xs text-red-400">
+          {error}
+        </div>
+      )}
+
+      <div className="mb-5 grid gap-4 sm:grid-cols-2">
+        <div className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+          <p className="text-[10px] uppercase tracking-wider text-gray-500">Total Teams</p>
+          <p className="mt-2 text-3xl font-bold text-white">{teams.length}</p>
+        </div>
+        <div className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+          <p className="text-[10px] uppercase tracking-wider text-gray-500">Team Memberships</p>
+          <p className="mt-2 text-3xl font-bold text-white">
+            {teams.reduce((total, team) => total + Number(team.member_count || 0), 0)}
+          </p>
+        </div>
+      </div>
+
+      <form onSubmit={saveTeam} className="mb-6 rounded-lg border border-white/10 bg-[#0b1014] p-5">
+        <h2 className="mb-4 text-xs font-semibold uppercase tracking-wider text-white">
+          {editingId ? "Edit Team" : "Create New Team"}
+        </h2>
+        <div className="grid gap-3 md:grid-cols-2">
+          <input value={name} onChange={(e) => setName(e.target.value)}
+            placeholder="Team name" maxLength={150} required
+            className="rounded-md border border-white/10 bg-[#080b0e] px-3 py-3 text-xs text-white outline-none focus:border-red-500/50" />
+          <input value={description} onChange={(e) => setDescription(e.target.value)}
+            placeholder="Team description (optional)" maxLength={2000}
+            className="rounded-md border border-white/10 bg-[#080b0e] px-3 py-3 text-xs text-white outline-none focus:border-red-500/50" />
+        </div>
+        <div className="mt-4 flex gap-2">
+          <button disabled={saving}
+            className="bg-red-600 px-5 py-3 text-[10px] font-semibold uppercase tracking-wider text-white hover:bg-red-500 disabled:opacity-50">
+            {saving ? "Saving..." : editingId ? "Update Team" : "Create Team"}
+          </button>
+          {editingId && (
+            <button type="button" onClick={() => {
+              setEditingId(null); setName(""); setDescription("");
+            }} className="border border-white/10 px-4 py-3 text-[10px] uppercase text-gray-400">
+              Cancel
+            </button>
+          )}
+        </div>
+      </form>
+
+      <div className="mb-4">
+        <input value={search} onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search teams..."
+          className="w-full rounded-md border border-white/10 bg-[#0b1014] px-4 py-3 text-xs text-white outline-none focus:border-red-500/50" />
+      </div>
+
+      {loading ? (
+        <div className="rounded-lg border border-white/10 bg-[#0b1014] p-10 text-center text-xs text-gray-500">
+          Loading teams...
+        </div>
+      ) : filteredTeams.length === 0 ? (
+        <div className="rounded-lg border border-white/10 bg-[#0b1014] p-10 text-center text-xs text-gray-500">
+          No teams found. Create your first team above.
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {filteredTeams.map((team) => {
+            const availableUsers = users.filter(
+              (user) => !team.members.some((member) => member.id === user.id)
+            );
+            return (
+              <div key={team.id} className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+                <div className="flex flex-col justify-between gap-3 sm:flex-row">
+                  <div>
+                    <h3 className="text-sm font-semibold text-white">{team.name}</h3>
+                    <p className="mt-1 text-xs text-gray-500">
+                      {team.description || "No description"}
+                    </p>
+                    <p className="mt-2 text-[10px] text-gray-500">
+                      {team.member_count} member(s) · Team ID: {team.id}
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => editTeam(team)}
+                      className="border border-white/10 px-3 py-2 text-[10px] uppercase text-gray-300 hover:text-white">
+                      Edit
+                    </button>
+                    <button type="button" onClick={() => deleteTeam(team)}
+                      className="border border-red-500/30 px-3 py-2 text-[10px] uppercase text-red-400 hover:bg-red-500/10">
+                      Delete
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-5 border-t border-white/10 pt-4">
+                  <h4 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+                    Team Members
+                  </h4>
+                  {team.members.length === 0 ? (
+                    <p className="text-xs text-gray-600">No members assigned.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {team.members.map((member) => (
+                        <div key={member.id}
+                          className="flex items-center justify-between gap-3 rounded-md border border-white/5 bg-[#080b0e] px-3 py-3">
+                          <div>
+                            <p className="text-xs text-white">{member.username}</p>
+                            <p className="mt-1 text-[10px] text-gray-500">{member.email}</p>
+                          </div>
+                          <button type="button" onClick={() => removeMember(team.id, member.id)}
+                            className="text-[10px] uppercase text-red-400 hover:text-red-300">
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                  <select value={selectedUsers[team.id] || ""}
+                    onChange={(e) => setSelectedUsers((previous) => ({
+                      ...previous, [team.id]: e.target.value
+                    }))}
+                    className="min-w-0 flex-1 rounded-md border border-white/10 bg-[#080b0e] px-3 py-3 text-xs text-white">
+                    <option value="">Select a user to assign</option>
+                    {availableUsers.map((user) => (
+                      <option key={user.id} value={user.id}>
+                        {user.username} — {user.email}
+                      </option>
+                    ))}
+                  </select>
+                  <button type="button" onClick={() => addMember(team.id)}
+                    disabled={!availableUsers.length}
+                    className="border border-red-500/30 bg-red-500/10 px-4 py-3 text-[10px] font-semibold uppercase text-red-400 disabled:opacity-40">
+                    Add Member
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 function App() {
   const [page, setPage] = useState("home");
@@ -344,9 +661,21 @@ function App() {
   if (page === "admin-dashboard") {
     return (
       <AdminDashboard
-        onLogout={() => {
-          localStorage.removeItem("token");
-          setPage("home");
+        onLogout={async () => {
+          const token = localStorage.getItem("token");
+          try {
+            if (token) {
+              await fetch(`${API_URL}/auth/logout`, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${token}` },
+              });
+            }
+          } catch (error) {
+            console.error("Logout audit request failed:", error);
+          } finally {
+            localStorage.removeItem("token");
+            setPage("home");
+          }
         }}
       />
     );
@@ -384,11 +713,23 @@ function App() {
   if (page === "user-dashboard") {
     return (
       <UserDashboard
-        onLogout={() => {
-          localStorage.removeItem("token");
-          localStorage.removeItem("active_vapt_target");
-          localStorage.removeItem("active_vapt_target_meta");
-          setPage("home");
+        onLogout={async () => {
+          const token = localStorage.getItem("token");
+          try {
+            if (token) {
+              await fetch(`${API_URL}/auth/logout`, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${token}` },
+              });
+            }
+          } catch (error) {
+            console.error("Logout audit request failed:", error);
+          } finally {
+            localStorage.removeItem("token");
+            localStorage.removeItem("active_vapt_target");
+            localStorage.removeItem("active_vapt_target_meta");
+            setPage("home");
+          }
         }}
       />
     );
@@ -645,11 +986,21 @@ const ADMIN_NAV = [
       ["Asset Inventory", "admin-asset-inventory"],
       ["Asset Discovery", "admin-asset-discovery"],
       ["Servers", "admin-servers"],
+      ["Server Monitoring", "admin-server-monitoring"],
       ["Endpoints", "admin-endpoints"],
       ["Network Devices", "admin-network-devices"],
       ["Applications", "admin-applications"],
       ["Cloud Assets", "admin-cloud-assets"],
       ["Asset Groups", "admin-asset-groups"],
+    ],
+  },
+  {
+    id: "siem",
+    label: "SIEM",
+    icon: "⌁",
+    items: [
+      ["Security Events", "admin-security-events"],
+      ["Email Header Analysis", "admin-email-header-analysis"],
     ],
   },
   {
@@ -661,12 +1012,6 @@ const ADMIN_NAV = [
       ["Ticketing", "admin-ticketing"],
       ["Email", "admin-email"],
       ["Slack", "admin-slack"],
-      ["Microsoft Teams", "admin-teams-integration"],
-      ["Webhooks", "admin-webhooks"],
-      ["AWS", "admin-aws"],
-      ["Azure", "admin-azure"],
-      ["GCP", "admin-gcp"],
-      ["API Integrations", "admin-api-integrations"],
     ],
   },
   {
@@ -691,7 +1036,6 @@ const ADMIN_NAV = [
       ["Notification Policies", "admin-notification-policies"],
       ["Email Alerts", "admin-email-alerts"],
       ["Slack Alerts", "admin-slack-alerts"],
-      ["Teams Alerts", "admin-teams-alerts"],
       ["Webhooks", "admin-notification-webhooks"],
     ],
   },
@@ -1050,9 +1394,13 @@ function AdminReferenceTargetMap({ users, assessments }) {
         }}
       />
 
-      <svg className="absolute inset-4 h-[calc(100%-2rem)] w-[calc(100%-2rem)]">
+      <svg
+        viewBox="0 0 100 100"
+        preserveAspectRatio="none"
+        className="absolute inset-4 h-[calc(100%-2rem)] w-[calc(100%-2rem)]"
+      >
         <path
-          d="M18% 38% Q30% 12% 42% 30% T64% 45% T78% 28%"
+          d="M18 38 Q30 12 42 30 T64 45 T78 28"
           fill="none"
           stroke="#ef3340"
           strokeWidth="1.5"
@@ -1060,7 +1408,7 @@ function AdminReferenceTargetMap({ users, assessments }) {
           opacity="0.8"
         />
         <path
-          d="M18% 38% Q38% 52% 64% 45%"
+          d="M18 38 Q38 52 64 45"
           fill="none"
           stroke="#ef3340"
           strokeWidth="1"
@@ -1087,12 +1435,1273 @@ function AdminReferenceTargetMap({ users, assessments }) {
   );
 }
 
+function AdminRolesManagement({ onBack, onNavigate }) {
+  const [roles, setRoles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadRoles = async () => {
+    try {
+      setLoading(true);
+      setError("");
+
+      const response = await axios.get(`${API_URL}/admin/roles`, {
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem("token")}`,
+        },
+      });
+
+      setRoles(response.data.roles || []);
+    } catch (err) {
+      console.error("Unable to load Admin roles:", err);
+      setError(
+        err.response?.data?.detail || "Unable to load existing roles."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadRoles();
+  }, []);
+
+  return (
+    <div>
+      <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.3em] text-red-500">
+            User & Access Management
+          </p>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">
+            Role Management
+          </h1>
+          <p className="mt-2 max-w-3xl text-xs leading-6 text-gray-500">
+            View the existing platform roles and their assigned users and
+            configured security-tool permissions.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={loadRoles}
+          className="border border-white/10 bg-[#0d1114] px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400 transition hover:border-red-500/40 hover:text-white"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div className="mb-4 rounded-md border border-red-500/25 bg-red-500/10 px-4 py-3 text-xs text-red-400">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="rounded-lg border border-white/10 bg-[#0b1014] p-10 text-center text-xs text-gray-500">
+          Loading existing roles...
+        </div>
+      ) : (
+        <>
+          <div className="mb-5 grid gap-4 sm:grid-cols-3">
+            <div className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">
+                Total Roles
+              </p>
+              <p className="mt-2 text-3xl font-bold text-white">
+                {roles.length}
+              </p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">
+                Assigned Users
+              </p>
+              <p className="mt-2 text-3xl font-bold text-white">
+                {roles.reduce(
+                  (total, role) => total + Number(role.user_count || 0),
+                  0
+                )}
+              </p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">
+                Role Tool Rules
+              </p>
+              <p className="mt-2 text-3xl font-bold text-white">
+                {roles.reduce(
+                  (total, role) =>
+                    total + Number(role.tool_permission_count || 0),
+                  0
+                )}
+              </p>
+            </div>
+          </div>
+
+          <div className="overflow-hidden rounded-lg border border-white/10 bg-[#0b1014]">
+            <div className="border-b border-white/10 px-5 py-4">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-white">
+                Existing Platform Roles
+              </h2>
+              <p className="mt-1 text-[10px] text-gray-500">
+                Roles currently stored in the platform database.
+              </p>
+            </div>
+
+            {roles.length === 0 ? (
+              <p className="p-8 text-center text-xs text-gray-500">
+                No roles were found.
+              </p>
+            ) : (
+              <div className="divide-y divide-white/5">
+                {roles.map((role) => (
+                  <div
+                    key={role.id}
+                    className="flex flex-col justify-between gap-4 px-5 py-5 sm:flex-row sm:items-center"
+                  >
+                    <div>
+                      <div className="flex items-center gap-3">
+                        <span className="flex h-9 w-9 items-center justify-center rounded-lg border border-red-500/20 bg-red-500/10 text-xs font-bold text-red-400">
+                          {role.id}
+                        </span>
+                        <div>
+                          <h3 className="text-sm font-semibold text-white">
+                            {role.name}
+                          </h3>
+                          <p className="mt-1 text-[10px] text-gray-500">
+                            Role ID: {role.id}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-6">
+                      <div>
+                        <p className="text-[9px] uppercase tracking-wider text-gray-500">
+                          Assigned Users
+                        </p>
+                        <p className="mt-1 text-lg font-semibold text-white">
+                          {role.user_count}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-[9px] uppercase tracking-wider text-gray-500">
+                          Tool Rules
+                        </p>
+                        <p className="mt-1 text-lg font-semibold text-white">
+                          {role.tool_permission_count}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="mt-5 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => onNavigate?.("admin-permissions")}
+              className="border border-red-500/30 bg-red-500/10 px-4 py-3 text-[10px] font-semibold uppercase tracking-wider text-red-400 transition hover:bg-red-500/20"
+            >
+              Configure Role Permissions
+            </button>
+            <button
+              type="button"
+              onClick={onBack}
+              className="border border-white/10 px-4 py-3 text-[10px] font-semibold uppercase tracking-wider text-gray-400 transition hover:text-white"
+            >
+              Back to Overview
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+function AdminServiceAccounts({ onBack }) {
+  const [accounts, setAccounts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [roleId, setRoleId] = useState("1");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [createdKey, setCreatedKey] = useState("");
+
+  const authHeaders = {
+    Authorization: `Bearer ${localStorage.getItem("token")}`,
+  };
+
+  const loadAccounts = async () => {
+    try {
+      setLoading(true);
+      setError("");
+      const response = await axios.get(
+        `${API_URL}/admin/service-accounts`,
+        { headers: authHeaders }
+      );
+      setAccounts(response.data.service_accounts || []);
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to load service accounts.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadAccounts();
+  }, []);
+
+  const createAccount = async (event) => {
+    event.preventDefault();
+    try {
+      setSaving(true);
+      setError("");
+      setCreatedKey("");
+      const payload = {
+        name: name.trim(),
+        description: description.trim() || null,
+        role_id: Number(roleId),
+        expires_at: expiresAt ? new Date(expiresAt).toISOString() : null,
+      };
+      const response = await axios.post(
+        `${API_URL}/admin/service-accounts`,
+        payload,
+        { headers: authHeaders }
+      );
+      setCreatedKey(response.data.api_key || "");
+      setName("");
+      setDescription("");
+      setRoleId("1");
+      setExpiresAt("");
+      await loadAccounts();
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to create service account.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const changeStatus = async (account, enabled) => {
+    try {
+      setError("");
+      await axios.put(
+        `${API_URL}/admin/service-accounts/${account.id}/status`,
+        null,
+        { params: { enabled }, headers: authHeaders }
+      );
+      await loadAccounts();
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to update account status.");
+    }
+  };
+
+  const revokeAccount = async (account) => {
+    if (!window.confirm(`Permanently revoke "${account.name}"? This cannot be undone.`)) return;
+    try {
+      setError("");
+      await axios.post(
+        `${API_URL}/admin/service-accounts/${account.id}/revoke`,
+        {},
+        { headers: authHeaders }
+      );
+      await loadAccounts();
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to revoke service account.");
+    }
+  };
+
+  const filteredAccounts = accounts.filter((account) =>
+    `${account.name} ${account.description || ""} ${account.key_prefix || ""}`
+      .toLowerCase()
+      .includes(search.toLowerCase())
+  );
+
+  return (
+    <div>
+      <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.3em] text-red-500">
+            User & Access Management
+          </p>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">
+            Service Accounts
+          </h1>
+          <p className="mt-2 max-w-3xl text-xs leading-6 text-gray-500">
+            Create and manage non-human identities for authorized platform integrations.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button type="button" onClick={loadAccounts}
+            className="border border-white/10 bg-[#0d1114] px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400 hover:border-red-500/40 hover:text-white">
+            Refresh
+          </button>
+          <button type="button" onClick={onBack}
+            className="border border-white/10 bg-[#0d1114] px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400 hover:text-white">
+            ← Overview
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="mb-4 rounded-md border border-red-500/25 bg-red-500/10 px-4 py-3 text-xs text-red-400">{error}</div>}
+
+      {createdKey && (
+        <div className="mb-5 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-5">
+          <h2 className="text-sm font-semibold text-emerald-400">Service account created</h2>
+          <p className="mt-1 text-xs text-gray-400">Copy this API key now. It will not be displayed again.</p>
+          <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+            <code className="min-w-0 flex-1 break-all rounded border border-white/10 bg-black/30 p-3 text-xs text-white">{createdKey}</code>
+            <button type="button" onClick={() => navigator.clipboard.writeText(createdKey)}
+              className="rounded border border-emerald-500/30 px-4 py-2 text-xs text-emerald-400 hover:bg-emerald-500/10">
+              Copy API Key
+            </button>
+          </div>
+          <button type="button" onClick={() => setCreatedKey("")} className="mt-3 text-[10px] text-gray-500 hover:text-white">
+            Hide key
+          </button>
+        </div>
+      )}
+
+      <div className="mb-5 grid gap-4 sm:grid-cols-3">
+        <div className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+          <p className="text-[10px] uppercase tracking-wider text-gray-500">Total Accounts</p>
+          <p className="mt-2 text-3xl font-bold text-white">{accounts.length}</p>
+        </div>
+        <div className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+          <p className="text-[10px] uppercase tracking-wider text-gray-500">Active Accounts</p>
+          <p className="mt-2 text-3xl font-bold text-emerald-400">{accounts.filter((a) => a.enabled && !a.revoked_at).length}</p>
+        </div>
+        <div className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+          <p className="text-[10px] uppercase tracking-wider text-gray-500">Disabled / Revoked</p>
+          <p className="mt-2 text-3xl font-bold text-gray-400">{accounts.filter((a) => !a.enabled || a.revoked_at).length}</p>
+        </div>
+      </div>
+
+      <div className="mb-5 rounded-lg border border-white/10 bg-[#0b1014] p-5">
+        <h2 className="mb-4 text-xs font-semibold uppercase tracking-wider text-white">Create Service Account</h2>
+        <form onSubmit={createAccount} className="grid gap-4 sm:grid-cols-2">
+          <label className="text-[10px] text-gray-400">
+            Account Name *
+            <input required maxLength={150} value={name} onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Vulnerability Scanner"
+              className="mt-2 w-full rounded border border-white/10 bg-black/30 px-3 py-2 text-xs text-white outline-none focus:border-red-500/50" />
+          </label>
+          <label className="text-[10px] text-gray-400">
+            Role *
+            <select value={roleId} onChange={(e) => setRoleId(e.target.value)}
+              className="mt-2 w-full rounded border border-white/10 bg-[#10161b] px-3 py-2 text-xs text-white">
+              <option value="1">Client</option>
+              <option value="2">Analyst</option>
+            </select>
+          </label>
+          <label className="text-[10px] text-gray-400">
+            Description
+            <input maxLength={2000} value={description} onChange={(e) => setDescription(e.target.value)}
+              placeholder="Purpose of this integration"
+              className="mt-2 w-full rounded border border-white/10 bg-black/30 px-3 py-2 text-xs text-white outline-none focus:border-red-500/50" />
+          </label>
+          <label className="text-[10px] text-gray-400">
+            Optional Expiry
+            <input type="datetime-local" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)}
+              className="mt-2 w-full rounded border border-white/10 bg-[#10161b] px-3 py-2 text-xs text-white" />
+          </label>
+          <div className="sm:col-span-2">
+            <button disabled={saving} type="submit"
+              className="rounded border border-red-500/30 bg-red-500/10 px-5 py-2.5 text-[10px] font-semibold uppercase tracking-wider text-red-400 hover:bg-red-500/20 disabled:opacity-50">
+              {saving ? "Creating..." : "＋ Create Service Account"}
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <div className="overflow-hidden rounded-lg border border-white/10 bg-[#0b1014]">
+        <div className="flex flex-col justify-between gap-3 border-b border-white/10 px-5 py-4 sm:flex-row sm:items-center">
+          <div>
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-white">Registered Service Accounts</h2>
+            <p className="mt-1 text-[10px] text-gray-500">API secrets are never included in this list.</p>
+          </div>
+          <input value={search} onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search accounts..."
+            className="rounded border border-white/10 bg-black/30 px-3 py-2 text-xs text-white outline-none focus:border-red-500/50" />
+        </div>
+        {loading ? (
+          <p className="p-8 text-center text-xs text-gray-500">Loading service accounts...</p>
+        ) : filteredAccounts.length === 0 ? (
+          <p className="p-8 text-center text-xs text-gray-500">No service accounts found.</p>
+        ) : (
+          <div className="divide-y divide-white/5">
+            {filteredAccounts.map((account) => (
+              <div key={account.id} className="flex flex-col justify-between gap-4 px-5 py-5 lg:flex-row lg:items-center">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-sm font-semibold text-white">{account.name}</h3>
+                    <span className={`rounded px-2 py-1 text-[9px] ${account.revoked_at ? "bg-red-500/10 text-red-400" : account.enabled ? "bg-emerald-500/10 text-emerald-400" : "bg-gray-500/10 text-gray-400"}`}>
+                      {account.revoked_at ? "REVOKED" : account.enabled ? "ACTIVE" : "DISABLED"}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[10px] text-gray-500">{account.description || "No description"} · {account.role_name || `Role ID ${account.role_id}`}</p>
+                  <p className="mt-1 font-mono text-[10px] text-gray-600">ID: {account.id} · Key prefix: {account.key_prefix}</p>
+                  <p className="mt-1 text-[10px] text-gray-600">Created: {account.created_at ? new Date(account.created_at).toLocaleString() : "—"} · Last used: {account.last_used_at ? new Date(account.last_used_at).toLocaleString() : "Never"}</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {!account.revoked_at && (
+                    <>
+                      <button type="button" onClick={() => changeStatus(account, !account.enabled)}
+                        className="rounded border border-white/10 px-3 py-2 text-[10px] text-gray-300 hover:border-white/30 hover:text-white">
+                        {account.enabled ? "Deactivate" : "Activate"}
+                      </button>
+                      <button type="button" onClick={() => revokeAccount(account)}
+                        className="rounded border border-red-500/25 px-3 py-2 text-[10px] text-red-400 hover:bg-red-500/10">
+                        Revoke
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function AdminAPIKeys({ onBack }) {
+  const [keys, setKeys] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [createdKey, setCreatedKey] = useState("");
+
+  const authHeaders = {
+    Authorization: `Bearer ${localStorage.getItem("token")}`,
+  };
+
+  const loadKeys = async () => {
+    try {
+      setLoading(true);
+      setError("");
+      const response = await axios.get(`${API_URL}/admin/api-keys`, {
+        headers: authHeaders,
+      });
+      setKeys(response.data.api_keys || []);
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to load API keys.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadKeys();
+  }, []);
+
+  const createKey = async (event) => {
+    event.preventDefault();
+    try {
+      setSaving(true);
+      setError("");
+      setCreatedKey("");
+      const response = await axios.post(
+        `${API_URL}/admin/api-keys`,
+        {
+          name: name.trim(),
+          description: description.trim() || null,
+          expires_at: expiresAt ? new Date(expiresAt).toISOString() : null,
+        },
+        { headers: authHeaders }
+      );
+      setCreatedKey(response.data.api_key || "");
+      setName("");
+      setDescription("");
+      setExpiresAt("");
+      await loadKeys();
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to create API key.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const changeStatus = async (key, enabled) => {
+    try {
+      setError("");
+      await axios.put(
+        `${API_URL}/admin/api-keys/${key.id}/status`,
+        null,
+        { params: { enabled }, headers: authHeaders }
+      );
+      await loadKeys();
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to update API key.");
+    }
+  };
+
+  const revokeKey = async (key) => {
+    if (!window.confirm(`Permanently revoke "${key.name}"? This cannot be undone.`)) return;
+    try {
+      setError("");
+      await axios.post(
+        `${API_URL}/admin/api-keys/${key.id}/revoke`,
+        {},
+        { headers: authHeaders }
+      );
+      await loadKeys();
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to revoke API key.");
+    }
+  };
+
+  const filteredKeys = keys.filter((key) =>
+    `${key.name} ${key.description || ""} ${key.key_prefix || ""}`
+      .toLowerCase()
+      .includes(search.toLowerCase())
+  );
+
+  return (
+    <div>
+      <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.3em] text-red-500">
+            User & Access Management
+          </p>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">
+            API Keys
+          </h1>
+          <p className="mt-2 max-w-3xl text-xs leading-6 text-gray-500">
+            Generate and manage API credentials for authorized platform integrations.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button type="button" onClick={loadKeys}
+            className="border border-white/10 bg-[#0d1114] px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400 hover:border-red-500/40 hover:text-white">
+            Refresh
+          </button>
+          <button type="button" onClick={onBack}
+            className="border border-white/10 bg-[#0d1114] px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400 hover:text-white">
+            ← Overview
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="mb-4 rounded-md border border-red-500/25 bg-red-500/10 px-4 py-3 text-xs text-red-400">{error}</div>}
+
+      {createdKey && (
+        <div className="mb-5 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-5">
+          <h2 className="text-sm font-semibold text-emerald-400">API key generated</h2>
+          <p className="mt-1 text-xs text-gray-400">Copy this key now. It will not be displayed again.</p>
+          <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+            <code className="min-w-0 flex-1 break-all rounded border border-white/10 bg-black/30 p-3 text-xs text-white">{createdKey}</code>
+            <button type="button" onClick={() => navigator.clipboard.writeText(createdKey)}
+              className="rounded border border-emerald-500/30 px-4 py-2 text-xs text-emerald-400 hover:bg-emerald-500/10">
+              Copy API Key
+            </button>
+          </div>
+          <button type="button" onClick={() => setCreatedKey("")} className="mt-3 text-[10px] text-gray-500 hover:text-white">
+            Hide key
+          </button>
+        </div>
+      )}
+
+      <div className="mb-5 grid gap-4 sm:grid-cols-3">
+        <div className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+          <p className="text-[10px] uppercase tracking-wider text-gray-500">Total API Keys</p>
+          <p className="mt-2 text-3xl font-bold text-white">{keys.length}</p>
+        </div>
+        <div className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+          <p className="text-[10px] uppercase tracking-wider text-gray-500">Active Keys</p>
+          <p className="mt-2 text-3xl font-bold text-emerald-400">{keys.filter((k) => k.enabled && !k.revoked_at).length}</p>
+        </div>
+        <div className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+          <p className="text-[10px] uppercase tracking-wider text-gray-500">Disabled / Revoked</p>
+          <p className="mt-2 text-3xl font-bold text-gray-400">{keys.filter((k) => !k.enabled || k.revoked_at).length}</p>
+        </div>
+      </div>
+
+      <div className="mb-5 rounded-lg border border-white/10 bg-[#0b1014] p-5">
+        <h2 className="mb-4 text-xs font-semibold uppercase tracking-wider text-white">Generate API Key</h2>
+        <form onSubmit={createKey} className="grid gap-4 sm:grid-cols-2">
+          <label className="text-[10px] text-gray-400">
+            Key Name *
+            <input required maxLength={150} value={name} onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. SIEM Integration"
+              className="mt-2 w-full rounded border border-white/10 bg-black/30 px-3 py-2 text-xs text-white outline-none focus:border-red-500/50" />
+          </label>
+          <label className="text-[10px] text-gray-400">
+            Optional Expiry
+            <input type="datetime-local" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)}
+              className="mt-2 w-full rounded border border-white/10 bg-[#10161b] px-3 py-2 text-xs text-white" />
+          </label>
+          <label className="text-[10px] text-gray-400 sm:col-span-2">
+            Description
+            <input maxLength={2000} value={description} onChange={(e) => setDescription(e.target.value)}
+              placeholder="Purpose of this API key"
+              className="mt-2 w-full rounded border border-white/10 bg-black/30 px-3 py-2 text-xs text-white outline-none focus:border-red-500/50" />
+          </label>
+          <div className="sm:col-span-2">
+            <button disabled={saving} type="submit"
+              className="rounded border border-red-500/30 bg-red-500/10 px-5 py-2.5 text-[10px] font-semibold uppercase tracking-wider text-red-400 hover:bg-red-500/20 disabled:opacity-50">
+              {saving ? "Generating..." : "＋ Generate API Key"}
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <div className="overflow-hidden rounded-lg border border-white/10 bg-[#0b1014]">
+        <div className="flex flex-col justify-between gap-3 border-b border-white/10 px-5 py-4 sm:flex-row sm:items-center">
+          <div>
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-white">Registered API Keys</h2>
+            <p className="mt-1 text-[10px] text-gray-500">Secret values are never included in this list.</p>
+          </div>
+          <input value={search} onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search API keys..."
+            className="rounded border border-white/10 bg-black/30 px-3 py-2 text-xs text-white outline-none focus:border-red-500/50" />
+        </div>
+        {loading ? (
+          <p className="p-8 text-center text-xs text-gray-500">Loading API keys...</p>
+        ) : filteredKeys.length === 0 ? (
+          <p className="p-8 text-center text-xs text-gray-500">No API keys found.</p>
+        ) : (
+          <div className="divide-y divide-white/5">
+            {filteredKeys.map((key) => (
+              <div key={key.id} className="flex flex-col justify-between gap-4 px-5 py-5 lg:flex-row lg:items-center">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-sm font-semibold text-white">{key.name}</h3>
+                    <span className={`rounded px-2 py-1 text-[9px] ${key.revoked_at ? "bg-red-500/10 text-red-400" : key.enabled ? "bg-emerald-500/10 text-emerald-400" : "bg-gray-500/10 text-gray-400"}`}>
+                      {key.revoked_at ? "REVOKED" : key.enabled ? "ACTIVE" : "DISABLED"}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[10px] text-gray-500">{key.description || "No description"}</p>
+                  <p className="mt-1 font-mono text-[10px] text-gray-600">ID: {key.id} · Key prefix: {key.key_prefix}</p>
+                  <p className="mt-1 text-[10px] text-gray-600">Created: {key.created_at ? new Date(key.created_at).toLocaleString() : "—"} · Last used: {key.last_used_at ? new Date(key.last_used_at).toLocaleString() : "Never"}</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {!key.revoked_at && (
+                    <>
+                      <button type="button" onClick={() => changeStatus(key, !key.enabled)}
+                        className="rounded border border-white/10 px-3 py-2 text-[10px] text-gray-300 hover:border-white/30 hover:text-white">
+                        {key.enabled ? "Deactivate" : "Activate"}
+                      </button>
+                      <button type="button" onClick={() => revokeKey(key)}
+                        className="rounded border border-red-500/25 px-3 py-2 text-[10px] text-red-400 hover:bg-red-500/10">
+                        Revoke
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function AdminSessions({ onBack }) {
+  const [sessions, setSessions] = useState([]);
+  const [summary, setSummary] = useState({ total: 0, active: 0, expired: 0, terminated: 0 });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState("ALL");
+
+  const authHeaders = {
+    Authorization: `Bearer ${localStorage.getItem("token")}`,
+  };
+
+  const loadSessions = async () => {
+    try {
+      setLoading(true);
+      setError("");
+      const response = await axios.get(`${API_URL}/admin/sessions`, {
+        headers: authHeaders,
+      });
+      setSessions(response.data.sessions || []);
+      setSummary(response.data);
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to load sessions.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadSessions();
+  }, []);
+
+  const terminateSession = async (session) => {
+    if (!window.confirm(`Terminate session for ${session.username}?`)) return;
+    try {
+      setError("");
+      await axios.post(
+        `${API_URL}/admin/sessions/${session.id}/terminate`,
+        {},
+        { headers: authHeaders }
+      );
+      await loadSessions();
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to terminate session.");
+    }
+  };
+
+  const terminateUserSessions = async (session) => {
+    if (!window.confirm(`Terminate all active sessions for ${session.username}?`)) return;
+    try {
+      setError("");
+      await axios.post(
+        `${API_URL}/admin/sessions/user/${session.user_id}/terminate`,
+        {},
+        { headers: authHeaders }
+      );
+      await loadSessions();
+    } catch (err) {
+      setError(err.response?.data?.detail || "Unable to terminate user sessions.");
+    }
+  };
+
+  const filtered = sessions.filter((item) => {
+    const text = `${item.username} ${item.ip_address || ""} ${item.role || ""} ${item.user_agent || ""}`.toLowerCase();
+    return text.includes(search.toLowerCase()) && (status === "ALL" || item.status === status);
+  });
+
+  const dateText = (value) => value ? new Date(value).toLocaleString() : "—";
+
+  return (
+    <div>
+      <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.3em] text-red-500">Security & Access Control</p>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-white">User Sessions</h1>
+          <p className="mt-2 max-w-3xl text-xs leading-6 text-gray-500">
+            Review authenticated sessions and terminate suspicious or unwanted access.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button type="button" onClick={loadSessions}
+            className="border border-white/10 bg-[#0d1114] px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400 hover:text-white">
+            Refresh
+          </button>
+          <button type="button" onClick={onBack}
+            className="border border-white/10 bg-[#0d1114] px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400 hover:text-white">
+            ← Overview
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="mb-4 rounded-md border border-red-500/25 bg-red-500/10 px-4 py-3 text-xs text-red-400">{error}</div>}
+
+      <div className="mb-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {[
+          ["Recorded Sessions", summary.total, "text-white"],
+          ["Active Sessions", summary.active, "text-emerald-400"],
+          ["Expired Sessions", summary.expired, "text-yellow-400"],
+          ["Terminated Sessions", summary.terminated, "text-red-400"],
+        ].map(([label, value, color]) => (
+          <div key={label} className="rounded-lg border border-white/10 bg-[#0b1014] p-5">
+            <p className="text-[10px] uppercase tracking-wider text-gray-500">{label}</p>
+            <p className={`mt-2 text-3xl font-bold ${color}`}>{value ?? 0}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="mb-5 flex flex-col gap-3 rounded-lg border border-white/10 bg-[#0b1014] p-4 sm:flex-row">
+        <input value={search} onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search username, IP, role or device..."
+          className="min-w-0 flex-1 rounded border border-white/10 bg-black/30 px-3 py-2 text-xs text-white outline-none focus:border-red-500/50" />
+        <select value={status} onChange={(e) => setStatus(e.target.value)}
+          className="rounded border border-white/10 bg-[#10161b] px-3 py-2 text-xs text-white">
+          <option value="ALL">All statuses</option>
+          <option value="ACTIVE">Active</option>
+          <option value="EXPIRED">Expired</option>
+          <option value="TERMINATED">Terminated</option>
+        </select>
+      </div>
+
+      <div className="overflow-hidden rounded-lg border border-white/10 bg-[#0b1014]">
+        <div className="border-b border-white/10 px-5 py-4">
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-white">Session Records</h2>
+          <p className="mt-1 text-[10px] text-gray-500">Sessions created after session tracking was enabled.</p>
+        </div>
+        {loading ? (
+          <p className="p-8 text-center text-xs text-gray-500">Loading sessions...</p>
+        ) : filtered.length === 0 ? (
+          <p className="p-8 text-center text-xs text-gray-500">No matching sessions found.</p>
+        ) : (
+          <div className="divide-y divide-white/5">
+            {filtered.map((item) => (
+              <div key={item.id} className="flex flex-col justify-between gap-4 px-5 py-5 xl:flex-row xl:items-center">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-sm font-semibold text-white">{item.username}</h3>
+                    <span className={`rounded px-2 py-1 text-[9px] ${
+                      item.status === "ACTIVE" ? "bg-emerald-500/10 text-emerald-400" :
+                      item.status === "EXPIRED" ? "bg-yellow-500/10 text-yellow-400" :
+                      "bg-red-500/10 text-red-400"
+                    }`}>{item.status}</span>
+                  </div>
+                  <div className="mt-2 grid gap-x-6 gap-y-1 text-[10px] text-gray-500 sm:grid-cols-2">
+                    <p>User ID: {item.user_id} · Role: {item.role || "Unknown"}</p>
+                    <p>IP address: {item.ip_address || "Not recorded"}</p>
+                    <p>Login: {dateText(item.created_at)}</p>
+                    <p>Expiry: {dateText(item.expires_at)}</p>
+                    <p>Last activity recorded: {dateText(item.last_activity_at)}</p>
+                    <p>Device: <span className="break-all">{item.user_agent || "Not recorded"}</span></p>
+                    {item.revocation_reason && <p className="sm:col-span-2">Termination reason: {item.revocation_reason}</p>}
+                  </div>
+                </div>
+                {item.status === "ACTIVE" && (
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                    <button type="button" onClick={() => terminateSession(item)}
+                      className="rounded border border-red-500/25 px-3 py-2 text-[10px] text-red-400 hover:bg-red-500/10">
+                      Terminate Session
+                    </button>
+                    <button type="button" onClick={() => terminateUserSessions(item)}
+                      className="rounded border border-white/10 px-3 py-2 text-[10px] text-gray-300 hover:border-white/30 hover:text-white">
+                      Terminate All for User
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+
+function AdminSIEMIntegrations({ onBack }) {
+  const [networkInterface, setNetworkInterface] = useState("eth0");
+  const [duration, setDuration] = useState(30);
+  const [job, setJob] = useState(null);
+  const [jobId, setJobId] = useState("");
+  const [starting, setStarting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const headers = {
+    Authorization: `Bearer ${localStorage.getItem("token")}`,
+  };
+
+  const isRunning = job && ["queued", "running"].includes(job.status);
+
+  useEffect(() => {
+    if (!jobId) return;
+
+    let active = true;
+    let timer;
+
+    const pollJob = async () => {
+      try {
+        const response = await axios.get(
+          `${API_URL}/vapt/network/snort/${jobId}/progress`,
+          { headers }
+        );
+
+        if (!active) return;
+
+        setJob(response.data);
+
+        if (["completed", "failed", "cancelled"].includes(response.data.status)) {
+          if (response.data.status === "completed") {
+            setNotice("Snort monitoring completed. Detected alerts were sent to Security Events.");
+          } else if (response.data.status === "cancelled") {
+            setNotice("Snort monitoring was cancelled.");
+          } else {
+            setError(response.data.error || response.data.stderr || "Snort monitoring failed.");
+          }
+          return;
+        }
+
+        timer = window.setTimeout(pollJob, 1000);
+      } catch (err) {
+        if (!active) return;
+        setError(
+          err.response?.data?.detail || "Unable to retrieve Snort monitoring status."
+        );
+      }
+    };
+
+    pollJob();
+
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [jobId]);
+
+  const startMonitoring = async (event) => {
+    event.preventDefault();
+
+    try {
+      setStarting(true);
+      setError("");
+      setNotice("");
+      setJob(null);
+      setJobId("");
+
+      const response = await axios.post(
+        `${API_URL}/vapt/network/snort/run`,
+        {
+          interface: networkInterface,
+          duration: Number(duration),
+        },
+        { headers }
+      );
+
+      setJob(response.data);
+      setJobId(response.data.job_id);
+      setNotice("Snort monitoring job started.");
+    } catch (err) {
+      setError(
+        err.response?.data?.detail || "Unable to start Snort monitoring."
+      );
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const cancelMonitoring = async () => {
+    if (!jobId) return;
+
+    try {
+      setCancelling(true);
+      setError("");
+
+      await axios.post(
+        `${API_URL}/vapt/network/snort/${jobId}/cancel`,
+        {},
+        { headers }
+      );
+
+      setNotice("Cancellation requested. Waiting for Snort to stop...");
+    } catch (err) {
+      setError(
+        err.response?.data?.detail || "Unable to cancel Snort monitoring."
+      );
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  const statusClass = (status) => {
+    if (status === "completed") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-300";
+    if (status === "failed") return "border-red-500/30 bg-red-500/10 text-red-300";
+    if (status === "cancelled") return "border-slate-500/30 bg-slate-500/10 text-slate-300";
+    if (status === "running") return "border-blue-500/30 bg-blue-500/10 text-blue-300";
+    return "border-amber-500/30 bg-amber-500/10 text-amber-300";
+  };
+
+  const alerts = job?.live_alerts || [];
+
+  return (
+    <div className="space-y-6 p-6 text-white">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <button
+            onClick={onBack}
+            className="mb-3 text-sm text-slate-400 hover:text-white"
+          >
+            ← Back to Admin
+          </button>
+          <h1 className="text-2xl font-semibold">SIEM Integrations</h1>
+          <p className="mt-1 text-sm text-slate-400">
+            Manage the local Snort network intrusion detection sensor.
+          </p>
+        </div>
+        <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">
+          Snort Sensor
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      {notice && (
+        <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3 text-sm text-emerald-300">
+          {notice}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <div className="rounded-xl border border-white/10 bg-white/[0.03] p-5">
+          <p className="text-sm text-slate-400">Sensor</p>
+          <p className="mt-2 text-xl font-semibold">Snort 3</p>
+          <p className="mt-1 text-xs text-slate-500">Local network monitoring</p>
+        </div>
+        <div className="rounded-xl border border-white/10 bg-white/[0.03] p-5">
+          <p className="text-sm text-slate-400">Capture status</p>
+          <p className="mt-2 text-xl font-semibold">
+            {job?.status ? job.status.toUpperCase() : "IDLE"}
+          </p>
+          <p className="mt-1 text-xs text-slate-500">
+            {job?.stage || "No active capture"}
+          </p>
+        </div>
+        <div className="rounded-xl border border-white/10 bg-white/[0.03] p-5">
+          <p className="text-sm text-slate-400">Detected alerts</p>
+          <p className="mt-2 text-3xl font-semibold text-blue-300">
+            {job?.alert_count ?? 0}
+          </p>
+          <p className="mt-1 text-xs text-slate-500">Current capture job</p>
+        </div>
+      </div>
+
+      <form
+        onSubmit={startMonitoring}
+        className="space-y-5 rounded-xl border border-white/10 bg-white/[0.03] p-5"
+      >
+        <div>
+          <h2 className="text-lg font-semibold">Snort Sensor Configuration</h2>
+          <p className="mt-1 text-sm text-slate-400">
+            Choose the network interface and capture duration.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <label className="space-y-2 text-sm">
+            <span className="text-slate-300">Network interface</span>
+            <select
+              value={networkInterface}
+              onChange={(e) => setNetworkInterface(e.target.value)}
+              disabled={!!isRunning || starting}
+              className="w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2.5 outline-none focus:border-blue-500 disabled:opacity-50"
+            >
+              <option value="eth0">eth0</option>
+              <option value="lo">lo (Loopback)</option>
+              <option value="docker0">docker0</option>
+              <option value="any">any</option>
+            </select>
+          </label>
+
+          <label className="space-y-2 text-sm">
+            <span className="text-slate-300">Capture duration (seconds)</span>
+            <input
+              type="number"
+              min="1"
+              max="300"
+              required
+              value={duration}
+              onChange={(e) => setDuration(e.target.value)}
+              disabled={!!isRunning || starting}
+              className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2.5 outline-none focus:border-blue-500 disabled:opacity-50"
+            />
+          </label>
+        </div>
+
+        <div className="flex flex-wrap gap-3">
+          <button
+            type="submit"
+            disabled={starting || !!isRunning || Number(duration) < 1 || Number(duration) > 300}
+            className="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium hover:bg-blue-500 disabled:opacity-50"
+          >
+            {starting ? "Starting..." : "Start Snort Monitoring"}
+          </button>
+
+          <button
+            type="button"
+            onClick={cancelMonitoring}
+            disabled={!isRunning || cancelling}
+            className="rounded-lg border border-red-500/30 px-5 py-2.5 text-sm text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+          >
+            {cancelling ? "Cancelling..." : "Stop Monitoring"}
+          </button>
+        </div>
+      </form>
+
+      {job && (
+        <div className="space-y-4 rounded-xl border border-white/10 bg-white/[0.03] p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold">Monitoring Activity</h2>
+            <span className={`rounded-md border px-3 py-1 text-xs ${statusClass(job.status)}`}>
+              {(job.status || "unknown").toUpperCase()}
+            </span>
+          </div>
+
+          <div className="h-2 overflow-hidden rounded-full bg-white/10">
+            <div
+              className="h-full rounded-full bg-blue-500 transition-all"
+              style={{ width: `${Math.min(100, Math.max(0, job.progress || 0))}%` }}
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 text-sm md:grid-cols-4">
+            <div>
+              <p className="text-slate-400">Progress</p>
+              <p className="mt-1 font-semibold">{job.progress || 0}%</p>
+            </div>
+            <div>
+              <p className="text-slate-400">Stored events</p>
+              <p className="mt-1 font-semibold">{job.stored_events || 0}</p>
+            </div>
+            <div>
+              <p className="text-slate-400">Duplicates</p>
+              <p className="mt-1 font-semibold">{job.duplicate_events || 0}</p>
+            </div>
+            <div>
+              <p className="text-slate-400">Interface</p>
+              <p className="mt-1 font-semibold">{networkInterface}</p>
+            </div>
+          </div>
+
+          {job.ingestion_error && (
+            <p className="text-sm text-red-300">
+              Event storage error: {job.ingestion_error}
+            </p>
+          )}
+
+          <div>
+            <h3 className="mb-3 font-medium">Live Snort Alerts</h3>
+            {alerts.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-white/10 p-5 text-center text-sm text-slate-400">
+                No Snort alerts detected in this capture yet.
+              </p>
+            ) : (
+              <div className="max-h-80 space-y-2 overflow-y-auto">
+                {alerts.map((alert, index) => (
+                  <div
+                    key={`${index}-${alert}`}
+                    className="break-all rounded-lg border border-white/10 bg-black/20 p-3 font-mono text-xs text-slate-300"
+                  >
+                    {alert}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {job.stderr && (
+            <details className="text-xs text-slate-400">
+              <summary className="cursor-pointer">Snort diagnostic output</summary>
+              <pre className="mt-2 whitespace-pre-wrap break-all rounded-lg bg-black/30 p-3">
+                {job.stderr}
+              </pre>
+            </details>
+          )}
+        </div>
+      )}
+
+      <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-5">
+        <h2 className="font-semibold text-blue-200">SIEM Event Pipeline</h2>
+        <p className="mt-2 text-sm leading-6 text-slate-300">
+          Snort alerts are sent to the existing Security Events pipeline.
+          Events are stored in the SOC database, checked for duplicates, and
+          passed through the existing MITRE ATT&CK mapping logic when a
+          supported mapping is available.
+        </p>
+        <p className="mt-2 text-xs text-slate-400">
+          This page starts time-limited captures; it is not a continuous
+          background monitoring service.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function AdminReferenceModule({
   menu,
   title,
   description,
   onBack,
+  onNavigate,
 }) {
+
+  if (menu === "admin-security-events") {
+    return <LiveLogMonitoring initialTab="security-events" adminMode />;
+  }
+
+  if (menu === "admin-siem-integrations") {
+    return <AdminSIEMIntegrations onBack={onBack} />;
+  }
+
+
+  if (menu === "admin-sessions") {
+    return <AdminSessions onBack={onBack} />;
+  }
+
+  if (menu === "admin-api-keys") {
+    return <AdminAPIKeys onBack={onBack} />;
+  }
+
+  if (menu === "admin-service-accounts") {
+    return <AdminServiceAccounts onBack={onBack} />;
+  }
+
+  if (menu === "admin-roles") {
+    return (
+      <AdminRolesManagement
+        onBack={onBack}
+        onNavigate={onNavigate}
+      />
+    );
+  }
+
+  if (menu === "admin-background-jobs") {
+    return <AdminBackgroundJobs onBack={onBack} />;
+  }
+
+  if (menu === "admin-license") {
+    return <AdminLicense onBack={onBack} />;
+  }
+  if (menu === "admin-backup") {
+    return <AdminBackup onBack={onBack} />;
+  }
+  if (menu === "admin-system-logs") {
+    return <AdminSystemLogs onBack={onBack} />;
+  }
+
+  if ([
+    "admin-iso27001",
+    "admin-soc2",
+    "admin-nist",
+    "admin-cis",
+    "admin-pcidss",
+  ].includes(menu)) {
+    return <AdminComplianceFramework menu={menu} onBack={onBack} />;
+  }
+
+  if (menu === "admin-compliance-reports") {
+    return <AdminComplianceReports onBack={onBack} />;
+  }
+
+  if (menu === "admin-compliance") {
+    return (
+      <AdminComplianceDashboard
+        onBack={onBack}
+        onNavigate={(nextMenu) => {
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(
+              new CustomEvent("soc-admin-navigate", { detail: nextMenu })
+            );
+          }
+        }}
+      />
+    );
+  }
+
+  if (menu === "admin-endpoints") {
+    return <AdminEndpoints onBack={onBack} />;
+  }
+
   return (
     <div>
       <div className="mb-6 flex items-start justify-between gap-4">
@@ -2222,6 +3831,40 @@ function AdminDashboard({ onLogout }) {
     return ["failed", "error"].includes(status);
   }).length;
 
+  const refreshSupportTickets = async () => {
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+      setSupportTicketError("Your admin session has expired. Please login again.");
+      return;
+    }
+
+    try {
+      setSupportTicketLoading(true);
+      setSupportTicketError("");
+
+      const response = await axios.get(
+        `${API_URL}/support/admin/tickets`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setSupportTickets(
+        Array.isArray(response.data) ? response.data : []
+      );
+    } catch (err) {
+      console.error("Unable to refresh support tickets:", err);
+      setSupportTicketError(
+        err.response?.data?.detail || "Unable to load support ticket data."
+      );
+    } finally {
+      setSupportTicketLoading(false);
+    }
+  };
+
   const handleAdminSelect = (id) => {
     setActiveMenu(id);
 
@@ -2672,24 +4315,65 @@ function AdminDashboard({ onLogout }) {
       );
     }
 
+    if (activeMenu === "admin-email-header-analysis") {
+      return <AdminEmailHeaderAnalysis />;
+    }
+
     if (activeMenu === "admin-notification-center") {
       return <AdminNotificationCenter />;
+    }
+
+    if (activeMenu === "admin-security-policies") {
+      return <AdminSecurityPolicies />;
+    }
+
+    if (activeMenu === "admin-security-baselines") {
+      return <AdminSecurityBaselines />;
+    }
+
+    if (activeMenu === "admin-detection-config") {
+      return <AdminDetectionConfig />;
+    }
+
+    if (activeMenu === "admin-alert-config") {
+      return <AdminAlertConfig />;
+    }
+
+    if (activeMenu === "admin-retention") {
+      return <AdminRetentionPolicies />;
+    }
+
+    if (activeMenu === "admin-configuration") {
+      return <AdminPlatformConfiguration />;
     }
 
     if (activeMenu === "admin-notification-policies") {
       return <AdminNotificationPolicies />;
     }
 
-    if (activeMenu === "admin-email-alerts") {
+    if (
+      activeMenu === "admin-email" ||
+      activeMenu === "admin-email-alerts"
+    ) {
       return <AdminNotificationChannel channel="email" />;
     }
 
-    if (activeMenu === "admin-slack-alerts") {
-      return <AdminNotificationChannel channel="slack" />;
+    if (activeMenu === "admin-slack") {
+      return (
+        <AdminNotificationChannel
+          channel="slack"
+          title="Slack Integration"
+        />
+      );
     }
 
-    if (activeMenu === "admin-teams-alerts") {
-      return <AdminNotificationChannel channel="teams" />;
+    if (activeMenu === "admin-slack-alerts") {
+      return (
+        <AdminNotificationChannel
+          channel="slack"
+          title="Slack Alerts"
+        />
+      );
     }
 
     if (activeMenu === "admin-notification-webhooks") {
@@ -2729,7 +4413,96 @@ function AdminDashboard({ onLogout }) {
       activeMenu === "admin-api-activity" ||
       activeMenu === "admin-audit-export"
     ) {
-      return <AuditTrail />;
+      return <AuditTrail menu={activeMenu} />;
+    }
+
+    if (activeMenu === "admin-asset-discovery") {
+      return <AdminAssetDiscovery onBack={() => setActiveMenu("admin-asset-inventory")} />;
+    }
+
+    if (activeMenu === "admin-asset-inventory") {
+      return <AdminAssetInventory onBack={() => setActiveMenu("dashboard")} />;
+    }
+
+
+    if (activeMenu === "admin-servers") {
+      return (
+        <AdminServerAssetManagement
+          onBack={() => setActiveMenu("dashboard")}
+          onInventory={() => setActiveMenu("admin-asset-inventory")}
+        />
+      );
+    }
+
+    if (activeMenu === "admin-asset-groups") {
+      return <AdminAssetGroups onBack={() => setActiveMenu("dashboard")} />;
+    }
+
+    if (activeMenu === "admin-applications") {
+      return <AdminApplications onBack={() => setActiveMenu("dashboard")} />;
+    }
+
+    if (activeMenu === "admin-cloud-assets") {
+      return <AdminCloudAssets onBack={() => setActiveMenu("dashboard")} />;
+    }
+
+    if (activeMenu === "admin-system-health") {
+      return <AdminSystemHealth onBack={() => setActiveMenu("dashboard")} />;
+    }
+
+    if (activeMenu === "admin-environment") {
+      return <AdminEnvironmentHealth />;
+    }
+
+    if (activeMenu === "admin-posture") {
+      return <AdminSecurityPosture />;
+    }
+
+    if (activeMenu === "admin-risk") {
+      return <AdminRiskOverview />;
+    }
+
+    if (activeMenu === "admin-api-health") {
+      return <AdminAPIHealth onBack={() => setActiveMenu("dashboard")} />;
+    }
+
+    if (activeMenu === "admin-database-health") {
+      return <AdminDatabaseHealth onBack={() => setActiveMenu("dashboard")} />;
+    }
+
+    if (activeMenu === "admin-log-pipeline-health") {
+      return <AdminLogPipelineHealth onBack={() => setActiveMenu("dashboard")} />;
+    }
+
+    if (activeMenu === "admin-agent-health") {
+      return <AdminAgentHealth onBack={() => setActiveMenu("dashboard")} />;
+    }
+
+    if (activeMenu === "admin-network-devices") {
+      return <AdminNetworkDevices onBack={() => setActiveMenu("dashboard")} />;
+    }
+
+    if (activeMenu === "admin-server-monitoring") {
+      return <AdminServerMonitoring />;
+    }
+
+    if (activeMenu === "admin-endpoints") {
+      return <AdminEndpoints onBack={() => setActiveMenu("dashboard")} />;
+    }
+
+    if (activeMenu === "admin-teams") {
+      return <AdminTeamsManagement onBack={() => setActiveMenu("dashboard")} />;
+    }
+
+    if (activeMenu === "admin-ticketing") {
+      return (
+        <AdminSupportTickets
+          tickets={supportTickets}
+          loading={supportTicketLoading}
+          error={supportTicketError}
+          onRefresh={refreshSupportTickets}
+        />
+      );
     }
 
     if (activeMenu === "admin-search-performance") {
@@ -2780,23 +4553,11 @@ function AdminDashboard({ onLogout }) {
       "admin-siem-integrations":
         "Configure authorized SIEM connections.",
       "admin-ticketing":
-        "Configure ticketing-system integrations.",
+        "Manage customer support tickets, assignments, replies, and resolutions.",
       "admin-email":
         "Configure authorized email integration settings.",
       "admin-slack":
         "Configure authorized Slack integration settings.",
-      "admin-teams-integration":
-        "Configure authorized Microsoft Teams integration settings.",
-      "admin-webhooks":
-        "Configure outbound webhook integrations.",
-      "admin-aws":
-        "Configure authorized AWS integration settings.",
-      "admin-azure":
-        "Configure authorized Azure integration settings.",
-      "admin-gcp":
-        "Configure authorized GCP integration settings.",
-      "admin-api-integrations":
-        "Manage external API integrations.",
       "admin-security-policies":
         "Manage platform security policies.",
       "admin-security-baselines":
@@ -2815,8 +4576,6 @@ function AdminDashboard({ onLogout }) {
         "Manage email alert configuration.",
       "admin-slack-alerts":
         "Manage Slack alert configuration.",
-      "admin-teams-alerts":
-        "Manage Microsoft Teams alert configuration.",
       "admin-notification-webhooks":
         "Manage notification webhook configuration.",
       "admin-compliance":
@@ -2862,6 +4621,7 @@ function AdminDashboard({ onLogout }) {
           "Administrative module for the SOC Platform."
         }
         onBack={() => setActiveMenu("dashboard")}
+        onNavigate={(nextMenu) => setActiveMenu(nextMenu)}
       />
     );
   };
@@ -2995,7 +4755,7 @@ function AdminDashboard({ onLogout }) {
             ["⌂", "Overview", "dashboard"],
             ["♙", "Users", "users"],
             ["▣", "Assets", "admin-asset-inventory"],
-            ["⌘", "Integrations", "admin-api-integrations"],
+            ["⌘", "Integrations", "admin-siem-integrations"],
             ["⚙", "System", "admin-system-health"],
           ].map(([icon, label, id]) => (
             <button
@@ -3057,6 +4817,10 @@ function AdminSupportTickets({
   const [adminNotes, setAdminNotes] = useState("");
   const [resolution, setResolution] = useState("");
   const [finalAdminMessage, setFinalAdminMessage] = useState("");
+  const [ticketSearch, setTicketSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [priorityFilter, setPriorityFilter] = useState("ALL");
+  const [categoryFilter, setCategoryFilter] = useState("ALL");
 
   const statusClass = (status) => {
     const normalized = String(status || "").toUpperCase();
@@ -3271,6 +5035,33 @@ function AdminSupportTickets({
     window.open(url, "_blank", "noopener,noreferrer");
   };
 
+  const normalizedSearch = ticketSearch.trim().toLowerCase();
+
+  const filteredTickets = tickets.filter((ticket) => {
+    const matchesSearch = !normalizedSearch || [
+      ticket.ticket_id,
+      ticket.subject,
+      ticket.category,
+      ticket.user_id,
+      ticket.assigned_to,
+    ].some((value) =>
+      String(value ?? "").toLowerCase().includes(normalizedSearch)
+    );
+
+    const matchesStatus =
+      statusFilter === "ALL" ||
+      String(ticket.status || "").toUpperCase() === statusFilter;
+
+    const matchesPriority =
+      priorityFilter === "ALL" ||
+      String(ticket.priority || "").toUpperCase() === priorityFilter;
+
+    const matchesCategory =
+      categoryFilter === "ALL" || ticket.category === categoryFilter;
+
+    return matchesSearch && matchesStatus && matchesPriority && matchesCategory;
+  });
+
   const total = tickets.length;
   const openCount = tickets.filter(
     (ticket) => String(ticket.status).toUpperCase() === "OPEN"
@@ -3363,6 +5154,54 @@ function AdminSupportTickets({
           </p>
         </div>
 
+        <div className="grid gap-3 border-b border-white/10 p-5 md:grid-cols-2 xl:grid-cols-4">
+          <input
+            type="text"
+            value={ticketSearch}
+            onChange={(e) => setTicketSearch(e.target.value)}
+            placeholder="Search ID, subject, category, user..."
+            className="w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-600 focus:border-red-600"
+          />
+
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-gray-300 outline-none focus:border-red-600"
+          >
+            <option value="ALL">All Statuses</option>
+            <option value="OPEN">Open</option>
+            <option value="IN_PROGRESS">In Progress</option>
+            <option value="WAITING_FOR_USER">Waiting for User</option>
+            <option value="RESOLVED">Resolved</option>
+            <option value="CLOSED">Closed</option>
+          </select>
+
+          <select
+            value={priorityFilter}
+            onChange={(e) => setPriorityFilter(e.target.value)}
+            className="w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-gray-300 outline-none focus:border-red-600"
+          >
+            <option value="ALL">All Priorities</option>
+            <option value="CRITICAL">Critical</option>
+            <option value="HIGH">High</option>
+            <option value="MEDIUM">Medium</option>
+            <option value="LOW">Low</option>
+          </select>
+
+          <select
+            value={categoryFilter}
+            onChange={(e) => setCategoryFilter(e.target.value)}
+            className="w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-gray-300 outline-none focus:border-red-600"
+          >
+            <option value="ALL">All Categories</option>
+            {[...new Set(tickets.map((ticket) => ticket.category).filter(Boolean))]
+              .sort()
+              .map((category) => (
+                <option key={category} value={category}>{category}</option>
+              ))}
+          </select>
+        </div>
+
         {loading ? (
           <div className="px-6 py-12 text-center text-sm text-gray-600">
             Loading support tickets...
@@ -3370,6 +5209,10 @@ function AdminSupportTickets({
         ) : tickets.length === 0 ? (
           <div className="px-6 py-12 text-center text-sm text-gray-600">
             No support tickets have been raised yet.
+          </div>
+        ) : filteredTickets.length === 0 ? (
+          <div className="px-6 py-12 text-center text-sm text-gray-600">
+            No tickets match your search or selected filters.
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -3404,7 +5247,7 @@ function AdminSupportTickets({
               </thead>
 
               <tbody className="divide-y divide-white/5">
-                {tickets.map((ticket) => (
+                {filteredTickets.map((ticket) => (
                   <tr
                     key={ticket.id}
                     className="align-top transition hover:bg-white/[0.02]"
@@ -4201,7 +6044,9 @@ function AdminAssessmentMonitoring({
 // ADMIN — TOOL PERMISSIONS
 // ==================================================
 function AdminPermissions({ users, onRefreshUsers }) {
+  const [permissionMode, setPermissionMode] = useState("individual");
   const [selectedUserId, setSelectedUserId] = useState("");
+  const [selectedRoleId, setSelectedRoleId] = useState("1");
   const [tools, setTools] = useState([]);
   const [permissions, setPermissions] = useState({});
   const [loadingTools, setLoadingTools] = useState(true);
@@ -4213,7 +6058,9 @@ function AdminPermissions({ users, onRefreshUsers }) {
   const [activeCategory, setActiveCategory] = useState("All Tools");
 
   const safeUsers = Array.isArray(users) ? users : [];
-  const userClients = safeUsers.filter((user) => Number(user.role_id) === 1);
+  const manageableUsers = safeUsers.filter((user) =>
+    [1, 2].includes(Number(user.role_id))
+  );
 
   const getTokenConfig = () => ({
     headers: {
@@ -4269,7 +6116,8 @@ function AdminPermissions({ users, onRefreshUsers }) {
 
       const nextPermissions = {};
       rows.forEach((item) => {
-        nextPermissions[String(item.tool_id)] = Boolean(item.allowed);
+        nextPermissions[String(item.tool_id)] =
+          item.permission_state || (item.allowed ? "allow" : "deny");
       });
 
       setPermissions(nextPermissions);
@@ -4285,29 +6133,71 @@ function AdminPermissions({ users, onRefreshUsers }) {
     }
   };
 
+  const loadRolePermissions = async (roleId) => {
+    if (!roleId) {
+      setPermissions({});
+      return;
+    }
+
+    try {
+      setLoadingPermissions(true);
+      setError("");
+      setSuccess("");
+
+      const response = await axios.get(
+        `${API_URL}/admin/roles/${roleId}/tool-permissions`,
+        getTokenConfig()
+      );
+
+      const rows = Array.isArray(response.data?.permissions)
+        ? response.data.permissions
+        : [];
+
+      const nextPermissions = {};
+      rows.forEach((item) => {
+        nextPermissions[String(item.tool_id)] = Boolean(item.allowed);
+      });
+
+      setPermissions(nextPermissions);
+    } catch (err) {
+      console.error("Unable to load role tool permissions:", err);
+      setPermissions({});
+      setError(
+        err.response?.data?.detail ||
+          "Unable to load permissions for the selected role."
+      );
+    } finally {
+      setLoadingPermissions(false);
+    }
+  };
+
   useEffect(() => {
     loadTools();
   }, []);
 
   useEffect(() => {
-    if (!selectedUserId && userClients.length > 0) {
-      setSelectedUserId(String(userClients[0].id));
+    if (!selectedUserId && manageableUsers.length > 0) {
+      setSelectedUserId(String(manageableUsers[0].id));
       return;
     }
 
     if (
       selectedUserId &&
-      !userClients.some((user) => String(user.id) === String(selectedUserId))
+      !manageableUsers.some((user) => String(user.id) === String(selectedUserId))
     ) {
-      setSelectedUserId(userClients.length ? String(userClients[0].id) : "");
+      setSelectedUserId(manageableUsers.length ? String(manageableUsers[0].id) : "");
     }
   }, [users]);
 
   useEffect(() => {
-    loadUserPermissions(selectedUserId);
-  }, [selectedUserId]);
+    if (permissionMode === "individual") {
+      loadUserPermissions(selectedUserId);
+    } else {
+      loadRolePermissions(selectedRoleId);
+    }
+  }, [permissionMode, selectedUserId, selectedRoleId]);
 
-  const selectedUser = userClients.find(
+  const selectedUser = manageableUsers.find(
     (user) => String(user.id) === String(selectedUserId)
   );
 
@@ -4339,20 +6229,22 @@ function AdminPermissions({ users, onRefreshUsers }) {
   });
 
   const enabledTools = tools.filter((tool) => Boolean(tool.enabled));
-  const allowedCount = enabledTools.filter(
-    (tool) => permissions[String(tool.id)]
+  const allowedCount = enabledTools.filter((tool) =>
+    permissionMode === "role"
+      ? permissions[String(tool.id)] === true
+      : permissions[String(tool.id)] === "allow"
   ).length;
   const disabledCount = tools.filter((tool) => !tool.enabled).length;
 
-  const setToolPermission = (toolId, allowed) => {
+  const setToolPermission = (toolId, value) => {
     setPermissions((current) => ({
       ...current,
-      [String(toolId)]: allowed,
+      [String(toolId)]: value,
     }));
     setSuccess("");
   };
 
-  const setCategoryPermissions = (category, allowed) => {
+  const setCategoryPermissions = (category, value) => {
     const next = { ...permissions };
 
     tools.forEach((tool) => {
@@ -4360,7 +6252,7 @@ function AdminPermissions({ users, onRefreshUsers }) {
         tool.enabled &&
         (category === "All Tools" || tool.category === category)
       ) {
-        next[String(tool.id)] = allowed;
+        next[String(tool.id)] = value;
       }
     });
 
@@ -4369,8 +6261,8 @@ function AdminPermissions({ users, onRefreshUsers }) {
   };
 
   const handleSave = async () => {
-    if (!selectedUserId) {
-      setError("Select a User / Client account first.");
+    if (permissionMode === "individual" && !selectedUserId) {
+      setError("Select a Client or Analyst account first.");
       return;
     }
 
@@ -4379,37 +6271,57 @@ function AdminPermissions({ users, onRefreshUsers }) {
       setError("");
       setSuccess("");
 
-      const payload = {
-        permissions: tools.map((tool) => ({
-          tool_id: Number(tool.id),
-          allowed: Boolean(tool.enabled && permissions[String(tool.id)]),
-        })),
-      };
+      if (permissionMode === "role") {
+        const payload = {
+          permissions: tools
+            .filter((tool) => tool.enabled)
+            .map((tool) => ({
+              tool_id: Number(tool.id),
+              allowed: permissions[String(tool.id)] === true,
+            })),
+        };
 
-      const response = await axios.put(
-        `${API_URL}/admin/users/${selectedUserId}/tool-permissions`,
-        payload,
-        getTokenConfig()
-      );
-
-      const allowedToolIds = Array.isArray(response.data?.allowed_tool_ids)
-        ? response.data.allowed_tool_ids.map(String)
-        : tools
-            .filter((tool) => permissions[String(tool.id)])
-            .map((tool) => String(tool.id));
-
-      const nextPermissions = {};
-      tools.forEach((tool) => {
-        nextPermissions[String(tool.id)] = allowedToolIds.includes(
-          String(tool.id)
+        const response = await axios.put(
+          `${API_URL}/admin/roles/${selectedRoleId}/tool-permissions`,
+          payload,
+          getTokenConfig()
         );
-      });
 
-      setPermissions(nextPermissions);
-      setSuccess(
-        response.data?.message ||
-          "Tool permissions updated successfully."
-      );
+        setSuccess(
+          response.data?.message ||
+            "Role tool permissions updated successfully."
+        );
+      } else {
+        const payload = {
+          permissions: tools
+            .filter(
+              (tool) =>
+                tool.enabled &&
+                ["allow", "deny"].includes(permissions[String(tool.id)])
+            )
+            .map((tool) => ({
+              tool_id: Number(tool.id),
+              allowed: permissions[String(tool.id)] === "allow",
+            })),
+        };
+
+        const response = await axios.put(
+          `${API_URL}/admin/users/${selectedUserId}/tool-permissions`,
+          payload,
+          getTokenConfig()
+        );
+
+        setSuccess(
+          response.data?.message ||
+            "Individual tool permissions updated successfully."
+        );
+      }
+
+      if (permissionMode === "role") {
+        await loadRolePermissions(selectedRoleId);
+      } else {
+        await loadUserPermissions(selectedUserId);
+      }
     } catch (err) {
       console.error("Unable to save tool permissions:", err);
       setError(
@@ -4447,7 +6359,11 @@ function AdminPermissions({ users, onRefreshUsers }) {
           onClick={() => {
             loadTools();
             if (onRefreshUsers) onRefreshUsers();
-            if (selectedUserId) loadUserPermissions(selectedUserId);
+            if (permissionMode === "role") {
+              loadRolePermissions(selectedRoleId);
+            } else if (selectedUserId) {
+              loadUserPermissions(selectedUserId);
+            }
           }}
           className="border border-white/10 bg-[#0d1114] px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400 transition hover:border-red-500/40 hover:text-white"
         >
@@ -4474,25 +6390,92 @@ function AdminPermissions({ users, onRefreshUsers }) {
         </div>
       )}
 
+      <div className="mb-4 flex flex-wrap gap-2 rounded-lg border border-white/10 bg-[#0b1014] p-2">
+        <button
+          type="button"
+          onClick={() => {
+            setPermissionMode("role");
+            setError("");
+            setSuccess("");
+          }}
+          className={`rounded-md border px-4 py-3 text-[10px] font-semibold uppercase tracking-wider transition ${
+            permissionMode === "role"
+              ? "border-red-500/50 bg-red-500/10 text-red-400"
+              : "border-white/10 text-gray-500 hover:border-red-500/30 hover:text-white"
+          }`}
+        >
+          Role Permissions
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setPermissionMode("individual");
+            setError("");
+            setSuccess("");
+          }}
+          className={`rounded-md border px-4 py-3 text-[10px] font-semibold uppercase tracking-wider transition ${
+            permissionMode === "individual"
+              ? "border-red-500/50 bg-red-500/10 text-red-400"
+              : "border-white/10 text-gray-500 hover:border-red-500/30 hover:text-white"
+          }`}
+        >
+          Individual User Permissions
+        </button>
+      </div>
+
       <div className="grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
         <section className="rounded-lg border border-white/10 bg-[#0b1014]">
           <div className="border-b border-white/10 px-5 py-4">
             <p className="text-[10px] uppercase tracking-[0.18em] text-gray-600">
-              User / Client Account
+              {permissionMode === "role" ? "Role Configuration" : "Individual Account"}
             </p>
             <p className="mt-1 text-sm font-semibold text-white">
-              Select account
+              {permissionMode === "role" ? "Select role" : "Select account"}
             </p>
           </div>
 
           <div className="p-4">
-            {userClients.length === 0 ? (
+            {permissionMode === "role" ? (
+              <div className="space-y-2">
+                {[
+                  { id: "1", name: "Client", description: "Client-level default access" },
+                  { id: "2", name: "Analyst", description: "Analyst-level default access" },
+                ].map((role) => {
+                  const selected = selectedRoleId === role.id;
+                  return (
+                    <button
+                      key={role.id}
+                      type="button"
+                      onClick={() => setSelectedRoleId(role.id)}
+                      className={`w-full rounded-md border px-3 py-3 text-left transition ${
+                        selected
+                          ? "border-red-500/50 bg-red-500/10"
+                          : "border-white/10 bg-black/10 hover:border-red-500/30 hover:bg-white/[0.025]"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-xs font-semibold text-white">
+                          {role.name}
+                        </span>
+                        <span className={`h-2 w-2 rounded-full ${selected ? "bg-red-500" : "bg-gray-700"}`} />
+                      </div>
+                      <p className="mt-1 text-[10px] text-gray-600">
+                        {role.description}
+                      </p>
+                      <p className="mt-2 text-[9px] uppercase tracking-wider text-gray-700">
+                        Role ID: {role.id}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : manageableUsers.length === 0 ? (
               <div className="rounded-md border border-white/10 bg-black/20 px-4 py-5 text-xs text-gray-500">
-                No User / Client accounts are available.
+                No Client or Analyst accounts are available.
               </div>
             ) : (
               <div className="space-y-2">
-                {userClients.map((user) => {
+                {manageableUsers.map((user) => {
                   const selected = String(user.id) === String(selectedUserId);
                   return (
                     <button
@@ -4509,17 +6492,13 @@ function AdminPermissions({ users, onRefreshUsers }) {
                         <span className="truncate text-xs font-semibold text-white">
                           {user.username || "Unnamed User"}
                         </span>
-                        <span
-                          className={`h-2 w-2 shrink-0 rounded-full ${
-                            selected ? "bg-red-500" : "bg-gray-700"
-                          }`}
-                        />
+                        <span className={`h-2 w-2 shrink-0 rounded-full ${selected ? "bg-red-500" : "bg-gray-700"}`} />
                       </div>
                       <p className="mt-1 truncate text-[10px] text-gray-600">
                         {user.email || "—"}
                       </p>
                       <p className="mt-2 text-[9px] uppercase tracking-wider text-gray-700">
-                        User ID: {user.id}
+                        {Number(user.role_id) === 1 ? "Client" : "Analyst"} • User ID: {user.id}
                       </p>
                     </button>
                   );
@@ -4534,20 +6513,24 @@ function AdminPermissions({ users, onRefreshUsers }) {
             <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
               <div className="min-w-0">
                 <p className="text-[10px] uppercase tracking-[0.18em] text-gray-600">
-                  Selected Account
+                  {permissionMode === "role" ? "Selected Role" : "Selected Account"}
                 </p>
                 <div className="mt-1 flex flex-wrap items-center gap-3">
                   <h2 className="text-lg font-semibold text-white">
-                    {selectedUser?.username || "No user selected"}
+                    {permissionMode === "role"
+                      ? (selectedRoleId === "1" ? "Client" : "Analyst")
+                      : (selectedUser?.username || "No user selected")}
                   </h2>
-                  {selectedUser && (
-                    <span className="rounded-md border border-red-500/20 bg-red-500/10 px-2 py-1 text-[9px] uppercase tracking-wider text-red-400">
-                      User / Client
-                    </span>
-                  )}
+                  <span className="rounded-md border border-red-500/20 bg-red-500/10 px-2 py-1 text-[9px] uppercase tracking-wider text-red-400">
+                    {permissionMode === "role"
+                      ? "Role Default"
+                      : (Number(selectedUser?.role_id) === 1 ? "Client" : "Analyst")}
+                  </span>
                 </div>
                 <p className="mt-1 text-[10px] text-gray-600">
-                  {selectedUser?.email || "Select an account to manage permissions."}
+                  {permissionMode === "role"
+                    ? "Default permissions inherited by users without individual overrides."
+                    : (selectedUser?.email || "Select an account to manage permissions.")}
                 </p>
               </div>
 
@@ -4624,18 +6607,37 @@ function AdminPermissions({ users, onRefreshUsers }) {
                 <div className="flex gap-2">
                   <button
                     type="button"
-                    onClick={() => setCategoryPermissions(activeCategory, true)}
+                    onClick={() =>
+                      setCategoryPermissions(
+                        activeCategory,
+                        permissionMode === "role" ? true : "allow"
+                      )
+                    }
                     className="border border-green-500/20 bg-green-500/5 px-3 py-2 text-[9px] font-semibold uppercase tracking-wider text-green-400 hover:bg-green-500/10"
                   >
                     Allow {activeCategory === "All Tools" ? "All" : "Category"}
                   </button>
                   <button
                     type="button"
-                    onClick={() => setCategoryPermissions(activeCategory, false)}
+                    onClick={() =>
+                      setCategoryPermissions(
+                        activeCategory,
+                        permissionMode === "role" ? false : "deny"
+                      )
+                    }
                     className="border border-red-500/20 bg-red-500/5 px-3 py-2 text-[9px] font-semibold uppercase tracking-wider text-red-400 hover:bg-red-500/10"
                   >
                     Deny {activeCategory === "All Tools" ? "All" : "Category"}
                   </button>
+                  {permissionMode === "individual" && (
+                    <button
+                      type="button"
+                      onClick={() => setCategoryPermissions(activeCategory, "inherit")}
+                      className="border border-white/10 bg-white/[0.03] px-3 py-2 text-[9px] font-semibold uppercase tracking-wider text-gray-400 hover:bg-white/[0.07]"
+                    >
+                      Inherit {activeCategory === "All Tools" ? "All" : "Category"}
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -4646,8 +6648,22 @@ function AdminPermissions({ users, onRefreshUsers }) {
               ) : (
                 <div className="grid gap-2 p-4 md:grid-cols-2">
                   {visibleTools.map((tool) => {
-                    const allowed = Boolean(permissions[String(tool.id)]);
+                    const permissionValue = permissions[String(tool.id)] ??
+                      (permissionMode === "role" ? false : "inherit");
+                    const allowed = permissionMode === "role"
+                      ? permissionValue === true
+                      : permissionValue === "allow";
                     const toolEnabled = Boolean(tool.enabled);
+
+                    const statusLabel = !toolEnabled
+                      ? "Tool Disabled"
+                      : permissionMode === "role"
+                      ? (allowed ? "Allowed by Role" : "Denied by Role")
+                      : permissionValue === "allow"
+                      ? "Explicitly Allowed"
+                      : permissionValue === "deny"
+                      ? "Explicitly Denied"
+                      : "Inherit from Role";
 
                     return (
                       <div
@@ -4679,27 +6695,34 @@ function AdminPermissions({ users, onRefreshUsers }) {
                             </p>
                           </div>
 
-                          <button
-                            type="button"
-                            disabled={!toolEnabled || !selectedUserId}
-                            onClick={() =>
-                              setToolPermission(tool.id, !allowed)
-                            }
-                            className={`relative h-6 w-11 shrink-0 rounded-full border transition disabled:cursor-not-allowed disabled:opacity-40 ${
-                              allowed && toolEnabled
-                                ? "border-red-500 bg-red-600"
-                                : "border-white/15 bg-[#171b1f]"
-                            }`}
-                            aria-label={`${allowed ? "Disable" : "Enable"} ${tool.name}`}
+                          <select
+                            value={String(permissionValue)}
+                            disabled={!toolEnabled || (permissionMode === "individual" && !selectedUserId)}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              setToolPermission(
+                                tool.id,
+                                permissionMode === "role"
+                                  ? value === "true"
+                                  : value
+                              );
+                            }}
+                            className="w-32 shrink-0 rounded-md border border-white/15 bg-[#171b1f] px-2 py-2 text-[10px] font-semibold text-white outline-none focus:border-red-500/50 disabled:cursor-not-allowed disabled:opacity-40"
+                            aria-label={`Permission for ${tool.name}`}
                           >
-                            <span
-                              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${
-                                allowed && toolEnabled
-                                  ? "left-[21px]"
-                                  : "left-0.5"
-                              }`}
-                            />
-                          </button>
+                            {permissionMode === "role" ? (
+                              <>
+                                <option value="true">Allow</option>
+                                <option value="false">Deny</option>
+                              </>
+                            ) : (
+                              <>
+                                <option value="allow">Allow</option>
+                                <option value="deny">Deny</option>
+                                <option value="inherit">Inherit</option>
+                              </>
+                            )}
+                          </select>
                         </div>
 
                         <p className="mt-3 min-h-[30px] text-[10px] leading-5 text-gray-500">
@@ -4713,14 +6736,12 @@ function AdminPermissions({ users, onRefreshUsers }) {
                                 ? "text-gray-700"
                                 : allowed
                                 ? "text-red-400"
+                                : permissionMode === "individual" && permissionValue === "inherit"
+                                ? "text-blue-400"
                                 : "text-gray-600"
                             }`}
                           >
-                            {!toolEnabled
-                              ? "Tool Disabled"
-                              : allowed
-                              ? "Allowed"
-                              : "Denied"}
+                            {statusLabel}
                           </span>
                           <span className="text-[9px] text-gray-700">
                             ID {tool.id}
@@ -4745,7 +6766,12 @@ function AdminPermissions({ users, onRefreshUsers }) {
                 <button
                   type="button"
                   onClick={handleSave}
-                  disabled={saving || !selectedUserId || loadingTools || loadingPermissions}
+                  disabled={
+                    saving ||
+                    (permissionMode === "individual" && !selectedUserId) ||
+                    loadingTools ||
+                    loadingPermissions
+                  }
                   className="rounded-md bg-red-600 px-6 py-3 text-[10px] font-bold uppercase tracking-wider text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {saving ? "Saving..." : "Save Permissions"}
@@ -11310,7 +13336,8 @@ function SupportDetail({ label, value, mono = false }) {
 // ==================================================
 // LIVE LOG MONITORING
 // ==================================================
-function LiveLogMonitoring({ initialTab = "syslog" }) {
+function LiveLogMonitoring({ initialTab = "syslog", adminMode = false } = {}) {
+  const eventsApi = adminMode ? `${API_URL}/admin/security-events` : `${API_URL}/security-events`;
   const [activeLog, setActiveLog] = useState(initialTab);
   const [autoRefresh, setAutoRefresh] = useState(true);
 
@@ -11467,7 +13494,7 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
       }
 
       const response = await axios.get(
-        `${API_URL}/security-events?${params.toString()}`,
+        `${eventsApi}?${params.toString()}`,
         getAuthConfig()
       );
 
@@ -11512,7 +13539,7 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
       setError("");
 
       const response = await axios.patch(
-        `${API_URL}/security-events/${encodeURIComponent(event.event_id)}/${action}`,
+        `${eventsApi}/${encodeURIComponent(event.event_id)}/${action}`,
         {},
         getAuthConfig()
       );
@@ -11609,7 +13636,7 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
         API_URL.replace(/^https?:\/\//, "").replace(/\/$/, "");
 
       socket = new WebSocket(
-        `${protocol}//${host}/ws/client/siem-events?token=${encodeURIComponent(token)}`
+        `${protocol}//${host}/ws/${adminMode ? "security-events" : "client/siem-events"}?token=${encodeURIComponent(token)}`
       );
 
       socket.onopen = () => {
@@ -11622,7 +13649,7 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
         try {
           const incoming = JSON.parse(event.data);
 
-          if (incoming.type === "siem_refresh") {
+          if (adminMode || incoming.type === "siem_refresh") {
             fetchSecurityEvents({ silent: true });
           }
         } catch (err) {
@@ -11868,7 +13895,7 @@ function LiveLogMonitoring({ initialTab = "syslog" }) {
       <div className="mb-8 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <p className="text-xs uppercase tracking-[0.2em] text-red-500">
-            SIEM / Account Security Events
+            {adminMode ? "SIEM / Global SOC Events" : "SIEM / Account Security Events"}
           </p>
           <h1 className="mt-2 text-3xl font-bold">
             {activeLog === "security-events"
@@ -25817,7 +27844,7 @@ function NmapResultsPage({ scanResult, onBack }) {
 
     add("Open Ports & Services", 12, 5);
     nmapOpenPorts.forEach((port) =>
-      add(`${port.host}  ${port.port}/${port.protocol || "tcp"}  ${port.service?.name || "unknown"} ${port.service?.product || ""} ${port.service?.version || ""}`, 8, 4)
+      add(`${port.host}  ${port.port}/${port.protocol || "tcp"}  ${port.service?.name || "unknown"}  ${port.service?.product || "Product not identified"}  ${[port.service?.version, port.service?.extrainfo].filter(Boolean).join(" ") || "Version not identified"}`, 8, 4)
     );
 
     add("OS Detection", 12, 5);
@@ -25975,7 +28002,7 @@ function NmapResultsDashboard({
       </div>
 
       <div className="mt-4 border border-white/10 bg-[#080808] p-5"><p className="text-xs font-semibold uppercase tracking-wider text-gray-400">HTTP / HTTPS Services</p>
-        <div className="mt-3 grid gap-3 md:grid-cols-2">{httpPorts.map((p,i)=><div key={`${p?.port}-${i}`} className="border border-white/10 p-4"><p className="text-sm font-semibold text-white">{p?.service?.name||"HTTP/HTTPS"} — {p?.port}/{p?.protocol||"tcp"}</p><p className="mt-1 text-[10px] text-gray-500">{p?.service?.product||"Unknown product"} {p?.service?.version||""}</p></div>)}{httpPorts.length===0&&<p className="text-xs text-gray-600">No HTTP/HTTPS service was detected.</p>}</div>
+        <div className="mt-3 grid gap-3 md:grid-cols-2">{httpPorts.map((p,i)=><div key={`${p?.port}-${i}`} className="border border-white/10 p-4"><p className="text-sm font-semibold text-white">{p?.service?.name||"HTTP/HTTPS"} — {p?.port}/{p?.protocol||"tcp"}</p><p className="mt-1 text-[10px] text-gray-500">{[p?.service?.product, p?.service?.version, p?.service?.extrainfo].filter(Boolean).join(" ") || "Product not identified by Nmap"}</p></div>)}{httpPorts.length===0&&<p className="text-xs text-gray-600">No HTTP/HTTPS service was detected.</p>}</div>
       </div>
 
       {Array.isArray(nmap?.errors)&&nmap.errors.length>0&&<div className="mt-4 border border-yellow-600/20 bg-yellow-600/5 p-5"><p className="text-xs font-semibold uppercase tracking-wider text-yellow-500">Warnings / Errors</p><div className="mt-3 space-y-2">{nmap.errors.map((e,i)=><p key={i} className="text-xs leading-5 text-gray-500">{e}</p>)}</div></div>}
@@ -29932,13 +31959,53 @@ function FindingDetailSection({
 // ==================================================
 // ADMIN AUDIT TRAIL
 // ==================================================
-function AuditTrail() {
+function AuditTrail({ menu = 'admin-user-activity' }) {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [moduleFilter, setModuleFilter] = useState("ALL");
   const [statusFilter, setStatusFilter] = useState("ALL");
+
+  const auditViews = {
+    "admin-user-activity": {
+      title: "User Activity",
+      description: "Review recorded user-related activity.",
+      keywords: ["user registered", "user created", "user updated", "user deleted", "client assignment", "user client assignment updated"],
+    },
+    "admin-admin-activity": {
+      title: "Admin Activity",
+      description: "Review recorded administrative actions.",
+      keywords: ["admin action", "administrator action", "admin activity", "user created", "client assignment", "user client assignment updated", "role change", "permission change", "user tool permissions updated", "configuration change"],
+    },
+    "admin-login-history": {
+      title: "Login History",
+      description: "Review recorded login and authentication events.",
+      keywords: ["login", "log in", "logout", "log out", "authentication", "sign in", "signin"],
+    },
+    "admin-permission-changes": {
+      title: "Permission Changes",
+      description: "Review recorded role and permission-related events.",
+      keywords: ["permission", "role change", "role_update", "rbac", "privilege"],
+    },
+    "admin-configuration-changes": {
+      title: "Configuration Changes",
+      description: "Review recorded configuration and settings-related events.",
+      keywords: ["configuration", "config", "settings"],
+    },
+    "admin-api-activity": {
+      title: "API Activity",
+      description: "Review recorded API and endpoint-related events.",
+      keywords: ["api", "endpoint", "http request"],
+    },
+    "admin-audit-export": {
+      title: "Audit Export",
+      description: "Review audit events and export filtered records to CSV.",
+      keywords: [],
+    },
+  };
+  const auditView = auditViews[menu] || auditViews["admin-user-activity"];
+
 
   const loadLogs = async () => {
     try {
@@ -29989,7 +32056,19 @@ function AuditTrail() {
     ),
   ];
 
-  const filteredLogs = logs.filter((item) => {
+  const categoryLogs = auditView.keywords.length === 0
+    ? logs
+    : logs.filter((item) => {
+        const searchableText = [
+          item.action, item.module, item.details, item.username
+        ].map((value) => String(value || "").toLowerCase()).join(" ");
+
+        return auditView.keywords.some((keyword) =>
+          searchableText.includes(keyword.toLowerCase())
+        );
+      });
+
+  const filteredLogs = categoryLogs.filter((item) => {
     const query = search.toLowerCase().trim();
 
     const matchesSearch =
@@ -30011,16 +32090,56 @@ function AuditTrail() {
     return matchesSearch && matchesModule && matchesStatus;
   });
 
-  const totalEvents = logs.length;
-  const successfulEvents = logs.filter(
+  const exportAuditCSV = () => {
+    const columns = [
+      ["ID", "id"],
+      ["Timestamp", "created_at"],
+      ["User ID", "user_id"],
+      ["Username", "username"],
+      ["Action", "action"],
+      ["Module", "module"],
+      ["IP Address", "ip_address"],
+      ["Status", "status"],
+      ["Details", "details"],
+    ];
+
+    const escapeCSV = (value) => {
+      let text = String(value ?? "");
+      // Prevent spreadsheet formula injection in exported text.
+      if (/^[=+@\\-\\t\\r]/.test(text)) text = "'" + text;
+      return '"' + text.replace(/"/g, '""') + '"';
+    };
+
+    const csv = [
+      columns.map(([label]) => escapeCSV(label)).join(","),
+      ...filteredLogs.map((item) =>
+        columns.map(([, key]) => escapeCSV(item[key])).join(",")
+      ),
+    ].join("\r\n");
+
+    const blob = new Blob(["\uFEFF", csv], {
+      type: "text/csv;charset=utf-8;",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `SOC-Audit-Trail-${Date.now()}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const totalEvents = categoryLogs.length;
+  const successfulEvents = categoryLogs.filter(
     (item) => String(item.status || "").toUpperCase() === "SUCCESS"
   ).length;
-  const failedEvents = logs.filter(
+  const failedEvents = categoryLogs.filter(
     (item) => String(item.status || "").toUpperCase() === "FAILED"
   ).length;
 
   const todayKey = new Date().toDateString();
-  const todayEvents = logs.filter((item) => {
+  const todayEvents = categoryLogs.filter((item) => {
     if (!item.created_at) return false;
     return new Date(item.created_at).toDateString() === todayKey;
   }).length;
@@ -30034,12 +32153,11 @@ function AuditTrail() {
           </p>
 
           <h1 className="mt-2 text-3xl font-bold">
-            Audit Trail
+            {auditView.title}
           </h1>
 
           <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-500">
-            Review security-relevant platform activity, user actions and
-            administrative events.
+            {auditView.description}
           </p>
         </div>
 
@@ -30124,9 +32242,17 @@ function AuditTrail() {
             </p>
 
             <p className="mt-1 text-xs text-gray-600">
-              Showing {filteredLogs.length} of {logs.length} events
+              Showing {filteredLogs.length} of {categoryLogs.length} events
             </p>
           </div>
+          <button
+            type="button"
+            onClick={exportAuditCSV}
+            disabled={loading || filteredLogs.length === 0}
+            className="border border-white/10 px-4 py-2 text-xs text-gray-300 transition hover:border-red-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Download CSV
+          </button>
         </div>
 
         {loading ? (

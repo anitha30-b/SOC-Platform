@@ -201,7 +201,43 @@ def map_security_event(
 
         return mappings
 
-    if source == "systemd-journald":
+    if source == "snort":
+        raw_event = event.get("raw_event") or {}
+        alert = str(raw_event.get("alert", "")).upper()
+
+        # Snort SID 621 detects TCP FIN scan activity.
+        if "[1:621:" in alert and "SCAN FIN" in alert:
+            mapping = build_mapping(
+                "T1046",
+                event,
+                confidence="medium",
+            )
+
+            if mapping:
+                mapping["mapping_source"] = "snort_signature"
+                mapping["mapping_reason"] = (
+                    "Snort SID 621 detected TCP FIN scan activity, "
+                    "which is consistent with Network Service Discovery."
+                )
+                mappings.append(mapping)
+
+        # Snort SID 1000001 detects TCP SYN port scan activity.
+        elif "[1:1000001:" in alert and "CUSTOM SYN PORT SCAN DETECTED" in alert:
+            mapping = build_mapping(
+                "T1046",
+                event,
+                confidence="medium",
+            )
+
+            if mapping:
+                mapping["mapping_source"] = "snort_signature"
+                mapping["mapping_reason"] = (
+                    "Snort SID 1000001 detected TCP SYN port scan activity, "
+                    "which is consistent with Network Service Discovery."
+                )
+                mappings.append(mapping)
+
+    elif source == "systemd-journald":
 
         if "failed password" in message:
             # A single failed password is not

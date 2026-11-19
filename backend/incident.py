@@ -1,3 +1,5 @@
+from sqlalchemy import UniqueConstraint
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, cast
 import json
 from models import User
@@ -9,8 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Session
 
-from database import Base, engine, get_db
-from models import SecurityEvent
+from database import Base, SessionLocal, engine, get_db
+from models import SecurityEvent, AlertResult
 from rbac import require_role
 from security_event_scope import owned_security_event_filter
 
@@ -1225,3 +1227,174 @@ def get_incident(
     )
 
     return _incident_utc_response(response) if utc_timestamps else response
+
+
+class IncidentAlertLink(Base):
+    __tablename__ = "incident_alert_links"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "incident_id",
+            "alert_result_id",
+            name="uq_incident_alert_link",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    incident_id = Column(
+        Integer,
+        ForeignKey("incidents.id"),
+        nullable=False,
+        index=True,
+    )
+
+    alert_result_id = Column(
+        Integer,
+        ForeignKey("alert_results.id"),
+        nullable=False,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+    )
+
+
+
+def create_incidents_for_event(event_payload):
+    """
+    Create one persistent incident for qualifying alerts
+    belonging to a committed security event.
+
+    Multiple qualifying alerts for the same event are linked
+    to the same incident.
+    """
+    event_ref = event_payload.get("event_id")
+
+    if not event_ref:
+        return {"created": 0, "linked": 0, "incident_id": None}
+
+    db = SessionLocal()
+
+    try:
+        event = (
+            db.query(SecurityEvent)
+            .filter(SecurityEvent.event_id == event_ref)
+            .with_for_update()
+            .first()
+        )
+
+        if not event:
+            return {"created": 0, "linked": 0, "incident_id": None}
+
+        qualifying_alerts = (
+            db.query(AlertResult)
+            .filter(
+                AlertResult.security_event_id == event.id,
+                AlertResult.severity.in_(
+                    ["ERROR", "HIGH", "CRITICAL"]
+                ),
+            )
+            .order_by(AlertResult.id.asc())
+            .all()
+        )
+
+        if not qualifying_alerts:
+            return {"created": 0, "linked": 0, "incident_id": None}
+
+        case = (
+            db.query(Incident)
+            .filter(Incident.security_event_id == event.id)
+            .first()
+        )
+
+        created = 0
+
+        if case is None:
+            first_alert = qualifying_alerts[0]
+
+            case = Incident(
+                incident_id=f"INC-{event.id:06d}",
+                security_event_id=event.id,
+                source_event_id=event.event_id,
+                title=f"{first_alert.alert_name}: {event.message}"[:500],
+                description=(
+                    f"Automatically created from alert "
+                    f"{first_alert.alert_name}. "
+                    f"Priority: {first_alert.priority}. "
+                    f"Original event: {event.message}"
+                ),
+                severity=first_alert.severity,
+                status="OPEN",
+            )
+
+            db.add(case)
+            db.flush()
+            created = 1
+
+        linked = 0
+
+        for alert in qualifying_alerts:
+            existing_link = (
+                db.query(IncidentAlertLink)
+                .filter(
+                    IncidentAlertLink.incident_id == case.id,
+                    IncidentAlertLink.alert_result_id == alert.id,
+                )
+                .first()
+            )
+
+            if existing_link:
+                continue
+
+            db.add(
+                IncidentAlertLink(
+                    incident_id=case.id,
+                    alert_result_id=alert.id,
+                )
+            )
+            linked += 1
+
+        db.commit()
+
+        return {
+            "created": created,
+            "linked": linked,
+            "incident_id": case.incident_id,
+        }
+
+    except IntegrityError:
+        db.rollback()
+
+        # Another worker may have created the incident concurrently.
+        existing = (
+            db.query(Incident)
+            .filter(Incident.security_event_id.isnot(None))
+            .filter(
+                Incident.security_event_id
+                == db.query(SecurityEvent.id)
+                .filter(SecurityEvent.event_id == event_ref)
+                .scalar_subquery()
+            )
+            .first()
+        )
+
+        if existing:
+            return {
+                "created": 0,
+                "linked": 0,
+                "incident_id": existing.incident_id,
+            }
+
+        raise
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        db.close()
+

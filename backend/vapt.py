@@ -29,10 +29,11 @@ from models import (
     SecurityEvent,
     User,
     UserToolPermission,
+    RoleToolPermission,
 )
-from rbac import require_role
+from rbac import require_role, get_current_user
 from security_event_store import store_security_event
-from security_events import generate_event_id
+from security_events import create_security_event, generate_event_id
 from realtime_journal_listener import notify_security_event
 
 
@@ -71,10 +72,62 @@ NIKTO_PATH = (
     or shutil.which("nikto.pl")
     or "/usr/bin/nikto"
 )
-NIKTO_TIMEOUT_SECONDS = int(os.getenv("NIKTO_TIMEOUT_SECONDS", "600"))
-NIKTO_MAXTIME_QUICK = os.getenv("NIKTO_MAXTIME_QUICK", "5m")
+NIKTO_TIMEOUT_SECONDS = int(os.getenv("NIKTO_TIMEOUT_SECONDS", "60"))
+NIKTO_MAXTIME_QUICK = os.getenv("NIKTO_MAXTIME_QUICK", "30s")
 NIKTO_MAXTIME_DETAILED = os.getenv("NIKTO_MAXTIME_DETAILED", "10m")
 NIKTO_JOBS: dict[str, dict] = {}
+
+def _persist_background_job(job: dict, tool: str) -> None:
+    """Insert or update a VAPT job record in PostgreSQL."""
+    import json
+    from datetime import datetime, timezone
+    from models import BackgroundJob
+
+    db = SessionLocal()
+    try:
+        record = (
+            db.query(BackgroundJob)
+            .filter(BackgroundJob.job_id == job["job_id"])
+            .first()
+        )
+
+        def as_datetime(value):
+            if isinstance(value, (int, float)):
+                return datetime.fromtimestamp(value, timezone.utc).replace(tzinfo=None)
+            if isinstance(value, datetime):
+                return value.replace(tzinfo=None)
+            return datetime.utcnow()
+
+        if record is None:
+            record = BackgroundJob(
+                job_id=job["job_id"],
+                tool=tool,
+                target=str(job.get("target", ""))[:2048],
+                scan_type=job.get("scan_type"),
+                user_id=job["user_id"],
+                created_at=as_datetime(job.get("created_at")),
+            )
+            db.add(record)
+
+        record.status = str(job.get("status", "unknown"))[:40]
+        record.progress = int(job.get("progress", 0) or 0)
+        record.stage = str(job.get("stage", ""))[:255]
+        record.updated_at = as_datetime(job.get("updated_at"))
+        record.error = str(job["error"])[:4000] if job.get("error") else None
+
+        result = job.get("result")
+        record.result_json = (
+            json.dumps(result, default=str) if result is not None else None
+        )
+
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print(f"[BACKGROUND JOB PERSISTENCE ERROR] {tool}: {exc}")
+    finally:
+        db.close()
+
+
 
 NMAP_TIMEOUT_SECONDS = int(
     os.getenv("NMAP_TIMEOUT_SECONDS", "120")
@@ -121,7 +174,8 @@ def require_user_tool_permission(
     current_user: User,
     tool_name: str,
 ) -> SecurityTool:
-    """Require an explicitly granted, enabled tool permission."""
+    """Check admin, individual override, then role-based permission."""
+
     tool = (
         db.query(SecurityTool)
         .filter(func.lower(SecurityTool.name) == tool_name.lower())
@@ -140,7 +194,12 @@ def require_user_tool_permission(
             detail=f"Security tool '{tool.name}' is currently disabled.",
         )
 
-    permission = (
+    # Admins can use all enabled tools.
+    if current_user.role_id == 3:
+        return tool
+
+    # Individual permission takes priority, including explicit Deny.
+    user_permission = (
         db.query(UserToolPermission)
         .filter(
             UserToolPermission.user_id == current_user.id,
@@ -149,7 +208,26 @@ def require_user_tool_permission(
         .first()
     )
 
-    if permission is None or not permission.allowed:
+    if user_permission is not None:
+        if user_permission.allowed:
+            return tool
+
+        raise HTTPException(
+            status_code=403,
+            detail=f"You do not have permission to use the security tool '{tool.name}'.",
+        )
+
+    # No individual override: inherit the role permission.
+    role_permission = (
+        db.query(RoleToolPermission)
+        .filter(
+            RoleToolPermission.role_id == current_user.role_id,
+            RoleToolPermission.tool_id == tool.id,
+        )
+        .first()
+    )
+
+    if role_permission is None or not role_permission.allowed:
         raise HTTPException(
             status_code=403,
             detail=f"You do not have permission to use the security tool '{tool.name}'.",
@@ -1137,6 +1215,8 @@ async def _execute_nmap_command(
                 "-Pn",
                 "-T5",
                 "-sT",
+                "-sV",
+                "--version-light",
                 "--top-ports",
                 "1000",
                 "--max-retries",
@@ -2044,7 +2124,124 @@ def _new_nmap_job(target: str, scan_type: str, user_id: int, client_id: int | No
         "created_at": time.time(),
         "updated_at": time.time(),
     }
+    _persist_background_job(NMAP_JOBS[job_id], "Nmap")
     return job_id
+
+
+
+def _save_nmap_hosts_to_asset_inventory(result):
+    """Save discovered Nmap hosts while preserving manually maintained fields."""
+    if result.get("status") not in {"completed", "completed_with_errors"}:
+        return {"created": 0, "updated": 0, "skipped": 0}
+
+    hosts = result.get("results", {}).get("hosts", [])
+    if not isinstance(hosts, list):
+        return {"created": 0, "updated": 0, "skipped": 0}
+
+    from assets_router import Asset
+
+    db = SessionLocal()
+    created = updated = skipped = 0
+
+    try:
+        for host in hosts:
+            addresses = host.get("addresses", [])
+            ip = next(
+                (a.get("address") for a in addresses
+                 if a.get("type") in {"ipv4", "ipv6"} and a.get("address")),
+                None,
+            )
+            if not ip:
+                skipped += 1
+                continue
+
+            raw_names = host.get("hostnames", [])
+            hostname = next(
+                (n.get("name") if isinstance(n, dict) else n
+                 for n in raw_names
+                 if (n.get("name") if isinstance(n, dict) else n)),
+                None,
+            )
+
+            services = []
+            for port in host.get("ports", []):
+                if port.get("state") != "open":
+                    continue
+                service = port.get("service") or {}
+                label = f'{port.get("protocol", "tcp")}/{port.get("port", "?")}'
+                detail = service.get("name", "unknown service")
+                product = service.get("product")
+                version = service.get("version")
+                if product:
+                    detail += f" ({product}{' ' + version if version else ''})"
+                services.append(f"{label}: {detail}")
+
+            block = "\n".join([
+                "[Nmap Discovery]",
+                f"Last scan target: {result.get('target', 'unknown')}",
+                f"Scan profile: {result.get('scan_type', 'unknown')}",
+                f"Host status: {host.get('status', 'unknown')}",
+                "Open services: " + ("; ".join(services) if services else "None reported"),
+                "[/Nmap Discovery]",
+            ])
+
+            # Match exact IP first. Only use hostname fallback when
+            # exactly one matching asset exists and its IP is empty
+            # or matches the discovered IP.
+            asset = (
+                db.query(Asset)
+                .filter(Asset.ip_address == ip)
+                .order_by(Asset.id.desc())
+                .first()
+            )
+
+            if asset is None and hostname:
+                hostname_matches = (
+                    db.query(Asset)
+                    .filter(Asset.hostname == str(hostname)[:255])
+                    .all()
+                )
+                if len(hostname_matches) == 1:
+                    candidate = hostname_matches[0]
+                    candidate_ip = (candidate.ip_address or "").strip()
+                    if not candidate_ip or candidate_ip == ip:
+                        asset = candidate
+
+            if asset is None:
+                db.add(Asset(
+                    name=str(hostname or ip)[:200],
+                    asset_type="Server",
+                    ip_address=ip,
+                    hostname=str(hostname)[:255] if hostname else None,
+                    notes=block,
+                ))
+                created += 1
+                continue
+
+            if not asset.hostname and hostname:
+                asset.hostname = str(hostname)[:255]
+
+            # Save the discovered IP when a safe hostname match has no IP.
+            if not (asset.ip_address or "").strip():
+                asset.ip_address = ip
+
+            notes = asset.notes or ""
+            begin, end = "[Nmap Discovery]", "[/Nmap Discovery]"
+            if begin in notes and end in notes and notes.index(end) > notes.index(begin):
+                left = notes[:notes.index(begin)].rstrip()
+                right = notes[notes.index(end) + len(end):].lstrip()
+                asset.notes = "\n\n".join(part for part in (left, block, right) if part)
+            else:
+                asset.notes = "\n\n".join(part for part in (notes.strip(), block) if part)
+            updated += 1
+
+        db.commit()
+        return {"created": created, "updated": updated, "skipped": skipped}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 async def _run_nmap_job(job_id: str, target: str, scan_type: str):
@@ -2057,6 +2254,7 @@ async def _run_nmap_job(job_id: str, target: str, scan_type: str):
         job["progress"] = percent
         job["stage"] = stage
         job["updated_at"] = time.time()
+        _persist_background_job(job, "Nmap")
 
     try:
         job["status"] = "running"
@@ -2077,6 +2275,19 @@ async def _run_nmap_job(job_id: str, target: str, scan_type: str):
         )
 
         job["result"] = result
+
+        if result.get("status") in {"completed", "completed_with_errors"}:
+            try:
+                sync_summary = _save_nmap_hosts_to_asset_inventory(result)
+                job["asset_sync"] = sync_summary
+                result["asset_sync"] = sync_summary
+                job["asset_sync_error"] = None
+                print(f"[NMAP ASSET SYNC] {sync_summary}")
+            except Exception as exc:
+                sync_error = str(exc)
+                job["asset_sync_error"] = sync_error
+                result["asset_sync"] = {"error": sync_error}
+                print(f"[NMAP ASSET SYNC ERROR] {sync_error}")
 
         # Store the completed Nmap assessment as a SOC SecurityEvent.
         if result.get("status") in {
@@ -2147,6 +2358,7 @@ async def _run_nmap_job(job_id: str, target: str, scan_type: str):
             job["stage"] = "Finished with errors"
 
         job["updated_at"] = time.time()
+        _persist_background_job(job, "Nmap")
 
     except Exception as exc:
         job["status"] = "failed"
@@ -2192,6 +2404,7 @@ def _new_masscan_job(target: str, user_id: int) -> str:
         "updated_at": time.time(),
     }
 
+    _persist_background_job(MASSCAN_JOBS[job_id], "Masscan")
     return job_id
 
 
@@ -2238,13 +2451,15 @@ async def _execute_masscan_command(
     started = time.perf_counter()
 
     command = [
+        "sudo",
+        "-n",
         MASSCAN_PATH,
         masscan_target,
-        "-p1-1024",
+        "-p80,443",
         "--rate",
-        "1000",
+        "100",
         "--wait",
-        "2",
+        "0",
         "--output-format",
         "json",
         "--output-filename",
@@ -2413,6 +2628,122 @@ async def _execute_masscan_command(
     return result
 
 
+
+
+def persist_masscan_security_events(result: dict) -> int:
+    """Persist real open-port discoveries from either Masscan route."""
+    target = str(result.get("target") or "").strip()
+    open_ports = []
+
+    structured = (
+        result.get("results", {}).get("open_ports", [])
+        if isinstance(result.get("results"), dict)
+        else []
+    )
+
+    for item in structured:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("state", "open")).lower() != "open":
+            continue
+        open_ports.append({
+            "host": str(item.get("host") or ""),
+            "port": item.get("port"),
+            "protocol": str(item.get("protocol") or "tcp").lower(),
+        })
+
+    # Generic registry Masscan output is plain text, e.g.
+    # "Discovered open port 443/tcp on 192.0.2.10"
+    stdout = str(result.get("stdout") or "")
+    for match in re.finditer(
+        r"Discovered open port\s+(\d+)/(tcp|udp)\s+on\s+([0-9a-fA-F:.]+)",
+        stdout,
+        flags=re.IGNORECASE,
+    ):
+        open_ports.append({
+            "host": match.group(3),
+            "port": int(match.group(1)),
+            "protocol": match.group(2).lower(),
+        })
+
+    if not open_ports:
+        return 0
+
+    db = SessionLocal()
+    notifications = []
+    inserted = 0
+
+    try:
+        seen = set()
+
+        for item in open_ports:
+            host = item["host"]
+            port = item["port"]
+            protocol = item["protocol"]
+
+            if not host or port is None:
+                continue
+
+            identity = {
+                "source": "masscan",
+                "target": target,
+                "host": host,
+                "port": port,
+                "protocol": protocol,
+            }
+            event_id = generate_event_id(
+                json.dumps(identity, sort_keys=True, default=str)
+            )
+
+            if event_id in seen:
+                continue
+            seen.add(event_id)
+
+            if db.query(SecurityEvent).filter(
+                SecurityEvent.event_id == event_id
+            ).first():
+                continue
+
+            event = create_security_event(
+                source="masscan",
+                event_type="port_discovered",
+                message=(
+                    f"Masscan discovered open {protocol.upper()} "
+                    f"port {port} on {host}"
+                ),
+                severity="INFO",
+                target=target or host,
+                raw_event={
+                    "tool": "Masscan",
+                    "target": target,
+                    "host": host,
+                    "port": port,
+                    "protocol": protocol,
+                    "result": item,
+                },
+                event_id=event_id,
+            )
+
+            store_security_event(db, event)
+            notifications.append(event)
+            inserted += 1
+
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    for event in notifications:
+        try:
+            notify_security_event(event)
+        except Exception as exc:
+            print(f"[SOC MASSCAN EVENT] Notification failed: {exc}")
+
+    return inserted
+
 async def _run_masscan_job(
     job_id: str,
     target: str,
@@ -2427,6 +2758,7 @@ async def _run_masscan_job(
         job["progress"] = percent
         job["stage"] = stage
         job["updated_at"] = time.time()
+        _persist_background_job(job, "Masscan")
 
     try:
         await update_progress(
@@ -2438,6 +2770,15 @@ async def _run_masscan_job(
             target=target,
             progress_callback=update_progress,
         )
+
+        try:
+            job["security_events_persisted"] = await asyncio.to_thread(
+                persist_masscan_security_events,
+                result,
+            )
+        except Exception as event_exc:
+            job["security_event_persistence_error"] = str(event_exc)
+            print(f"[SOC MASSCAN EVENT] Persistence failed: {event_exc}")
 
         job["result"] = result
 
@@ -2458,12 +2799,14 @@ async def _run_masscan_job(
             job["stage"] = "Finished with errors"
 
         job["updated_at"] = time.time()
+        _persist_background_job(job, "Masscan")
 
     except Exception as exc:
         job["status"] = "failed"
         job["error"] = str(exc)
         job["stage"] = "Failed"
         job["updated_at"] = time.time()
+        _persist_background_job(job, "Masscan")
 
 
 # ==================================================
@@ -2477,7 +2820,7 @@ class MasscanRunRequest(BaseModel):
 @router.post("/masscan/run-async")
 async def run_masscan_async(
     request: MasscanRunRequest,
-    current_user: User = Depends(require_role(1)),
+    current_user: User = Depends(require_role(3)),
     db: Session = Depends(get_db),
 ):
     require_user_tool_permission(
@@ -2588,10 +2931,19 @@ def get_my_tool_permissions(
     ]
 
 
+def require_nmap_access(current_user: User = Depends(get_current_user)):
+    if current_user.role_id not in (1, 3):
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to access Nmap."
+        )
+    return current_user
+
+
 @router.post("/tools/run")
 async def run_vapt_tool(
     request: NmapToolRequest,
-    current_user: User = Depends(require_role(1)),
+    current_user: User = Depends(require_nmap_access),
     db: Session = Depends(get_db),
 ):
     """Execute an approved Nmap profile synchronously."""
@@ -2615,7 +2967,7 @@ async def run_vapt_tool(
 @router.post("/tools/run-async")
 async def run_vapt_tool_async(
     request: NmapToolRequest,
-    current_user: User = Depends(require_role(1)),
+    current_user: User = Depends(require_nmap_access),
     db: Session = Depends(get_db),
 ):
     """Start an Nmap job and return immediately so the frontend can show progress."""
@@ -2644,7 +2996,7 @@ async def run_vapt_tool_async(
 @router.get("/tools/progress/{job_id}")
 async def get_nmap_progress(
     job_id: str,
-    current_user: User = Depends(require_role(1)),
+    current_user: User = Depends(require_nmap_access),
 ):
     """Return live status/progress/result for an Nmap background job."""
 
@@ -2665,6 +3017,8 @@ async def get_nmap_progress(
         "stage": job["stage"],
         "result": job["result"],
         "error": job["error"],
+        "asset_sync": job.get("asset_sync"),
+        "asset_sync_error": job.get("asset_sync_error"),
         "updated_at": job["updated_at"],
         "username": current_user.username,
     }
@@ -2882,6 +3236,7 @@ def _new_nikto_job(target_url: str, scan_type: str, user_id: int, client_id: int
         "user_id":user_id,"client_id":client_id,"status":"queued","progress":0,"stage":"Queued",
         "result":None,"error":None,"created_at":time.time(),"updated_at":time.time()
     }
+    _persist_background_job(NIKTO_JOBS[job_id], "Nikto")
     return job_id
 
 
@@ -2897,6 +3252,7 @@ async def _run_nikto_job(job_id: str, target_url: str, scan_type: str):
             stage=stage,
             updated_at=time.time(),
         )
+        _persist_background_job(job, "Nikto")
 
     try:
         job.update(
@@ -2932,6 +3288,7 @@ async def _run_nikto_job(job_id: str, target_url: str, scan_type: str):
             ),
             updated_at=time.time(),
         )
+        _persist_background_job(job, "Nikto")
 
         # Persist SecurityEvent independently so a slow/locked database
         # cannot keep the real Nikto job stuck in running state.
@@ -3036,6 +3393,7 @@ async def _run_nikto_job(job_id: str, target_url: str, scan_type: str):
             error=str(exc),
             updated_at=time.time(),
         )
+        _persist_background_job(job, "Nikto")
 
 
 # ==================================================
@@ -3060,7 +3418,7 @@ async def run_nikto_tool(
 @router.post("/nikto/run-async")
 async def run_nikto_tool_async(
     request: NiktoToolRequest,
-    current_user: User = Depends(require_role(1)),
+    current_user: User = Depends(require_nmap_access),
     db: Session = Depends(get_db),
 ):
     require_user_tool_permission(db,current_user,"Nikto")
@@ -3077,7 +3435,7 @@ async def run_nikto_tool_async(
 @router.get("/nikto/progress/{job_id}")
 async def get_nikto_progress(
     job_id: str,
-    current_user: User = Depends(require_role(1)),
+    current_user: User = Depends(require_nmap_access),
 ):
     job=NIKTO_JOBS.get(job_id)
     if not job:

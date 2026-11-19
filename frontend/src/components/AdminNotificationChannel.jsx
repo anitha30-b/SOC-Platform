@@ -29,17 +29,6 @@ const CHANNEL_META = {
       ["channel", "Channel", "#security-alerts"],
     ],
   },
-  teams: {
-    title: "Microsoft Teams Alerts",
-    description: "Configure Microsoft Teams webhook delivery.",
-    endpointLabel: "Teams Webhook URL",
-    endpointPlaceholder: "https://...",
-    usernameLabel: "Username",
-    secretLabel: "Webhook Secret",
-    configurationFields: [
-      ["display_name", "Display Name", "SecuzityShield"],
-    ],
-  },
   webhook: {
     title: "Webhook",
     description: "Configure a generic HTTP webhook for security notifications.",
@@ -54,8 +43,9 @@ const CHANNEL_META = {
   },
 };
 
-export default function AdminNotificationChannel({ channel }) {
+export default function AdminNotificationChannel({ channel, title }) {
   const meta = CHANNEL_META[channel] || CHANNEL_META.webhook;
+  const displayTitle = title || meta.title;
 
   const [form, setForm] = useState({
     enabled: false,
@@ -70,6 +60,9 @@ export default function AdminNotificationChannel({ channel }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [testRecipient, setTestRecipient] = useState("");
+  const [testingEmail, setTestingEmail] = useState(false);
+  const [testingSlack, setTestingSlack] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
@@ -206,10 +199,67 @@ export default function AdminNotificationChannel({ channel }) {
     }
   };
 
+  const handleTestEmail = async () => {
+    if (!testRecipient.trim()) {
+      setError("Enter a recipient email address for the test.");
+      return;
+    }
+
+    try {
+      setTestingEmail(true);
+      setError("");
+      setSuccess("");
+
+      const response = await axios.post(
+        `${API_URL}/admin/notification-channels/email/test`,
+        { recipient: testRecipient.trim() },
+        getConfig()
+      );
+
+      setSuccess(
+        response.data?.message || "Test email sent successfully."
+      );
+    } catch (err) {
+      setError(
+        err?.response?.data?.detail ||
+          err?.message ||
+          "Test email delivery failed."
+      );
+    } finally {
+      setTestingEmail(false);
+    }
+  };
+
+  const handleTestSlack = async () => {
+    try {
+      setTestingSlack(true);
+      setError("");
+      setSuccess("");
+
+      const response = await axios.post(
+        `${API_URL}/admin/notification-channels/slack/test`,
+        {},
+        getConfig()
+      );
+
+      setSuccess(
+        response.data?.message || "Slack test notification sent successfully."
+      );
+    } catch (err) {
+      setError(
+        err?.response?.data?.detail ||
+          err?.message ||
+          "Slack test delivery failed."
+      );
+    } finally {
+      setTestingSlack(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="rounded-lg border border-white/10 bg-[#0b1014] px-6 py-10 text-center text-sm text-gray-500">
-        Loading {meta.title}...
+        Loading {displayTitle}...
       </div>
     );
   }
@@ -222,7 +272,7 @@ export default function AdminNotificationChannel({ channel }) {
         </div>
 
         <h1 className="mt-2 text-2xl font-semibold text-white">
-          {meta.title}
+          {displayTitle}
         </h1>
 
         <p className="mt-2 max-w-3xl text-sm text-gray-400">
@@ -275,26 +325,35 @@ export default function AdminNotificationChannel({ channel }) {
             </span>
 
             <input
+              type={channel === "slack" ? "password" : "text"}
+              autoComplete={channel === "slack" ? "new-password" : "off"}
               value={form.endpoint}
               onChange={(e) => updateField("endpoint", e.target.value)}
-              placeholder={meta.endpointPlaceholder}
+              placeholder={
+                channel === "slack" && hasSecret
+                  ? "Webhook URL saved — enter a new URL only to replace it"
+                  : meta.endpointPlaceholder
+              }
               className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600"
             />
           </label>
 
-          <label className="block">
-            <span className="text-xs uppercase tracking-wider text-gray-500">
-              {meta.usernameLabel}
-            </span>
+          {channel !== "slack" && (
+            <label className="block">
+              <span className="text-xs uppercase tracking-wider text-gray-500">
+                {meta.usernameLabel}
+              </span>
 
-            <input
-              value={form.username}
-              onChange={(e) => updateField("username", e.target.value)}
-              placeholder="Optional"
-              className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600"
-            />
-          </label>
+              <input
+                value={form.username}
+                onChange={(e) => updateField("username", e.target.value)}
+                placeholder="Optional"
+                className="mt-2 w-full border border-white/10 bg-[#080808] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600"
+              />
+            </label>
+          )}
 
+          {channel !== "slack" && (
           <label className="block md:col-span-2">
             <span className="text-xs uppercase tracking-wider text-gray-500">
               {meta.secretLabel}
@@ -317,9 +376,16 @@ export default function AdminNotificationChannel({ channel }) {
               </span>
             )}
           </label>
+          )}
         </div>
 
-        {meta.configurationFields.length > 0 && (
+        {channel === "slack" && hasSecret && (
+          <p className="mt-3 text-xs text-emerald-400">
+            Slack webhook URL is securely saved. Enter a new URL above only if you want to replace it.
+          </p>
+        )}
+
+        {channel !== "slack" && meta.configurationFields.length > 0 && (
           <div className="mt-6">
             <div className="mb-3 text-xs uppercase tracking-wider text-gray-500">
               Additional Configuration
@@ -363,6 +429,70 @@ export default function AdminNotificationChannel({ channel }) {
                 </label>
               ))}
             </div>
+          </div>
+        )}
+
+        {channel === "email" && (
+          <div className="mt-6 border border-white/10 bg-[#080808] p-4">
+            <h3 className="text-sm font-semibold text-white">
+              Test SMTP Connection
+            </h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Save your SMTP configuration first, then send a test email.
+            </p>
+
+            <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+              <input
+                type="email"
+                value={testRecipient}
+                onChange={(e) => setTestRecipient(e.target.value)}
+                placeholder="Enter test recipient email"
+                className="min-w-0 flex-1 border border-white/10 bg-[#0b1014] px-4 py-3 text-sm text-white outline-none placeholder:text-gray-700 focus:border-red-600"
+              />
+
+              <button
+                type="button"
+                onClick={handleTestEmail}
+                disabled={testingEmail || !configured}
+                className="bg-emerald-700 px-5 py-3 text-sm font-medium text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {testingEmail ? "Sending..." : "Send Test Email"}
+              </button>
+            </div>
+
+            {!configured && (
+              <p className="mt-2 text-xs text-amber-400">
+                Save the email configuration before sending a test.
+              </p>
+            )}
+          </div>
+        )}
+
+        {channel === "slack" && (
+          <div className="mt-6 border border-white/10 bg-[#080808] p-4">
+            <h3 className="text-sm font-semibold text-white">
+              Test Slack Integration
+            </h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Save your Incoming Webhook URL first, then send a test message to Slack.
+            </p>
+
+            <div className="mt-4">
+              <button
+                type="button"
+                onClick={handleTestSlack}
+                disabled={testingSlack || !hasSecret}
+                className="bg-emerald-700 px-5 py-3 text-sm font-medium text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {testingSlack ? "Sending..." : "Test Slack Notification"}
+              </button>
+            </div>
+
+            {!hasSecret && (
+              <p className="mt-2 text-xs text-amber-400">
+                Save a valid Slack webhook URL before testing.
+              </p>
+            )}
           </div>
         )}
 
