@@ -152,12 +152,16 @@ def get_security_events(
     event_type: list[str] | None = Query(None),
     mitre_technique: str | None = Query(None),
     search: str | None = Query(None, max_length=200),
+    event_id: str | None = Query(None, min_length=1, max_length=255),
     db: Session = Depends(get_db),
     current_user=Depends(require_role(1)),
 ):
     query = db.query(SecurityEvent).filter(
         owned_security_event_filter(db, current_user)
     )
+
+    if event_id is not None:
+        query = query.filter(SecurityEvent.event_id == event_id)
 
     if severity:
         query = query.filter(

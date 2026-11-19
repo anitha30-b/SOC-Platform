@@ -131,6 +131,26 @@ class RoleBoundaryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404, response.text)
 
 
+    def test_exact_event_id_preserves_user_scope(self):
+        own = self.client.get("/security-events", params={"event_id": "merge-event-1"})
+        self.assertEqual(own.status_code, 200, own.text)
+        self.assertEqual([row["event_id"] for row in own.json()], ["merge-event-1"])
+        foreign = self.client.get("/security-events", params={"event_id": "merge-event-2"})
+        self.assertEqual(foreign.status_code, 200, foreign.text)
+        self.assertEqual(foreign.json(), [])
+
+    def test_admin_exact_event_id_lookup(self):
+        self.select_user(30)
+        response = self.client.get("/admin/security-events", params={"event_id": "merge-event-2"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([row["event_id"] for row in response.json()], ["merge-event-2"])
+        missing = self.client.get("/admin/security-events", params={"event_id": "not-stored"})
+        self.assertEqual(missing.status_code, 200, missing.text)
+        self.assertEqual(missing.json(), [])
+        invalid = self.client.get("/admin/security-events", params={"event_id": ""})
+        self.assertEqual(invalid.status_code, 422)
+
+
 class FakeQuery:
     def __init__(self, value):
         self.value = value

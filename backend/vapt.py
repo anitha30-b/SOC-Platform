@@ -1215,8 +1215,6 @@ async def _execute_nmap_command(
                 "-Pn",
                 "-T5",
                 "-sT",
-                "-sV",
-                "--version-light",
                 "--top-ports",
                 "1000",
                 "--max-retries",
