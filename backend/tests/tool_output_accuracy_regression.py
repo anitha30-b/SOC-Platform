@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 from types import SimpleNamespace
 import time
 import unittest
@@ -13,6 +14,7 @@ from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 ROOT = Path(os.environ.get('SOC_SCAN_AUDIT_BACKEND', Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(ROOT))
 EMPTY_XML = '<nmaprun><runstats><finished exit="success" elapsed="1"/><hosts up="0" down="1" total="1"/></runstats></nmaprun>'
 HOST_XML = '''<nmaprun><host><status state="up"/><address addr="192.0.2.10" addrtype="ipv4"/>
 <ports><port protocol="tcp" portid="443"><state state="open"/>

@@ -1161,6 +1161,34 @@ async def _execute_nmap_command(
                        vulnerability NSE + HTTP/TLS NSE + traceroute
     """
 
+    from nmap_result_integrity import analyze_nmap_pass, apply_nmap_outcomes, merge_nmap_results
+
+    analyses = {}
+
+    def pass_report(scan_pass):
+        key = id(scan_pass)
+        if key not in analyses:
+            analyses[key] = analyze_nmap_pass(scan_pass, parse_nmap_xml)
+        return analyses[key]
+
+    async def run_pass(*args, **kwargs):
+        try:
+            return await _run_nmap_pass(*args, **kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Preserve other stages and any earlier evidence if one process fails.
+            return {"xml": "", "return_code": None, "timed_out": False,
+                    "execution_error": f"{type(exc).__name__}: {exc}"}
+
+    def full_inventory_complete():
+        return any(name == "all_tcp_ports" and pass_report(data)["complete"]
+                   for name, data in passes)
+
+    def finish_result(result):
+        return apply_nmap_outcomes(result, [(name, pass_report(data)) for name, data in passes])
+
+
     target = validate_nmap_target(target)
 
     if scan_type not in NMAP_PROFILES:
@@ -1206,6 +1234,9 @@ async def _execute_nmap_command(
             },
         }
 
+        if "all_tcp_ports_scanned" in payload["workflow"]:
+            payload["workflow"]["all_tcp_ports_scanned"] = full_inventory_complete()
+
         if result_callback:
             await result_callback(payload)
 
@@ -1237,7 +1268,7 @@ async def _execute_nmap_command(
                 target,
             ]
 
-            scan_pass = await _run_nmap_pass(
+            scan_pass = await run_pass(
                 command,
                 NMAP_QUICK_TIMEOUT,
                 stderr_lines,
@@ -1297,6 +1328,8 @@ async def _execute_nmap_command(
                 },
             }
 
+            result = finish_result(result)
+
             if result_callback:
                 await result_callback(result)
 
@@ -1332,7 +1365,7 @@ async def _execute_nmap_command(
                 target,
             ]
 
-            scan_pass = await _run_nmap_pass(
+            scan_pass = await run_pass(
                 command,
                 NMAP_SERVICE_TIMEOUT,
                 stderr_lines,
@@ -1390,6 +1423,8 @@ async def _execute_nmap_command(
                 },
             }
 
+            result = finish_result(result)
+
             if result_callback:
                 await result_callback(result)
 
@@ -1422,7 +1457,7 @@ async def _execute_nmap_command(
                 target,
             ]
 
-            discovery_pass = await _run_nmap_pass(
+            discovery_pass = await run_pass(
                 discovery_command,
                 NMAP_QUICK_TIMEOUT,
                 stderr_lines,
@@ -1475,7 +1510,7 @@ async def _execute_nmap_command(
                     target,
                 ]
 
-                http_pass = await _run_nmap_pass(
+                http_pass = await run_pass(
                     http_command,
                     min(120, NMAP_SERVICE_TIMEOUT),
                     stderr_lines,
@@ -1501,60 +1536,8 @@ async def _execute_nmap_command(
                         "No common HTTP/API ports discovered",
                     )
 
-            # Merge HTTP evidence into discovery results.
-            merged_hosts = parsed_discovery.get("hosts", [])
-
-            def host_key(host):
-                return tuple(
-                    address.get("address")
-                    for address in (
-                        host.get("addresses") or []
-                    )
-                )
-
-            by_key = {
-                host_key(host): host
-                for host in merged_hosts
-            }
-
-            for source_host in parsed_http.get("hosts", []):
-                destination = by_key.get(
-                    host_key(source_host)
-                )
-                if not destination:
-                    continue
-
-                destination.setdefault(
-                    "scripts",
-                    [],
-                ).extend(
-                    source_host.get("scripts", [])
-                )
-
-                source_ports = {
-                    port.get("port"): port
-                    for port in source_host.get("ports", [])
-                }
-
-                for destination_port in destination.get(
-                    "ports",
-                    [],
-                ):
-                    source_port = source_ports.get(
-                        destination_port.get("port")
-                    )
-                    if source_port:
-                        destination_port.setdefault(
-                            "scripts",
-                            [],
-                        ).extend(
-                            source_port.get("scripts", [])
-                        )
-
-            final_results = {
-                "hosts": merged_hosts,
-                "host_count": len(merged_hosts),
-            }
+            final_results = merge_nmap_results(parsed_discovery, parsed_http)
+            open_ports = _extract_open_ports(final_results)
 
             result = {
                 "tool": "Nmap",
@@ -1592,13 +1575,15 @@ async def _execute_nmap_command(
                 },
             }
 
+            result = finish_result(result)
+
             if result_callback:
                 await result_callback(result)
 
             if progress_callback:
                 await progress_callback(
                     100,
-                    "Nmap API security scan completed",
+                    "Nmap API security scan completed" if result["status"] == "completed" else "Nmap API security scan finished with errors",
                 )
 
             return result
@@ -1629,7 +1614,7 @@ async def _execute_nmap_command(
             target,
         ]
 
-        discovery_pass = await _run_nmap_pass(
+        discovery_pass = await run_pass(
             discovery_command,
             110,
             stderr_lines,
@@ -1677,7 +1662,7 @@ async def _execute_nmap_command(
             target,
         ]
 
-        full_pass = await _run_nmap_pass(
+        full_pass = await run_pass(
             full_command,
             NMAP_PORT_SCAN_TIMEOUT + 30,
             stderr_lines,
@@ -1692,7 +1677,7 @@ async def _execute_nmap_command(
 
         parsed_ports = parse_nmap_xml(full_pass["xml"])
 
-        if parsed_ports.get("hosts"):
+        if pass_report(full_pass)["complete"]:
             base = parsed_ports
             await publish(
                 parsed_ports,
@@ -1704,9 +1689,9 @@ async def _execute_nmap_command(
                 },
             )
         else:
-            base = parsed_discovery
+            base = merge_nmap_results(parsed_discovery, parsed_ports)
             await publish(
-                parsed_discovery,
+                base,
                 "Full TCP pass incomplete; retaining discovery results",
                 43,
                 {
@@ -1754,13 +1739,15 @@ async def _execute_nmap_command(
                 },
             }
 
+            result = finish_result(result)
+
             if result_callback:
                 await result_callback(result)
 
             if progress_callback:
                 await progress_callback(
                     100,
-                    "Completed — no open TCP ports discovered",
+                    "Completed - no open TCP ports discovered" if result["status"] == "completed" else "Finished with errors; no open TCP ports confirmed",
                 )
 
             return result
@@ -1823,7 +1810,7 @@ async def _execute_nmap_command(
             target,
         ]
 
-        detail_task = _run_nmap_pass(
+        detail_task = run_pass(
             detail_command,
             NMAP_DETAILED_TIMEOUT,
             stderr_lines,
@@ -1833,7 +1820,7 @@ async def _execute_nmap_command(
             "Service/version/OS/default NSE",
         )
 
-        vuln_task = _run_nmap_pass(
+        vuln_task = run_pass(
             vuln_command,
             NMAP_DETAILED_TIMEOUT,
             stderr_lines,
@@ -1868,11 +1855,7 @@ async def _execute_nmap_command(
             vuln_pass["xml"]
         )
 
-        current = (
-            parsed_detail
-            if parsed_detail.get("hosts")
-            else base
-        )
+        current = merge_nmap_results(base, parsed_detail)
 
         await publish(
             current,
@@ -1933,7 +1916,7 @@ async def _execute_nmap_command(
                 target,
             ]
 
-            http_pass = await _run_nmap_pass(
+            http_pass = await run_pass(
                 http_command,
                 min(120, NMAP_DETAILED_TIMEOUT),
                 stderr_lines,
@@ -1955,75 +1938,8 @@ async def _execute_nmap_command(
                     "No common HTTP ports open — HTTP/TLS checks skipped",
                 )
 
-        # Merge real evidence from all passes.
-        merged_hosts = (
-            current.get("hosts", [])
-            or base.get("hosts", [])
-        )
-
-        def host_key(host):
-            return tuple(
-                address.get("address")
-                for address in (
-                    host.get("addresses") or []
-                )
-            )
-
-        by_key = {
-            host_key(host): host
-            for host in merged_hosts
-        }
-
-        for source in (
-            parsed_vuln.get("hosts", []),
-            parsed_http.get("hosts", []),
-        ):
-            for source_host in source:
-                destination = by_key.get(
-                    host_key(source_host)
-                )
-
-                if not destination:
-                    continue
-
-                destination.setdefault(
-                    "scripts",
-                    [],
-                ).extend(
-                    source_host.get("scripts", [])
-                )
-
-                source_ports = {
-                    port.get("port"): port
-                    for port in source_host.get(
-                        "ports",
-                        [],
-                    )
-                }
-
-                for destination_port in destination.get(
-                    "ports",
-                    [],
-                ):
-                    source_port = source_ports.get(
-                        destination_port.get("port")
-                    )
-
-                    if source_port:
-                        destination_port.setdefault(
-                            "scripts",
-                            [],
-                        ).extend(
-                            source_port.get(
-                                "scripts",
-                                [],
-                            )
-                        )
-
-        final_results = {
-            "hosts": merged_hosts,
-            "host_count": len(merged_hosts),
-        }
+        final_results = merge_nmap_results(base, parsed_detail, parsed_vuln, parsed_http)
+        open_ports = _extract_open_ports(final_results)
 
         result = {
             "tool": "Nmap",
@@ -2080,13 +1996,15 @@ async def _execute_nmap_command(
             },
         }
 
+        result = finish_result(result)
+
         if result_callback:
             await result_callback(result)
 
         if progress_callback:
             await progress_callback(
                 100,
-                f"{scan_type.title()} Nmap assessment completed",
+                f"{scan_type.title()} Nmap assessment completed" if result["status"] == "completed" else f"{scan_type.title()} Nmap assessment finished with errors",
             )
 
         return result
