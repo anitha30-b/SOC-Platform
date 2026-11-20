@@ -444,13 +444,17 @@ def _generic_target_type(target: str) -> str:
     return "domain"
 
 
-def _new_generic_job(tool_id: str, target: str):
+def _new_generic_job(tool_id: str, target: str, user_id: int):
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+        raise ValueError("A valid initiating user is required for a generic job.")
+
     job_id = str(uuid.uuid4())
 
     GENERIC_TOOL_JOBS[job_id] = {
         "job_id": job_id,
         "tool": tool_id,
         "target": target,
+        "user_id": user_id,
         "status": "queued",
         "progress": 0,
         "stage": "Queued",
@@ -631,7 +635,7 @@ async def run_registry_tool_async(
             },
         )
 
-    job_id = _new_generic_job(tool_id, target)
+    job_id = _new_generic_job(tool_id, target, current_user.id)
 
     asyncio.create_task(
         _run_generic_job(
@@ -660,7 +664,9 @@ async def get_registry_tool_progress(
 ):
     job = GENERIC_TOOL_JOBS.get(job_id)
 
-    if not job:
+    # Scan jobs remain private to their initiating user, including within a client.
+    # Legacy jobs without an owner fail closed; do not infer ownership.
+    if not job or job.get("user_id") is None or job.get("user_id") != current_user.id:
         raise HTTPException(
             status_code=404,
             detail="Generic VAPT job not found.",
