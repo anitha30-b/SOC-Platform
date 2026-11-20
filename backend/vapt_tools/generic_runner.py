@@ -259,6 +259,8 @@ def run_generic_tool(
                 result["json_output"] = json.load(json_file)
         except (OSError, json.JSONDecodeError) as exc:
             result["json_output_error"] = str(exc)
+            if result["status"] == "completed":
+                result["status"] = "completed_with_errors"
         finally:
             try:
                 Path(json_output_path).unlink(missing_ok=True)

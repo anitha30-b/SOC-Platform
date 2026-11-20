@@ -867,6 +867,9 @@ def parse_nmap_xml(xml_output: str) -> dict:
     except ET.ParseError as exc:
         return {"hosts": [], "host_count": 0, "parse_error": str(exc)}
 
+    if root.tag != "nmaprun":
+        return {"hosts": [], "host_count": 0, "parse_error": "Expected an Nmap XML document."}
+
     for host in root.findall("host"):
         status_element = host.find("status")
         status = status_element.get("state") if status_element is not None else "unknown"
@@ -965,7 +968,11 @@ def parse_nmap_xml(xml_output: str) -> dict:
             "uptime": uptime,
         })
 
-    return {"hosts": hosts, "host_count": len(hosts)}
+    parsed = {"hosts": hosts, "host_count": len(hosts)}
+    finished = root.find("runstats/finished")
+    if finished is not None and finished.get("exit") == "error":
+        parsed["scan_error"] = finished.get("errormsg") or "Nmap reported a scan error."
+    return parsed
 
 
 # ==================================================
@@ -1244,12 +1251,18 @@ async def _execute_nmap_command(
             timed_out = scan_pass["timed_out"]
 
             parsed = parse_nmap_xml(scan_pass["xml"])
+            for key in ("parse_error", "scan_error"):
+                if parsed.get(key):
+                    stderr_lines.append(str(parsed[key]))
+            if scan_pass["return_code"] not in (None, 0):
+                stderr_lines.append(f"Nmap exited with code {scan_pass['return_code']}.")
             result = {
                 "tool": "Nmap",
                 "available": True,
                 "status": (
                     "completed_with_errors"
-                    if timed_out
+                    if (timed_out or scan_pass["return_code"] != 0
+                        or parsed.get("parse_error") or parsed.get("scan_error"))
                     else "completed"
                 ),
                 "return_code": (
@@ -1290,7 +1303,7 @@ async def _execute_nmap_command(
             if progress_callback:
                 await progress_callback(
                     100,
-                    "Quick Nmap scan completed",
+                    "Quick Nmap scan completed" if result["status"] == "completed" else "Quick Nmap scan finished with errors",
                 )
 
             return result
@@ -1333,12 +1346,18 @@ async def _execute_nmap_command(
             timed_out = scan_pass["timed_out"]
 
             parsed = parse_nmap_xml(scan_pass["xml"])
+            for key in ("parse_error", "scan_error"):
+                if parsed.get(key):
+                    stderr_lines.append(str(parsed[key]))
+            if scan_pass["return_code"] not in (None, 0):
+                stderr_lines.append(f"Nmap exited with code {scan_pass['return_code']}.")
             result = {
                 "tool": "Nmap",
                 "available": True,
                 "status": (
                     "completed_with_errors"
-                    if timed_out
+                    if (timed_out or scan_pass["return_code"] != 0
+                        or parsed.get("parse_error") or parsed.get("scan_error"))
                     else "completed"
                 ),
                 "return_code": (
@@ -1377,7 +1396,7 @@ async def _execute_nmap_command(
             if progress_callback:
                 await progress_callback(
                     100,
-                    "Nmap service scan completed",
+                    "Nmap service scan completed" if result["status"] == "completed" else "Nmap service scan finished with errors",
                 )
 
             return result

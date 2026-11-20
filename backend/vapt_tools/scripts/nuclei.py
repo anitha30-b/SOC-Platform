@@ -51,7 +51,7 @@ def validate_target(target: str) -> str:
     return target
 
 
-def parse_jsonl(output: str) -> list[dict[str, Any]]:
+def parse_jsonl(output: str, *, errors: list[str] | None = None) -> list[dict[str, Any]]:
     """
     Parse Nuclei JSONL output safely.
 
@@ -60,7 +60,7 @@ def parse_jsonl(output: str) -> list[dict[str, Any]]:
     """
     findings: list[dict[str, Any]] = []
 
-    for line in output.splitlines():
+    for line_number, line in enumerate(output.splitlines(), 1):
         line = line.strip()
 
         if not line:
@@ -69,10 +69,18 @@ def parse_jsonl(output: str) -> list[dict[str, Any]]:
         try:
             item = json.loads(line)
         except json.JSONDecodeError:
+            if errors is not None and line.startswith("{"):
+                errors.append(f"Invalid Nuclei JSONL on line {line_number}.")
             continue
 
-        if isinstance(item, dict):
+        valid = (isinstance(item, dict) and bool(item.get("template-id"))
+                 and isinstance(item.get("info"), dict)
+                 and (item["info"].get("classification") is None
+                      or isinstance(item["info"].get("classification"), dict)))
+        if valid:
             findings.append(item)
+        elif errors is not None:
+            errors.append(f"Invalid Nuclei finding structure on line {line_number}.")
 
     return findings
 
@@ -159,17 +167,19 @@ def run_nuclei(
             f"Unable to execute Nuclei: {exc}"
         ) from exc
 
+    parse_errors = []
     findings = [
         normalize_finding(item)
-        for item in parse_jsonl(completed.stdout)
+        for item in parse_jsonl(completed.stdout, errors=parse_errors)
     ]
 
     return {
         "tool": "nuclei",
         "target": target,
-        "status": "completed" if completed.returncode == 0 else "completed_with_errors",
+        "status": "completed" if completed.returncode == 0 and not parse_errors else "completed_with_errors",
         "return_code": completed.returncode,
         "finding_count": len(findings),
+        "parse_errors": parse_errors,
         "findings": findings,
         "stderr": completed.stderr.strip(),
         "command": command,
