@@ -27,8 +27,10 @@ from vapt_tools.scripts.nuclei import NucleiError, run_nuclei
 
 
 
-def _persist_nuclei_security_events(result: dict) -> int:
+def _persist_nuclei_security_events(result: dict, user_id: int, client_id: int | None) -> int:
     """Persist actual Nuclei findings and publish them after commit."""
+    from scan_event_ownership import resolve_scan_event_owner
+
     findings = result.get("findings") or []
     target = str(result.get("target") or "").strip()
 
@@ -40,6 +42,7 @@ def _persist_nuclei_security_events(result: dict) -> int:
     inserted = 0
 
     try:
+        ownership = resolve_scan_event_owner(db, user_id, client_id)
         for finding in findings:
             if not isinstance(finding, dict):
                 continue
@@ -58,6 +61,7 @@ def _persist_nuclei_security_events(result: dict) -> int:
             severity = str(finding.get("severity") or "INFO").upper()
 
             identity = {
+                **ownership,
                 "source": "nuclei",
                 "target": target,
                 "template_id": finding.get("template_id"),
@@ -87,6 +91,7 @@ def _persist_nuclei_security_events(result: dict) -> int:
                 event_id=event_id,
             )
 
+            event.update(ownership)
             store_security_event(db, event)
             notifications.append(event)
             inserted += 1
@@ -193,6 +198,7 @@ def get_vapt_registry(
 def _new_nuclei_job(
     target: str,
     user_id: int,
+    client_id: int | None = None,
 ) -> str:
     job_id = str(uuid.uuid4())
 
@@ -200,6 +206,7 @@ def _new_nuclei_job(
         "job_id": job_id,
         "target": target,
         "user_id": user_id,
+        "client_id": client_id,
         "status": "queued",
         "progress": 0,
         "stage": "Queued",
@@ -247,6 +254,8 @@ async def _run_nuclei_job(
             job["security_events_persisted"] = await asyncio.to_thread(
                 _persist_nuclei_security_events,
                 result,
+                job["user_id"],
+                job.get("client_id"),
             )
         except Exception as event_exc:
             job["security_event_persistence_error"] = str(event_exc)
@@ -295,6 +304,7 @@ async def run_nuclei_tool_async(
     job_id = _new_nuclei_job(
         target,
         current_user.id,
+        current_user.client_id,
     )
 
     asyncio.create_task(
@@ -364,6 +374,7 @@ async def run_nuclei_tool(
     )
 
     target = validate_nuclei_target(request.target)
+    scan_user_id, scan_client_id = current_user.id, current_user.client_id
 
     try:
         result = await __import__("asyncio").to_thread(
@@ -380,6 +391,8 @@ async def run_nuclei_tool(
         security_events_persisted = await asyncio.to_thread(
             _persist_nuclei_security_events,
             result,
+            scan_user_id,
+            scan_client_id,
         )
         persistence_error = None
     except Exception as event_exc:
@@ -444,7 +457,7 @@ def _generic_target_type(target: str) -> str:
     return "domain"
 
 
-def _new_generic_job(tool_id: str, target: str, user_id: int):
+def _new_generic_job(tool_id: str, target: str, user_id: int, client_id: int | None = None):
     if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
         raise ValueError("A valid initiating user is required for a generic job.")
 
@@ -455,6 +468,7 @@ def _new_generic_job(tool_id: str, target: str, user_id: int):
         "tool": tool_id,
         "target": target,
         "user_id": user_id,
+        "client_id": client_id,
         "status": "queued",
         "progress": 0,
         "stage": "Queued",
@@ -515,6 +529,8 @@ async def _run_generic_job(
                 result["security_events_persisted"] = await asyncio.to_thread(
                     persist_masscan_security_events,
                     result,
+                    job["user_id"],
+                    job.get("client_id"),
                 )
             except Exception as event_exc:
                 job["security_event_persistence_error"] = str(event_exc)
@@ -635,7 +651,7 @@ async def run_registry_tool_async(
             },
         )
 
-    job_id = _new_generic_job(tool_id, target, current_user.id)
+    job_id = _new_generic_job(tool_id, target, current_user.id, current_user.client_id)
 
     asyncio.create_task(
         _run_generic_job(

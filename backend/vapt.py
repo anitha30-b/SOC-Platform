@@ -2384,7 +2384,7 @@ MASSCAN_TIMEOUT_SECONDS = int(
 MASSCAN_JOBS: dict[str, dict] = {}
 
 
-def _new_masscan_job(target: str, user_id: int) -> str:
+def _new_masscan_job(target: str, user_id: int, client_id: int | None = None) -> str:
     import uuid
 
     job_id = str(uuid.uuid4())
@@ -2393,6 +2393,7 @@ def _new_masscan_job(target: str, user_id: int) -> str:
         "job_id": job_id,
         "target": target,
         "user_id": user_id,
+        "client_id": client_id,
         "status": "queued",
         "progress": 0,
         "stage": "Queued",
@@ -2628,8 +2629,10 @@ async def _execute_masscan_command(
 
 
 
-def persist_masscan_security_events(result: dict) -> int:
+def persist_masscan_security_events(result: dict, user_id: int, client_id: int | None) -> int:
     """Persist real open-port discoveries from either Masscan route."""
+    from scan_event_ownership import resolve_scan_event_owner
+
     target = str(result.get("target") or "").strip()
     open_ports = []
 
@@ -2672,6 +2675,7 @@ def persist_masscan_security_events(result: dict) -> int:
     inserted = 0
 
     try:
+        ownership = resolve_scan_event_owner(db, user_id, client_id)
         seen = set()
 
         for item in open_ports:
@@ -2683,6 +2687,7 @@ def persist_masscan_security_events(result: dict) -> int:
                 continue
 
             identity = {
+                **ownership,
                 "source": "masscan",
                 "target": target,
                 "host": host,
@@ -2722,6 +2727,7 @@ def persist_masscan_security_events(result: dict) -> int:
                 event_id=event_id,
             )
 
+            event.update(ownership)
             store_security_event(db, event)
             notifications.append(event)
             inserted += 1
@@ -2773,6 +2779,8 @@ async def _run_masscan_job(
             job["security_events_persisted"] = await asyncio.to_thread(
                 persist_masscan_security_events,
                 result,
+                job["user_id"],
+                job.get("client_id"),
             )
         except Exception as event_exc:
             job["security_event_persistence_error"] = str(event_exc)
@@ -2838,6 +2846,7 @@ async def run_masscan_async(
     job_id = _new_masscan_job(
         target,
         current_user.id,
+        current_user.client_id,
     )
 
     asyncio.create_task(
