@@ -26,6 +26,7 @@ import ThreatIntelligenceModule from "./ThreatIntelligenceModule";
 import { useRef as useIncidentRequestRef } from "react";
 import { useEffect, useState, useRef, useCallback } from "react";
 import axios from "axios";
+import { reportedFindings, getHostAddress, uniqueOpenPorts, nmapPortObservations, normalizeToolSeverity, masscanHostsFromResult } from "./toolMetrics";
 import { getToolOutcome, isTerminalToolStatus, normalizeToolStatus } from "./toolOutcome";
 import DetectionRulesPage from "./DetectionRulesPage";
 import SigmaRulesPage from "./SigmaRulesPage";
@@ -19376,24 +19377,11 @@ function VAPTTesting({
     target: cleanTarget,
     scan_type: "nmap",
     scan_profile: result?.scan_type || nmapProfile,
-    scan: {
-      http_status: null,
-      response_time_ms: elapsedMs,
-    },
-    assessment: {
-      findings_count: Array.isArray(result?.results?.hosts)
-        ? result.results.hosts.reduce(
-            (total, host) =>
-              total +
-              (Array.isArray(host?.ports)
-                ? host.ports.filter((port) => port?.state === "open").length
-                : 0),
-            0
-          )
-        : 0,
-    },
+    scan: { http_status: null, response_time_ms: elapsedMs },
+    assessment: { findings_count: reportedFindings(result?.findings).length },
+    observations: { open_port_count: nmapPortObservations(result).length },
     security_headers: [],
-    findings: [],
+    findings: reportedFindings(result?.findings),
     nmap: result || null,
   });
 
@@ -22379,15 +22367,15 @@ function VAPTTesting({
       Array.isArray(host?.ports)
         ? host.ports
             .filter((port) => port?.state === "open")
-            .map((port) => ({ ...port, host: host?.addresses?.[0]?.address || "—" }))
+            .map((port) => ({ ...port, host: getHostAddress(host) || "—" }))
         : []
     );
     const nseScripts = nmapHosts.flatMap((host) => {
-      const hostScripts = Array.isArray(host?.scripts) ? host.scripts.map((script) => ({ ...script, host: host?.addresses?.[0]?.address || "—", port: null })) : [];
+      const hostScripts = Array.isArray(host?.scripts) ? host.scripts.map((script) => ({ ...script, host: getHostAddress(host) || "—", port: null })) : [];
       const portScripts = Array.isArray(host?.ports)
         ? host.ports.flatMap((port) =>
             Array.isArray(port?.scripts)
-              ? port.scripts.map((script) => ({ ...script, host: host?.addresses?.[0]?.address || "—", port: port?.port }))
+              ? port.scripts.map((script) => ({ ...script, host: getHostAddress(host) || "—", port: port?.port }))
               : []
           )
         : [];
@@ -22416,9 +22404,18 @@ function VAPTTesting({
     addText(`Generated: ${new Date().toLocaleString()}`);
 
     if (isNmap) {
+      addText(`Execution status: ${getToolOutcome(nmap, scanResult?.status).label}`);
       addText(`Command profile: ${nmap.command_profile || "—"}`);
       addText(`Hosts discovered: ${nmapResults.host_count ?? nmapHosts.length}`);
       addText(`Open ports: ${openPorts.length}`);
+      addText("Open ports and NSE output are observations, not independently confirmed vulnerabilities.");
+      if (Array.isArray(nmap.workflow?.stage_results)) {
+        addText("Scan stage results", 20, 12, 7);
+        nmap.workflow.stage_results.forEach((stage) => {
+          addText(`${stage.name || "Stage"}: ${getToolOutcome(stage).label} | Exit code: ${stage.return_code ?? "unavailable"}`, 25);
+          (Array.isArray(stage.errors) ? stage.errors : []).forEach(error => addText(error, 30, 8, 4));
+        });
+      }
 
       doc.setFont("helvetica", "bold");
       addText("Host and Service Results", 20, 12, 7);
@@ -26082,10 +26079,7 @@ function MultiToolResultsPage({ scanResult, onBack }) {
       ? host.ports.map((port) => ({
           ...port,
           host:
-            host?.addresses?.[0]?.address ||
-            host?.host ||
-            host?.ip ||
-            "—",
+            getHostAddress(host),
         }))
       : []
   );
@@ -26099,10 +26093,7 @@ function MultiToolResultsPage({ scanResult, onBack }) {
       ? host.scripts.map((script) => ({
           ...script,
           host:
-            host?.addresses?.[0]?.address ||
-            host?.host ||
-            host?.ip ||
-            "—",
+            getHostAddress(host),
           port: null,
         }))
       : [];
@@ -26113,10 +26104,7 @@ function MultiToolResultsPage({ scanResult, onBack }) {
             ? port.scripts.map((script) => ({
                 ...script,
                 host:
-                  host?.addresses?.[0]?.address ||
-                  host?.host ||
-                  host?.ip ||
-                  "—",
+                  getHostAddress(host),
                 port: port?.port,
               }))
             : []
@@ -26132,9 +26120,7 @@ function MultiToolResultsPage({ scanResult, onBack }) {
 
   const masscan = getToolResult("masscan") || {};
   const masscanData = masscan?.results || masscan || {};
-  const masscanHosts = Array.isArray(masscanData?.hosts)
-    ? masscanData.hosts
-    : [];
+  const masscanHosts = masscanHostsFromResult(masscan);
 
   const masscanOpenPorts = masscanHosts.flatMap((host) =>
     Array.isArray(host?.ports)
@@ -26162,7 +26148,7 @@ function MultiToolResultsPage({ scanResult, onBack }) {
       ? nikto.findings
       : [];
 
-  const niktoFindings = niktoRawFindings.flatMap((item) => {
+  const niktoFindings = reportedFindings(niktoRawFindings.flatMap((item) => {
     if (Array.isArray(item?.vulnerabilities)) {
       return item.vulnerabilities.map((vulnerability) => ({
         ...vulnerability,
@@ -26175,7 +26161,7 @@ function MultiToolResultsPage({ scanResult, onBack }) {
     }
 
     return [item];
-  });
+  }));
 
   const nuclei = getToolResult("nuclei") || {};
   const nucleiData =
@@ -26183,85 +26169,35 @@ function MultiToolResultsPage({ scanResult, onBack }) {
     nuclei?.results ||
     nuclei;
 
-  const nucleiFindings = Array.isArray(nucleiData?.findings)
-    ? nucleiData.findings
-    : Array.isArray(nuclei?.findings)
-      ? nuclei.findings
-      : [];
+  const nucleiFindings = reportedFindings(Array.isArray(nucleiData?.findings)
+    ? nucleiData.findings : nuclei?.findings);
 
   const zap = getToolResult("owasp-zap") || {};
   const zapData = zap?.results || zap;
-  const zapFindings = Array.isArray(zapData?.findings)
-    ? zapData.findings
-    : Array.isArray(zapData?.alerts)
-      ? zapData.alerts
-      : [];
+  const zapFindings = reportedFindings(Array.isArray(zapData?.findings)
+    ? zapData.findings : zapData?.alerts);
 
-  const severityCounts = {
-    CRITICAL: 0,
-    HIGH: 0,
-    MEDIUM: 0,
-    LOW: 0,
-    INFO: 0,
-  };
-
-  [...niktoFindings, ...nucleiFindings, ...zapFindings].forEach((finding) => {
-    const severity = String(
-      finding?.severity ||
-        finding?.risk ||
-        finding?.risk_level ||
-        "INFO"
-    ).toUpperCase();
-
-    if (severityCounts[severity] !== undefined) {
-      severityCounts[severity] += 1;
-    }
+  const nmapFindings = reportedFindings(nmapData?.findings);
+  const severityCounts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0, UNRATED: 0 };
+  const allReportedFindings = [...nmapFindings, ...niktoFindings, ...nucleiFindings, ...zapFindings];
+  allReportedFindings.forEach((finding) => {
+    const severity = normalizeToolSeverity(finding?.severity ?? finding?.risk ?? finding?.risk_level ?? finding?.riskdesc ?? finding?.riskcode);
+    severityCounts[severity] += 1;
   });
-
-  const totalFindings =
-    niktoFindings.length + nucleiFindings.length + zapFindings.length;
-
-  const hostSet = new Set();
-
-  nmapHosts.forEach((host) => {
-    const value =
-      host?.addresses?.[0]?.address ||
-      host?.host ||
-      host?.ip;
-
-    if (value) hostSet.add(String(value));
-  });
-
-  masscanHosts.forEach((host) => {
-    const value = host?.host || host?.ip;
-    if (value) hostSet.add(String(value));
-  });
-
+  const totalFindings = allReportedFindings.length;
+  const hostSet = new Set([...nmapHosts, ...masscanHosts].map(getHostAddress).filter(Boolean));
   const hostsDiscovered = hostSet.size;
-
-  const totalOpenPorts =
-    nmapOpenPorts.length + masscanOpenPorts.length;
-
+  const totalOpenPorts = uniqueOpenPorts([...nmapOpenPorts, ...masscanOpenPorts]).length;
   const toolFindings = {
-    nmap: nmapScripts.length,
-    masscan: 0,
-    nikto: niktoFindings.length,
-    nuclei: nucleiFindings.length,
-    "owasp-zap": zapFindings.length,
+    nmap: nmapFindings.length, masscan: 0, nikto: niktoFindings.length,
+    nuclei: nucleiFindings.length, "owasp-zap": zapFindings.length,
   };
-
   const toolOpenPorts = {
-    nmap: nmapOpenPorts.length,
-    masscan: masscanOpenPorts.length,
-    nikto: 0,
-    nuclei: 0,
-    "owasp-zap": 0,
+    nmap: uniqueOpenPorts(nmapOpenPorts).length,
+    masscan: uniqueOpenPorts(masscanOpenPorts).length,
+    nikto: 0, nuclei: 0, "owasp-zap": 0,
   };
-
-  const severityTotal = Object.values(severityCounts).reduce(
-    (sum, value) => sum + value,
-    0
-  );
+  const severityTotal = Object.values(severityCounts).reduce((sum, value) => sum + value, 0);
 
   const severityColors = {
     CRITICAL: "#ef3340",
@@ -26269,6 +26205,7 @@ function MultiToolResultsPage({ scanResult, onBack }) {
     MEDIUM: "#f5b942",
     LOW: "#4da3ff",
     INFO: "#9b6cff",
+    UNRATED: "#64748b",
   };
 
   const severitySegments = Object.entries(severityCounts).filter(
@@ -26321,15 +26258,17 @@ function MultiToolResultsPage({ scanResult, onBack }) {
       ? Math.max(...elapsedValues)
       : null;
 
-  const completedCount = tools.filter((tool) =>
-    ["Completed", "Completed with warnings"].includes(
-      formatStatus(tool)
-    )
-  ).length;
-
-  const failedCount = tools.filter((tool) =>
-    ["Failed", "Timed Out"].includes(formatStatus(tool))
-  ).length;
+  const completedCount = tools.filter((tool) => formatStatus(tool) === "Completed").length;
+  const warningCount = tools.filter((tool) => formatStatus(tool) === "Completed with warnings").length;
+  const failedCount = tools.filter((tool) => ["failed", "timeout", "not_available", "cancelled"].includes(
+    getToolOutcome(getToolResult(tool), statuses?.[tool]).status
+  )).length;
+  const toolOutcomes = tools.map(tool => getToolOutcome(getToolResult(tool), statuses?.[tool]));
+  const combinedStatus = !tools.length ? "unknown"
+    : completedCount === tools.length ? "completed"
+    : failedCount === tools.length ? "failed"
+    : toolOutcomes.some(outcome => !outcome.terminal) ? "running" : "completed_with_errors";
+  const assessmentOutcome = getToolOutcome({ status: combinedStatus }, scanResult?.status);
 
   const toolMeta = {
     nmap: {
@@ -27062,20 +27001,16 @@ function MultiToolResultsPage({ scanResult, onBack }) {
               Execution
             </p>
             <p className="mt-2 text-xs font-semibold text-white">
-              {completedCount}/{tools.length} completed
+              {completedCount} completed · {warningCount} with warnings · {failedCount} failed/unavailable
             </p>
           </div>
 
-          <div className="border border-emerald-500/20 bg-emerald-500/[0.03] p-4">
+          <div className={`border p-4 ${statusClass(assessmentOutcome.label)}`}>
             <p className="text-[9px] uppercase tracking-wider text-gray-600">
               Assessment Status
             </p>
-            <p className="mt-2 text-xs font-bold uppercase tracking-wider text-emerald-400">
-              {failedCount > 0
-                ? `${failedCount} failed`
-                : completedCount === tools.length
-                  ? "Completed"
-                  : "Running"}
+            <p className="mt-2 text-xs font-bold uppercase tracking-wider">
+              {assessmentOutcome.label}
             </p>
           </div>
         </div>
@@ -27087,7 +27022,7 @@ function MultiToolResultsPage({ scanResult, onBack }) {
           ["Tools Executed", tools.length, "text-red-400", "◈"],
           ["Hosts Discovered", hostsDiscovered, "text-cyan-300", "▣"],
           ["Open Ports", totalOpenPorts, "text-red-400", "⌁"],
-          ["Total Findings", totalFindings, "text-purple-300", "▤"],
+          ["Reported Findings", totalFindings, "text-purple-300", "▤"],
           [
             "Observed Runtime",
             observedRuntime !== null
@@ -27116,6 +27051,8 @@ function MultiToolResultsPage({ scanResult, onBack }) {
           </div>
         ))}
       </div>
+
+      <p className="text-xs text-gray-500">Open ports count distinct host/protocol/port observations; finding totals count scanner-reported records.</p>
 
       {/* GRAPHS */}
       <div className="grid gap-5 xl:grid-cols-3">
