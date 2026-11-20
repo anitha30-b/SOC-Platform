@@ -10,6 +10,10 @@ const EMPTY_FORM = {
   detection_type: "Rule-Based",
   severity: "MEDIUM",
   conditions: "",
+  threshold: "",
+  time_window_minutes: "",
+  source: "",
+  event_type: "",
   enabled: true,
 };
 
@@ -24,6 +28,13 @@ const CATEGORIES = [
   "Data Protection",
   "Other",
 ];
+
+function formatDetectionError(error, fallback) {
+  const detail = error?.response?.data?.detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) return detail.map((item) => String(item.msg || "Invalid value")).join("; ");
+  return error?.message || fallback;
+}
 
 export default function AdminDetectionConfig() {
   const [rules, setRules] = useState([]);
@@ -50,7 +61,7 @@ export default function AdminDetectionConfig() {
       );
       setRules(Array.isArray(response.data) ? response.data : []);
     } catch (err) {
-      setError(err?.response?.data?.detail || err.message || "Failed to load detection rules.");
+      setError(formatDetectionError(err, "Failed to load detection rules."));
     } finally {
       setLoading(false);
     }
@@ -78,7 +89,19 @@ export default function AdminDetectionConfig() {
       name: form.name.trim(),
       description: form.description.trim(),
       conditions: form.conditions.trim() || null,
+      threshold: form.threshold === "" ? null : Number(form.threshold),
+      time_window_minutes: form.time_window_minutes === "" ? null : Number(form.time_window_minutes),
+      source: form.source.trim() || null,
+      event_type: form.event_type.trim() || null,
     };
+
+    if (form.detection_type === "Threshold-Based" && (
+      !Number.isInteger(payload.threshold) || payload.threshold < 1 || payload.threshold > 2147483647 ||
+      !Number.isInteger(payload.time_window_minutes) || payload.time_window_minutes < 1 || payload.time_window_minutes > 1440
+    )) {
+      setError("Enter a positive whole event count and a time window from 1 to 1440 minutes.");
+      return;
+    }
 
     if (!payload.name || !payload.category || !payload.description) {
       setError("Name, category, and description are required.");
@@ -107,7 +130,7 @@ export default function AdminDetectionConfig() {
       resetForm();
       await loadRules();
     } catch (err) {
-      setError(err?.response?.data?.detail || err.message || "Could not save detection configuration.");
+      setError(formatDetectionError(err, "Could not save detection configuration."));
     } finally {
       setSaving(false);
     }
@@ -121,6 +144,10 @@ export default function AdminDetectionConfig() {
       detection_type: item.detection_type || "Rule-Based",
       severity: item.severity || "MEDIUM",
       conditions: item.conditions || "",
+      threshold: item.threshold ?? "",
+      time_window_minutes: item.time_window_minutes ?? "",
+      source: item.source || "",
+      event_type: item.event_type || "",
       enabled: Boolean(item.enabled),
     });
     setEditingId(item.id);
@@ -141,7 +168,7 @@ export default function AdminDetectionConfig() {
       setSuccess(`Detection rule "${item.name}" status updated.`);
       await loadRules();
     } catch (err) {
-      setError(err?.response?.data?.detail || err.message || "Could not update status.");
+      setError(formatDetectionError(err, "Could not update status."));
     }
   };
 
@@ -159,7 +186,7 @@ export default function AdminDetectionConfig() {
       setSuccess("Detection configuration deleted successfully.");
       await loadRules();
     } catch (err) {
-      setError(err?.response?.data?.detail || err.message || "Could not delete detection rule.");
+      setError(formatDetectionError(err, "Could not delete detection rule."));
     }
   };
 
@@ -275,6 +302,34 @@ export default function AdminDetectionConfig() {
               placeholder="Enter rule conditions, thresholds, or matching criteria..."
             />
           </div>
+
+          {form.detection_type === "Threshold-Based" && (
+            <div className="grid gap-4 rounded-lg border border-gray-800 p-4 md:grid-cols-2">
+              <div>
+                <label className={labelClass} htmlFor="detection-threshold">Events required *</label>
+                <input id="detection-threshold" className={inputClass} type="number" min="1" max="2147483647" step="1"
+                  value={form.threshold} onChange={(e) => change("threshold", e.target.value)} required />
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="detection-window">Time window in minutes *</label>
+                <input id="detection-window" className={inputClass} type="number" min="1" max="1440" step="1"
+                  value={form.time_window_minutes} onChange={(e) => change("time_window_minutes", e.target.value)} required />
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="detection-source">Source filter (optional)</label>
+                <input id="detection-source" className={inputClass} maxLength={100}
+                  value={form.source} onChange={(e) => change("source", e.target.value)} placeholder="e.g. telemetry:24" />
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="detection-event-type">Event type filter (optional)</label>
+                <input id="detection-event-type" className={inputClass} maxLength={100}
+                  value={form.event_type} onChange={(e) => change("event_type", e.target.value)} placeholder="e.g. authentication_failure" />
+              </div>
+              <p className="text-xs text-gray-400 md:col-span-2">
+                Threshold counts use the configured window and remain separated by client or personal owner.
+              </p>
+            </div>
+          )}
 
           <label className="flex items-center gap-3 text-sm text-gray-300">
             <input

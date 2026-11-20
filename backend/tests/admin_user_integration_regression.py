@@ -28,7 +28,7 @@ from security import create_access_token
 from fastapi import FastAPI, WebSocketDisconnect
 from fastapi.testclient import TestClient
 
-for model in (models.Assessment, models.SecurityEvent):
+for model in (models.Assessment, models.SecurityEvent, models.DetectionResult):
     model.__table__.create(support.engine, checkfirst=True)
 
 

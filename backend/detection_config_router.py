@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from typing import Optional
 
@@ -21,6 +21,10 @@ class DetectionCreate(BaseModel):
     severity: str = "MEDIUM"
     conditions: Optional[str] = None
     enabled: bool = True
+    threshold: Optional[int] = Field(default=None, ge=1, le=2147483647)
+    time_window_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+    source: Optional[str] = Field(default=None, max_length=100)
+    event_type: Optional[str] = Field(default=None, max_length=100)
 
 
 class DetectionUpdate(BaseModel):
@@ -31,6 +35,16 @@ class DetectionUpdate(BaseModel):
     severity: Optional[str] = None
     conditions: Optional[str] = None
     enabled: Optional[bool] = None
+    threshold: Optional[int] = Field(default=None, ge=1, le=2147483647)
+    time_window_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+    source: Optional[str] = Field(default=None, max_length=100)
+    event_type: Optional[str] = Field(default=None, max_length=100)
+
+
+def validate_threshold_fields(values):
+    if str(values.get("detection_type") or "").strip().lower() == "threshold-based":
+        if values.get("threshold") is None or values.get("time_window_minutes") is None:
+            raise HTTPException(422, "Threshold-Based rules require events required and a time window.")
 
 
 def record_audit(db, request, user, action, details):
@@ -62,6 +76,8 @@ def create_detection(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(3))
 ):
+    validate_threshold_fields(payload.model_dump())
+
     if db.query(DetectionConfiguration).filter(
         DetectionConfiguration.name == payload.name
     ).first():
@@ -98,6 +114,11 @@ def update_detection(
         raise HTTPException(404, "Detection configuration not found")
 
     changes = payload.model_dump(exclude_unset=True)
+    validate_threshold_fields({
+        "detection_type": changes.get("detection_type", item.detection_type),
+        "threshold": changes.get("threshold", item.threshold),
+        "time_window_minutes": changes.get("time_window_minutes", item.time_window_minutes),
+    })
 
     if "name" in changes:
         duplicate = db.query(DetectionConfiguration).filter(
@@ -137,6 +158,10 @@ def update_detection_status(
 
     if not item:
         raise HTTPException(404, "Detection configuration not found")
+
+    if enabled:
+        validate_threshold_fields({"detection_type": item.detection_type,
+            "threshold": item.threshold, "time_window_minutes": item.time_window_minutes})
 
     old_status = item.enabled
     item.enabled = enabled

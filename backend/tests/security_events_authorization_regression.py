@@ -48,6 +48,7 @@ def main():
         models.Assessment.__table__,
         models.TelemetrySource.__table__,
         models.SecurityEvent.__table__,
+        models.DetectionResult.__table__,
     ]
     for table in tables:
         table.create(engine, checkfirst=True)

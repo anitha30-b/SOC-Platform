@@ -33,7 +33,7 @@ def format_ist_timestamp(value):
     return value.astimezone(IST).isoformat()
 
 
-def serialize_event(event):
+def serialize_event(event, configured_detections=None):
     response_actions = []
     raw_event = {}
 
@@ -138,10 +138,41 @@ def serialize_event(event):
             "window_seconds": raw_event.get("window_seconds"),
             "event_count": event_count,
         },
+        "configured_detections": configured_detections or [],
         "response_actions": response_actions,
         "raw_event": raw_event if event.source == "snort" else None,
         "correlation": raw_event.get("correlation") if event.source == "snort" else None,
     }
+
+
+def serialize_events(db, events):
+    """Attach saved matches only after the caller selects authorized events.
+
+    Use snapshots from DetectionResult, not mutable global rule conditions.
+    One batch query avoids a query per event and retains historical matches
+    when the rule is subsequently disabled or renamed.
+    """
+    from models import DetectionResult
+
+    events = list(events)
+    matches = defaultdict(list)
+    if events:
+        results = (
+            db.query(DetectionResult)
+            .filter(DetectionResult.security_event_id.in_([event.id for event in events]))
+            .order_by(DetectionResult.id.asc())
+            .all()
+        )
+        for result in results:
+            matches[result.security_event_id].append({
+                "id": result.id,
+                "rule_id": result.detection_config_id,
+                "rule_name": result.rule_name,
+                "detection_type": result.detection_type,
+                "severity": result.severity,
+                "created_at": format_ist_timestamp(result.created_at),
+            })
+    return [serialize_event(event, matches[event.id]) for event in events]
 
 
 @router.get("")
@@ -211,10 +242,7 @@ def get_security_events(
         .all()
     )
 
-    return [
-        serialize_event(event)
-        for event in events
-    ]
+    return serialize_events(db, events)
 
 
 @router.get("/anomaly/baseline")
@@ -554,7 +582,7 @@ def get_alerts(
 
     return {
         "count": len(events),
-        "alerts": [serialize_event(event) for event in events],
+        "alerts": serialize_events(db, events),
     }
 
 
@@ -787,10 +815,7 @@ def get_recent_mitre_events(
 
     return {
         "count": len(events),
-        "events": [
-            serialize_event(event)
-            for event in events
-        ],
+        "events": serialize_events(db, events),
     }
 
 
@@ -819,10 +844,7 @@ def get_active_mitre_alerts(
 
     return {
         "count": len(events),
-        "alerts": [
-            serialize_event(event)
-            for event in events
-        ],
+        "alerts": serialize_events(db, events),
     }
 
 
@@ -863,7 +885,7 @@ def acknowledge_security_event(
 
     return {
         "message": "Security alert acknowledged.",
-        "alert": serialize_event(event),
+        "alert": serialize_events(db, [event])[0],
     }
 
 
@@ -897,7 +919,7 @@ def suppress_security_event(
 
     return {
         "message": "Security alert suppressed.",
-        "alert": serialize_event(event),
+        "alert": serialize_events(db, [event])[0],
     }
 
 
@@ -931,7 +953,7 @@ def unsuppress_security_event(
 
     return {
         "message": "Security alert reactivated.",
-        "alert": serialize_event(event),
+        "alert": serialize_events(db, [event])[0],
     }
 
 
@@ -972,5 +994,5 @@ def resolve_security_event(
 
     return {
         "message": "Security alert resolved.",
-        "alert": serialize_event(event),
+        "alert": serialize_events(db, [event])[0],
     }

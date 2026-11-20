@@ -32,7 +32,7 @@ def require_security_event_access(
         )
     return current_user
 
-from security_events_router import serialize_event
+from security_events_router import serialize_event, serialize_events
 
 @router.get("")
 def get_security_events(
@@ -99,10 +99,7 @@ def get_security_events(
         .all()
     )
 
-    return [
-        serialize_event(event)
-        for event in events
-    ]
+    return serialize_events(db, events)
 
 
 @router.get("/stats/techniques")
@@ -209,10 +206,7 @@ def get_recent_mitre_events(
 
     return {
         "count": len(events),
-        "events": [
-            serialize_event(event)
-            for event in events
-        ],
+        "events": serialize_events(db, events),
     }
 
 
@@ -240,10 +234,7 @@ def get_active_mitre_alerts(
 
     return {
         "count": len(events),
-        "alerts": [
-            serialize_event(event)
-            for event in events
-        ],
+        "alerts": serialize_events(db, events),
     }
 
 
@@ -283,7 +274,7 @@ def acknowledge_security_event(
 
     return {
         "message": "Security alert acknowledged.",
-        "alert": serialize_event(event),
+        "alert": serialize_events(db, [event])[0],
     }
 
 
@@ -323,5 +314,5 @@ def resolve_security_event(
 
     return {
         "message": "Security alert resolved.",
-        "alert": serialize_event(event),
+        "alert": serialize_events(db, [event])[0],
     }

@@ -13336,6 +13336,21 @@ function SupportDetail({ label, value, mono = false }) {
 // ==================================================
 // LIVE LOG MONITORING
 // ==================================================
+function ConfiguredDetectionMatches({ event }) {
+  const matches = Array.isArray(event?.configured_detections)
+    ? event.configured_detections : [];
+  if (!matches.length) return null;
+  return (
+    <span className="mt-2 block space-y-1 text-xs text-amber-300">
+      {matches.map((match) => (
+        <span className="block" key={match.id}>
+          Detected by: {match.rule_name} · {match.detection_type} · {match.severity}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 function LiveLogMonitoring({ initialTab = "syslog", adminMode = false } = {}) {
   const eventsApi = adminMode ? `${API_URL}/admin/security-events` : `${API_URL}/security-events`;
   const [activeLog, setActiveLog] = useState(initialTab);
@@ -14170,6 +14185,7 @@ function LiveLogMonitoring({ initialTab = "syslog", adminMode = false } = {}) {
                         {event.event_type || "—"}
                         <p className="mt-1 text-xs font-normal text-gray-600">
                           {event.message || "—"}
+                          <ConfiguredDetectionMatches event={event} />
                         </p>
                       </td>
 
@@ -14347,6 +14363,7 @@ function LiveLogMonitoring({ initialTab = "syslog", adminMode = false } = {}) {
 
                     <td className="max-w-2xl px-6 py-5 text-gray-600">
                       {log.message || "—"}
+                          <ConfiguredDetectionMatches event={log} />
                     </td>
                   </tr>
                 ))}
@@ -15512,6 +15529,9 @@ function SecurityEvents() {
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
 
+  const eventRequestRef = useRef(0);
+  const eventAbortRef = useRef(null);
+
   const loadEvents = async ({ silent = false } = {}) => {
     const token = localStorage.getItem("token");
 
@@ -15519,6 +15539,11 @@ function SecurityEvents() {
       setError("Your session has expired. Please log in again.");
       return;
     }
+
+    const requestId = ++eventRequestRef.current;
+    eventAbortRef.current?.abort();
+    const controller = new AbortController();
+    eventAbortRef.current = controller;
 
     try {
       if (silent) {
@@ -15541,15 +15566,21 @@ function SecurityEvents() {
         params.set("source", source);
       }
 
+      if (eventType !== "all") {
+        params.set("event_type", eventType);
+      }
+
       const response = await axios.get(
         `${API_URL}/security-events?${params.toString()}`,
-        { headers: { Authorization: `Bearer ${token}` } }
+        { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal }
       );
 
+      if (requestId !== eventRequestRef.current) return;
       setEvents(Array.isArray(response.data) ? response.data : []);
       setLastUpdated(new Date());
       setError("");
     } catch (err) {
+      if (requestId !== eventRequestRef.current || axios.isCancel(err)) return;
       console.error("Security Events fetch error:", err);
 
       if (err.response?.status === 401) {
@@ -15565,20 +15596,27 @@ function SecurityEvents() {
         setEvents([]);
       }
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (requestId === eventRequestRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   };
 
   useEffect(() => {
-    loadEvents();
-
+    const debounce = setTimeout(() => loadEvents(), 300);
     const interval = setInterval(() => {
       loadEvents({ silent: true });
     }, 15000);
-
-    return () => clearInterval(interval);
-  }, [severity, source]);
+    return () => {
+      clearTimeout(debounce);
+      clearInterval(interval);
+      ++eventRequestRef.current;
+      eventAbortRef.current?.abort();
+    };
+    // These filters define the request; recreate polling with their current values.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, severity, source, eventType]);
 
   const sources = [...new Set(
     events.map((event) => event.source).filter(Boolean)
@@ -15841,6 +15879,7 @@ function SecurityEvents() {
                     {event.event_type || "—"}
                     <p className="mt-1 text-xs font-normal text-gray-600">
                       {event.message || "—"}
+                      <ConfiguredDetectionMatches event={event} />
                     </p>
                   </td>
 
