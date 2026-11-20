@@ -26,6 +26,7 @@ import ThreatIntelligenceModule from "./ThreatIntelligenceModule";
 import { useRef as useIncidentRequestRef } from "react";
 import { useEffect, useState, useRef, useCallback } from "react";
 import axios from "axios";
+import { getToolOutcome, isTerminalToolStatus, normalizeToolStatus } from "./toolOutcome";
 import DetectionRulesPage from "./DetectionRulesPage";
 import SigmaRulesPage from "./SigmaRulesPage";
 import CorrelationRulesPage from "./CorrelationRulesPage";
@@ -19057,168 +19058,68 @@ function VAPTTesting({
   // This remains independent from the existing Nmap/Nikto/Nuclei pollers.
   useEffect(() => {
     const runningJobs = Object.entries(genericToolJobs).filter(
-      ([, job]) =>
-        job?.jobId &&
-        !["completed", "completed_with_errors", "failed"].includes(
-          job?.status
-        )
+      ([, job]) => job?.jobId && !isTerminalToolStatus(job?.status)
     );
-
-    if (runningJobs.length === 0) return undefined;
-
+    if (!runningJobs.length) return undefined;
     let stopped = false;
-
     const pollGenericJobs = async () => {
       const token = localStorage.getItem("token");
       if (!token || stopped) return;
-
-      await Promise.all(
-        runningJobs.map(async ([toolId, job]) => {
-          try {
-            const response = await axios.get(
-              `${API_URL}/vapt/registry/tools/${encodeURIComponent(
-                toolId
-              )}/progress/${job.jobId}`,
-              {
-                headers: {
-                  Authorization: `Bearer ${token}`,
-                },
-              }
-            );
-
-            if (stopped) return;
-
-            const nextJob = response.data || {};
-
-            setGenericToolJobs((current) => ({
-              ...current,
-              [toolId]: {
-                ...current[toolId],
-                ...nextJob,
-              },
-            }));
-
-            if (
-              ["completed", "completed_with_errors", "failed"].includes(
-                nextJob.status
-              )
-            ) {
-              setToolStatuses((current) => ({
-                ...current,
-                [toolId]:
-                  nextJob.status === "failed"
-                    ? "Failed"
-                    : nextJob.status === "completed_with_errors"
-                      ? "Completed with warnings"
-                      : "Completed",
-              }));
-
-              if (nextJob.result) {
-                setVaptRunResults((current) => ({
-                  ...current,
-                  [toolId]: nextJob.result,
-                }));
-
-                // A single generic registry tool automatically opens
-                // its dedicated native results page after completion.
-                if (
-                  vaptRunTools.length <= 1 &&
-                  ["completed", "completed_with_errors"].includes(nextJob.status)
-                ) {
-                  if (toolId === "dig" && typeof onViewDigResults === "function") {
-                    onViewDigResults(nextJob.result);
-                  } else if (
-                    toolId === "dns-recon" &&
-                    typeof onViewDnsReconResults === "function"
-                  ) {
-                    onViewDnsReconResults(nextJob.result);
-                  } else if (
-                    toolId === "nslookup" &&
-                    typeof onViewNslookupResults === "function"
-                  ) {
-                    onViewNslookupResults(nextJob.result);
-                  } else if (
-                    toolId === "ping" &&
-                    typeof onViewPingResults === "function"
-                  ) {
-                    onViewPingResults(nextJob.result);
-                  } else if (
-                    toolId === "whois" &&
-                    typeof onViewWhoisResults === "function"
-                  ) {
-                    onViewWhoisResults(nextJob.result);
-                  }
-                }
-              }
-
-              // A single generic registry tool does not enter the
-              // multi-tool coordinator, so finalize the global scan status here.
-              if (vaptRunTools.length <= 1) {
-                setLoading(false);
-                setStatus(
-                  nextJob.status === "failed"
-                    ? "Failed"
-                    : nextJob.status === "completed_with_errors"
-                      ? "Completed with warnings"
-                      : "Completed"
-                );
-                setMessage(
-                  nextJob.status === "failed"
-                    ? `${toolId.toUpperCase()} scan failed.`
-                    : nextJob.status === "completed_with_errors"
-                      ? `${toolId.toUpperCase()} scan completed with warnings.`
-                      : `${toolId.toUpperCase()} scan completed successfully.`
-                );
-              }
+      await Promise.all(runningJobs.map(async ([toolId, job]) => {
+        try {
+          const response = await axios.get(
+            `${API_URL}/vapt/registry/tools/${encodeURIComponent(toolId)}/progress/${job.jobId}`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          if (stopped) return;
+          const nextJob = response.data || {};
+          setGenericToolJobs((current) => ({
+            ...current, [toolId]: { ...current[toolId], ...nextJob },
+          }));
+          if (!isTerminalToolStatus(nextJob.status)) return;
+          const outcome = getToolOutcome(nextJob.result, nextJob.status);
+          setToolStatuses((current) => ({ ...current, [toolId]: outcome.label }));
+          setVaptRunResults((current) => ({
+            ...current,
+            [toolId]: nextJob.result || { status: outcome.status, error: nextJob.error || "No tool evidence returned." },
+          }));
+          if (vaptRunTools.length <= 1) {
+            if (nextJob.result && ["completed", "completed_with_errors"].includes(outcome.status)) {
+              if (toolId === "dig" && typeof onViewDigResults === "function") onViewDigResults(nextJob.result);
+              else if (toolId === "dns-recon" && typeof onViewDnsReconResults === "function") onViewDnsReconResults(nextJob.result);
+              else if (toolId === "nslookup" && typeof onViewNslookupResults === "function") onViewNslookupResults(nextJob.result);
+              else if (toolId === "ping" && typeof onViewPingResults === "function") onViewPingResults(nextJob.result);
+              else if (toolId === "whois" && typeof onViewWhoisResults === "function") onViewWhoisResults(nextJob.result);
             }
-          } catch (err) {
-            if (stopped) return;
-
-            console.error(
-              `Generic ${toolId} progress error:`,
-              err
-            );
-
-            setToolStatuses((current) => ({
-              ...current,
-              [toolId]: "Failed",
-            }));
-
-            setGenericToolJobs((current) => ({
-              ...current,
-              [toolId]: {
-                ...current[toolId],
-                status: "failed",
-                error:
-                  err.response?.data?.detail ||
-                  err.message ||
-                  `Unable to retrieve ${toolId} progress.`,
-              },
-            }));
-
-            setVaptRunResults((current) => ({
-              ...current,
-              [toolId]: {
-                status: "failed",
-                error:
-                  err.response?.data?.detail ||
-                  err.message ||
-                  `Unable to retrieve ${toolId} progress.`,
-              },
-            }));
+            setLoading(false);
+            setStatus(outcome.label);
+            setMessage(`${toolId.toUpperCase()} scan ${outcome.label.toLowerCase()}.`);
           }
-        })
-      );
+        } catch (err) {
+          if (stopped) return;
+          const message = err.response?.data?.detail || err.message || `Unable to retrieve ${toolId} progress.`;
+          setToolStatuses((current) => ({ ...current, [toolId]: "Failed" }));
+          setGenericToolJobs((current) => ({
+            ...current, [toolId]: { ...current[toolId], status: "failed", error: message },
+          }));
+          setVaptRunResults((current) => ({ ...current, [toolId]: { status: "failed", error: message } }));
+          if (vaptRunTools.length <= 1) {
+            setLoading(false);
+            setStatus("Failed");
+            setMessage(message);
+          }
+        }
+      }));
     };
-
     pollGenericJobs();
     const intervalId = window.setInterval(pollGenericJobs, 1000);
-
     return () => {
       stopped = true;
       window.clearInterval(intervalId);
     };
   }, [genericToolJobs]);
+
+
 
   const VAPT_TOOL_GROUPS = [
     {
@@ -19498,91 +19399,43 @@ function VAPTTesting({
 
   const finishNmapJob = (job) => {
     const result = job?.result;
-    const completed = job?.status === "completed";
-    const terminalFailure =
-      job?.status === "failed" || job?.status === "timeout";
+    const outcome = getToolOutcome(result, job?.status);
+    if (!outcome.terminal) return;
+    const elapsedMs = result?.elapsed_seconds != null
+      ? Math.round(Number(result.elapsed_seconds) * 1000) : null;
+    const normalizedResult = result
+      ? normalizeNmapResult(result, targetUrl.trim(), elapsedMs) : null;
 
-    const elapsedMs =
-      result?.elapsed_seconds != null
-        ? Math.round(Number(result.elapsed_seconds) * 1000)
-        : null;
-
-    // Only single-tool Nmap runs should populate the dedicated scan result.
-    // Multi-tool runs must wait for the coordinator to build the unified result.
-    if (result && vaptRunTools.length <= 1) {
-      setScanResult(
-        normalizeNmapResult(result, targetUrl.trim(), elapsedMs)
-      );
+    setToolStatuses((current) => ({ ...current, nmap: outcome.label }));
+    setStatus(outcome.label);
+    if (normalizedResult && vaptRunTools.length <= 1) setScanResult(normalizedResult);
+    if (vaptRunTools.length > 1) {
+      setVaptRunResults((current) => ({
+        ...current,
+        nmap: normalizedResult || { status: outcome.status, error: job?.error || "No scan evidence returned." },
+      }));
     }
 
-    if (job?.status === "timeout") {
-      setToolStatuses((current) => ({ ...current, nmap: "Timed Out" }));
-      setStatus("Failed");
-      setMessage(
-        job?.error || result?.errors?.[0] || "Nmap scan timed out."
-      );
-    } else if (terminalFailure) {
-      setToolStatuses((current) => ({ ...current, nmap: "Failed" }));
-      setStatus("Failed");
-      setMessage(
-        job?.error || result?.errors?.[0] || "Nmap scan failed."
-      );
-    } else if (completed) {
-      const hosts = Array.isArray(result?.results?.hosts)
-        ? result.results.hosts
-        : [];
-
-      const openPorts = hosts.reduce(
-        (total, host) =>
-          total +
-          (Array.isArray(host?.ports)
-            ? host.ports.filter((port) => port?.state === "open").length
-            : 0),
-        0
-      );
-
-      setToolStatuses((current) => ({ ...current, nmap: "Completed" }));
-      setStatus("Completed");
-      setMessage(
-        `Nmap ${result?.scan_type || nmapProfile} scan completed for ${targetUrl.trim()}: ${
-          result?.results?.host_count ?? hosts.length
-        } host(s), ${openPorts} open port(s).`
-      );
-
-      localStorage.setItem("active_vapt_target", targetUrl.trim());
-      localStorage.setItem(
-        "active_vapt_target_meta",
-        JSON.stringify({
-          target: targetUrl.trim(),
-          scanType: `nmap-${result?.scan_type || nmapProfile}`,
-          scannedAt: new Date().toISOString(),
-          status: "Completed",
-        })
-      );
-
-      const normalizedResult = normalizeNmapResult(
-        result,
-        targetUrl.trim(),
-        elapsedMs
-      );
-
-      // Single-tool mode keeps the existing Nmap result-page behavior.
-      // Multi-tool mode is handled by the unified coordinator.
-      if (
-        vaptRunTools.length <= 1 &&
-        typeof onViewNmapResults === "function"
-      ) {
-        onViewNmapResults(normalizedResult);
-      }
-
-      if (vaptRunTools.length > 1) {
-        setVaptRunResults((current) => ({
-          ...current,
-          nmap: normalizedResult,
+    if (["completed", "completed_with_errors"].includes(outcome.status)) {
+      const hosts = Array.isArray(result?.results?.hosts) ? result.results.hosts : [];
+      const openPorts = hosts.reduce((count, host) => count +
+        (Array.isArray(host?.ports) ? host.ports.filter(port => port?.state === "open").length : 0), 0);
+      setMessage(`Nmap ${result?.scan_type || nmapProfile} scan ${outcome.label.toLowerCase()} for ${targetUrl.trim()}: ${
+        result?.results?.host_count ?? hosts.length
+      } host(s), ${openPorts} observed open port(s).`);
+      if (outcome.status === "completed") {
+        localStorage.setItem("active_vapt_target", targetUrl.trim());
+        localStorage.setItem("active_vapt_target_meta", JSON.stringify({
+          target: targetUrl.trim(), scanType: `nmap-${result?.scan_type || nmapProfile}`,
+          scannedAt: new Date().toISOString(), status: "Completed",
         }));
       }
+      if (vaptRunTools.length <= 1 && normalizedResult && typeof onViewNmapResults === "function") {
+        onViewNmapResults(normalizedResult);
+      }
+    } else {
+      setMessage(job?.error || result?.errors?.[0] || `Nmap scan ${outcome.label.toLowerCase()}.`);
     }
-
     setLoading(false);
     setNmapJobId(null);
   };
@@ -19609,7 +19462,7 @@ function VAPTTesting({
         setNmapStage(job.stage || "Running Nmap scan");
 
         if (
-          ["completed", "failed", "timeout"].includes(job.status)
+          isTerminalToolStatus(job.status)
         ) {
           finishNmapJob(job);
         }
@@ -21144,152 +20997,51 @@ function VAPTTesting({
   // Single-tool Nmap/Nikto/Nuclei behavior remains unchanged.
   useEffect(() => {
     // ZAP has its own dedicated progress/result lifecycle.
-    // Keep ZAP-only runs out of the generic multi-tool finalizer.
-    if (
-      !vaptRunId ||
-      vaptRunRedirected ||
-      vaptRunTools.length < 2
-    ) {
-      return undefined;
-    }
-
-    const terminalStatuses = new Set([
-      "completed",
-      "completed_with_errors",
-      "failed",
-      "timeout",
-    ]);
-
+    if (!vaptRunId || vaptRunRedirected || vaptRunTools.length < 2) return undefined;
     const timer = window.setInterval(() => {
-      const statuses = vaptRunTools.map(
-        (toolId) => toolStatuses[toolId]
-      );
-
-      const startedOrTerminal = vaptRunTools.filter((toolId) => {
-        const status = toolStatuses[toolId];
-        return (
-          status &&
-          status !== "Selected" &&
-          status !== "Input Required"
-        );
+      const outcomes = vaptRunTools.map((toolId) => getToolOutcome(
+        vaptRunResults[toolId], toolStatuses[toolId] || genericToolJobs[toolId]?.status
+      ));
+      const started = outcomes.some(outcome =>
+        !["unknown", "selected", "input_required", "not_started"].includes(outcome.status));
+      if (!started) return;
+      const specialized = ["nmap", "nikto", "nuclei", "masscan", "owasp-zap", "hping3",
+        "wireshark", "tshark", "snort", "hydra", "john"];
+      const allFinished = vaptRunTools.every((toolId, index) => {
+        const outcome = outcomes[index];
+        if (outcome.status === "input_required") return true;
+        if (!outcome.terminal) return false;
+        if (["failed", "timeout", "not_available", "cancelled"].includes(outcome.status)) return true;
+        return !specialized.includes(toolId) || Boolean(vaptRunResults[toolId]);
       });
-
-      if (startedOrTerminal.length === 0) {
-        return;
-      }
-
-      const allFinished = vaptRunTools.every((toolId) => {
-        const status = toolStatuses[toolId];
-        const result = vaptRunResults[toolId];
-        const genericStatus = genericToolJobs[toolId]?.status;
-
-        if (status === "Input Required") {
-          return true;
-        }
-
-        const uiTerminal = [
-          "Completed",
-          "Completed with warnings",
-          "Failed",
-          "Timed Out",
-        ].includes(status);
-
-        const backendTerminal = terminalStatuses.has(genericStatus);
-
-        // Specialized tools are only truly complete when their dedicated
-        // poller has stored the real result. Do not allow a stale UI status
-        // to finalize the unified result page.
-        const specializedTool = [
-          "nmap",
-          "nikto",
-          "nuclei",
-          "masscan",
-          "owasp-zap",
-          "hping3",
-          "wireshark",
-          "tshark",
-          "snort",
-          "hydra",
-          "john",
-        ].includes(toolId);
-
-        if (specializedTool) {
-          if (["Failed", "Timed Out"].includes(status)) {
-            return true;
-          }
-
-          return (
-            Boolean(result) &&
-            (uiTerminal || backendTerminal)
-          );
-        }
-
-        return uiTerminal || backendTerminal;
-      });
-
-      if (!allFinished) {
-        return;
-      }
-
+      if (!allFinished) return;
       window.clearInterval(timer);
-
       setVaptRunRedirected(true);
       setLoading(false);
-
-      const completedCount = statuses.filter((status) =>
-        ["Completed", "Completed with warnings"].includes(status)
-      ).length;
-
-      const failedCount = statuses.filter((status) =>
-        ["Failed", "Timed Out"].includes(status)
-      ).length;
-
-      setStatus(failedCount > 0 ? "Completed with warnings" : "Completed");
-      setMessage(
-        `Multi-tool VAPT completed: ${completedCount} completed, ${failedCount} failed or timed out.`
-      );
-
-      // Preserve the collected generic results for the unified results view.
+      const completedCount = outcomes.filter(outcome => outcome.status === "completed").length;
+      const warningCount = outcomes.filter(outcome => outcome.status === "completed_with_errors").length;
+      const failedCount = outcomes.filter(outcome =>
+        ["failed", "timeout", "not_available", "cancelled"].includes(outcome.status)).length;
+      const inputCount = outcomes.filter(outcome => outcome.status === "input_required").length;
+      const status = completedCount === outcomes.length ? "completed"
+        : failedCount === outcomes.length ? "failed" : "completed_with_errors";
+      setStatus(getToolOutcome({ status }).label);
+      setMessage(`Multi-tool VAPT finished: ${completedCount} completed, ${warningCount} with warnings, ${
+        failedCount
+      } failed/timed out/unavailable/cancelled, ${inputCount} require input.`);
       const unifiedResult = {
-        target: targetUrl.trim(),
-        scan_type: "multi-tool",
-        scan_profile: "multi-tool",
-        tools: vaptRunTools,
-        results: vaptRunResults,
-        tool_statuses: { ...toolStatuses },
+        target: targetUrl.trim(), scan_type: "multi-tool", scan_profile: "multi-tool", status,
+        tools: vaptRunTools, results: vaptRunResults,
+        tool_statuses: Object.fromEntries(vaptRunTools.map((toolId, index) => [toolId, outcomes[index].label])),
         generated_at: new Date().toISOString(),
       };
-
-      console.log(
-        "[MULTI-TOOL FINAL RESULTS]",
-        JSON.stringify(
-          {
-            tools: vaptRunTools,
-            nmap: vaptRunResults?.nmap,
-            nmapHosts: vaptRunResults?.nmap?.nmap?.results?.hosts,
-            nmapHostCount: vaptRunResults?.nmap?.nmap?.results?.host_count,
-          },
-          null,
-          2
-        )
-      );
-
       setScanResult(unifiedResult);
-
-      if (typeof onViewMultiToolResults === "function") {
-        onViewMultiToolResults(unifiedResult);
-      }
+      if (typeof onViewMultiToolResults === "function") onViewMultiToolResults(unifiedResult);
     }, 500);
-
     return () => window.clearInterval(timer);
   }, [
-    vaptRunId,
-    vaptRunTools,
-    vaptRunResults,
-    genericToolJobs,
-    toolStatuses,
-    vaptRunRedirected,
-    targetUrl,
+    vaptRunId, vaptRunTools, vaptRunResults, genericToolJobs, toolStatuses,
+    vaptRunRedirected, targetUrl,
   ]);
 
   const handlePrepareTools = async () => {
@@ -26300,33 +26052,15 @@ function MultiToolResultsPage({ scanResult, onBack }) {
     return String(value);
   };
 
-  const formatStatus = (toolId) => {
-    const status = statuses?.[toolId];
-    if (status) return status;
-
-    const result = getToolResult(toolId);
-    if (result?.status === "failed") return "Failed";
-    if (result?.status === "completed_with_errors") {
-      return "Completed with warnings";
-    }
-    return result ? "Completed" : "No result";
-  };
+  const formatStatus = (toolId) => getToolOutcome(getToolResult(toolId), statuses?.[toolId]).label;
 
   const statusClass = (status) => {
-    const value = String(status || "").toLowerCase();
-
-    if (value.includes("failed") || value.includes("timeout")) {
+    const value = normalizeToolStatus(status);
+    if (["failed", "timeout", "not_available", "cancelled"].includes(value)) {
       return "border-red-500/40 bg-red-500/10 text-red-400";
     }
-
-    if (value.includes("warning")) {
-      return "border-yellow-500/40 bg-yellow-500/10 text-yellow-300";
-    }
-
-    if (value.includes("completed")) {
-      return "border-emerald-500/40 bg-emerald-500/10 text-emerald-400";
-    }
-
+    if (value === "completed_with_errors") return "border-yellow-500/40 bg-yellow-500/10 text-yellow-300";
+    if (value === "completed") return "border-emerald-500/40 bg-emerald-500/10 text-emerald-400";
     return "border-blue-500/30 bg-blue-500/10 text-blue-300";
   };
 
