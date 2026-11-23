@@ -2064,114 +2064,14 @@ def _new_nmap_job(target: str, scan_type: str, user_id: int, client_id: int | No
 
 
 
-def _save_nmap_hosts_to_asset_inventory(result):
-    """Save discovered Nmap hosts while preserving manually maintained fields."""
-    if result.get("status") not in {"completed", "completed_with_errors"}:
-        return {"created": 0, "updated": 0, "skipped": 0}
-
-    hosts = result.get("results", {}).get("hosts", [])
-    if not isinstance(hosts, list):
-        return {"created": 0, "updated": 0, "skipped": 0}
-
-    from assets_router import Asset
-
+def _save_nmap_hosts_to_asset_inventory(result, user_id, client_id, job_id):
+    """Commit owned scan inventory and its event as one transaction."""
+    from nmap_workflow import persist_nmap_completion
     db = SessionLocal()
-    created = updated = skipped = 0
-
     try:
-        for host in hosts:
-            addresses = host.get("addresses", [])
-            ip = next(
-                (a.get("address") for a in addresses
-                 if a.get("type") in {"ipv4", "ipv6"} and a.get("address")),
-                None,
-            )
-            if not ip:
-                skipped += 1
-                continue
-
-            raw_names = host.get("hostnames", [])
-            hostname = next(
-                (n.get("name") if isinstance(n, dict) else n
-                 for n in raw_names
-                 if (n.get("name") if isinstance(n, dict) else n)),
-                None,
-            )
-
-            services = []
-            for port in host.get("ports", []):
-                if port.get("state") != "open":
-                    continue
-                service = port.get("service") or {}
-                label = f'{port.get("protocol", "tcp")}/{port.get("port", "?")}'
-                detail = service.get("name", "unknown service")
-                product = service.get("product")
-                version = service.get("version")
-                if product:
-                    detail += f" ({product}{' ' + version if version else ''})"
-                services.append(f"{label}: {detail}")
-
-            block = "\n".join([
-                "[Nmap Discovery]",
-                f"Last scan target: {result.get('target', 'unknown')}",
-                f"Scan profile: {result.get('scan_type', 'unknown')}",
-                f"Host status: {host.get('status', 'unknown')}",
-                "Open services: " + ("; ".join(services) if services else "None reported"),
-                "[/Nmap Discovery]",
-            ])
-
-            # Match exact IP first. Only use hostname fallback when
-            # exactly one matching asset exists and its IP is empty
-            # or matches the discovered IP.
-            asset = (
-                db.query(Asset)
-                .filter(Asset.ip_address == ip)
-                .order_by(Asset.id.desc())
-                .first()
-            )
-
-            if asset is None and hostname:
-                hostname_matches = (
-                    db.query(Asset)
-                    .filter(Asset.hostname == str(hostname)[:255])
-                    .all()
-                )
-                if len(hostname_matches) == 1:
-                    candidate = hostname_matches[0]
-                    candidate_ip = (candidate.ip_address or "").strip()
-                    if not candidate_ip or candidate_ip == ip:
-                        asset = candidate
-
-            if asset is None:
-                db.add(Asset(
-                    name=str(hostname or ip)[:200],
-                    asset_type="Server",
-                    ip_address=ip,
-                    hostname=str(hostname)[:255] if hostname else None,
-                    notes=block,
-                ))
-                created += 1
-                continue
-
-            if not asset.hostname and hostname:
-                asset.hostname = str(hostname)[:255]
-
-            # Save the discovered IP when a safe hostname match has no IP.
-            if not (asset.ip_address or "").strip():
-                asset.ip_address = ip
-
-            notes = asset.notes or ""
-            begin, end = "[Nmap Discovery]", "[/Nmap Discovery]"
-            if begin in notes and end in notes and notes.index(end) > notes.index(begin):
-                left = notes[:notes.index(begin)].rstrip()
-                right = notes[notes.index(end) + len(end):].lstrip()
-                asset.notes = "\n\n".join(part for part in (left, block, right) if part)
-            else:
-                asset.notes = "\n\n".join(part for part in (notes.strip(), block) if part)
-            updated += 1
-
+        summary, notification = persist_nmap_completion(db, result, user_id, client_id, job_id)
         db.commit()
-        return {"created": created, "updated": updated, "skipped": skipped}
+        return summary, notification
     except Exception:
         db.rollback()
         raise
@@ -2185,121 +2085,43 @@ async def _run_nmap_job(job_id: str, target: str, scan_type: str):
         return
 
     async def update_progress(percent, stage):
-        job["status"] = "running"
-        job["progress"] = percent
-        job["stage"] = stage
-        job["updated_at"] = time.time()
-        _persist_background_job(job, "Nmap")
+        job.update(status='running', progress=percent, stage=stage, updated_at=time.time())
+        await asyncio.to_thread(_persist_background_job, job.copy(), 'Nmap')
+
+    async def update_result(partial_result):
+        return
 
     try:
-        job["status"] = "running"
-        job["progress"] = 3
-        job["stage"] = "Starting Nmap"
-        job["updated_at"] = time.time()
-
-        async def update_result(partial_result):
-            # Intermediate Nmap evidence is intentionally not stored in the job result.
-            # Only the final terminal Nmap result is exposed to the frontend.
-            return
-
-        result = await _execute_nmap_command(
-            target=target,
-            scan_type=scan_type,
-            progress_callback=update_progress,
-            result_callback=update_result,
-        )
-
-        job["result"] = result
-
-        if result.get("status") in {"completed", "completed_with_errors"}:
+        job.update(status='running', progress=3, stage='Starting Nmap', updated_at=time.time())
+        result = await _execute_nmap_command(target=target, scan_type=scan_type,
+                    progress_callback=update_progress, result_callback=update_result)
+        job['result'] = result
+        if result.get('status') in {'completed', 'completed_with_errors'}:
+            # Persistence uses the authenticated job scope, never result payload ownership.
+            summary, notification = await asyncio.to_thread(_save_nmap_hosts_to_asset_inventory,
+                result, job.get('user_id'), job.get('client_id'), job_id)
+            result['asset_sync'] = summary
+            result['assessment_id'] = summary['assessment_id']
+            job['asset_sync'] = summary
+            job['asset_sync_error'] = None
             try:
-                sync_summary = _save_nmap_hosts_to_asset_inventory(result)
-                job["asset_sync"] = sync_summary
-                result["asset_sync"] = sync_summary
-                job["asset_sync_error"] = None
-                print(f"[NMAP ASSET SYNC] {sync_summary}")
+                await asyncio.to_thread(notify_security_event, notification)
             except Exception as exc:
-                sync_error = str(exc)
-                job["asset_sync_error"] = sync_error
-                result["asset_sync"] = {"error": sync_error}
-                print(f"[NMAP ASSET SYNC ERROR] {sync_error}")
-
-        # Store the completed Nmap assessment as a SOC SecurityEvent.
-        if result.get("status") in {
-            "completed",
-            "completed_with_errors",
-        }:
-            security_event = SecurityEvent(
-                event_id=generate_event_id(
-                    json.dumps(result, sort_keys=True, default=str)
-                ),
-                timestamp=__import__("datetime").datetime.utcnow(),
-                source="nmap",
-                event_type="vapt_scan",
-                severity=(
-                    "INFO"
-                    if result.get("status") == "completed"
-                    else "ERROR"
-                ),
-                message=(
-                    f"Nmap {scan_type} scan completed for {target}"
-                ),
-                target=target,
-                owner_user_id=job.get("user_id"),
-                client_id=job.get("client_id"),
-                raw_event=json.dumps(result, default=str),
-                mitre_technique_id="T1046",
-                mitre_technique_name="Network Service Discovery",
-                mitre_tactic="discovery",
-                mitre_mapping_source="security_tool_context",
-                mitre_confidence="low",
-                mitre_evidence=(
-                    "Nmap scan performed network service discovery "
-                    "against the authorized assessment target."
-                ),
-            )
-
-            db = SessionLocal()
-            try:
-                db.add(security_event)
-                db.commit()
-
-                notify_security_event({
-                    "event_id": security_event.event_id,
-                    "timestamp": security_event.timestamp.isoformat(),
-                    "source": security_event.source,
-                    "event_type": security_event.event_type,
-                    "severity": security_event.severity,
-                    "message": security_event.message,
-                    "target": security_event.target,
-                    "assessment_id": security_event.assessment_id,
-                })
-            except Exception:
-                db.rollback()
-                raise
-            finally:
-                db.close()
-
-        result_status = result.get("status", "failed")
-        job["status"] = result_status
-
-        if result_status == "completed":
-            job["progress"] = 100
-            job["stage"] = "Completed"
-        elif result_status == "completed_with_errors":
-            job["progress"] = 100
-            job["stage"] = "Completed with warnings"
-        else:
-            job["stage"] = "Finished with errors"
-
-        job["updated_at"] = time.time()
-        _persist_background_job(job, "Nmap")
-
+                # The committed evidence remains available through scoped API refresh.
+                job['notification_error'] = str(exc)
+                result['execution_status'] = result.get('status')
+                result['status'] = 'completed_with_errors'
+                result.setdefault('errors', []).append('Live notification failed; saved results are available by refresh.')
+        status = result.get('status', 'failed')
+        job.update(status=status, progress=100, stage=('Completed' if status == 'completed' else
+                    'Completed with warnings' if status == 'completed_with_errors' else 'Finished with errors'),
+                   updated_at=time.time())
     except Exception as exc:
-        job["status"] = "failed"
-        job["error"] = str(exc)
-        job["stage"] = "Failed"
-        job["updated_at"] = time.time()
+        job.update(status='failed', error=str(exc), progress=100, stage='Failed', updated_at=time.time())
+    finally:
+        await asyncio.to_thread(_persist_background_job, job.copy(), 'Nmap')
+
+
 
 
 
