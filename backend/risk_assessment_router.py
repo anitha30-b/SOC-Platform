@@ -105,7 +105,7 @@ def _finding_snapshot(
         if cvss is not None
         else (finding.severity or "LOW").upper()
     )
-    calculated_risk_level = calculate_risk_level(calculated_severity)
+    calculated_risk_level = "UNRATED" if calculated_severity == "UNRATED" else calculate_risk_level(calculated_severity)
 
     return {
         "finding_id": finding.finding_id,
@@ -305,11 +305,13 @@ async def _run_risk_assessment(
                 if cvss is not None
                 else (finding.severity or "LOW").upper()
             )
-            calculated_risk = calculate_risk_level(calculated_severity)
+            calculated_risk = "UNRATED" if calculated_severity == "UNRATED" else calculate_risk_level(calculated_severity)
 
+            severity.setdefault(calculated_severity.lower(), 0)
             severity[calculated_severity.lower()] += 1
 
             risk_key = calculated_risk.lower()
+            risk_levels.setdefault(risk_key, 0)
             risk_levels[risk_key] += 1
 
             status_key = (finding.status or "OPEN").lower()
@@ -378,6 +380,8 @@ async def _run_risk_assessment(
             overall_risk = "MEDIUM"
         elif severity["low"] > 0:
             overall_risk = "LOW"
+        elif severity.get("unrated", 0) > 0:
+            overall_risk = "UNRATED"
         else:
             overall_risk = "NONE"
 

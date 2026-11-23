@@ -26,13 +26,17 @@ import models
 from security_events import create_security_event, generate_event_id
 from security_event_store import store_security_event
 
-models.SecurityEvent.__table__.create(support.engine, checkfirst=True)
+for model in (models.SecurityEvent, models.Assessment, models.SecurityFinding, models.BackgroundJob):
+    model.__table__.create(support.engine, checkfirst=True)
 
 
 class ToolEventOwnershipTests(unittest.TestCase):
     def setUp(self):
         with support.Factory() as db:
             db.query(models.SecurityEvent).delete()
+            db.query(models.SecurityFinding).delete()
+            db.query(models.Assessment).delete()
+            db.query(models.BackgroundJob).delete()
             for model in reversed(support.TABLE_MODELS):
                 db.query(model).delete()
             for client in (10, 20):

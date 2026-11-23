@@ -27,90 +27,30 @@ from vapt_tools.scripts.nuclei import NucleiError, run_nuclei
 
 
 
-def _persist_nuclei_security_events(result: dict, user_id: int, client_id: int | None) -> int:
-    """Persist actual Nuclei findings and publish them after commit."""
-    from scan_event_ownership import resolve_scan_event_owner
-
-    findings = result.get("findings") or []
-    target = str(result.get("target") or "").strip()
-
-    if not findings:
-        return 0
-
+def _persist_nuclei_security_events(result: dict, user_id: int, client_id: int | None, job_id=None) -> int:
+    """Atomically save the owned assessment, canonical findings and SIEM events."""
+    from nuclei_workflow import persist_nuclei_result
     db = SessionLocal()
-    notifications = []
-    inserted = 0
-
     try:
-        ownership = resolve_scan_event_owner(db, user_id, client_id)
-        for finding in findings:
-            if not isinstance(finding, dict):
-                continue
-
-            name = (
-                finding.get("name")
-                or finding.get("template_id")
-                or "Nuclei finding"
-            )
-            location = (
-                finding.get("matched_at")
-                or finding.get("url")
-                or finding.get("host")
-                or target
-            )
-            severity = str(finding.get("severity") or "INFO").upper()
-
-            identity = {
-                **ownership,
-                "source": "nuclei",
-                "target": target,
-                "template_id": finding.get("template_id"),
-                "matched_at": finding.get("matched_at"),
-                "url": finding.get("url"),
-                "host": finding.get("host"),
-            }
-            event_id = generate_event_id(
-                json.dumps(identity, sort_keys=True, default=str)
-            )
-
-            if db.query(SecurityEvent).filter(
-                SecurityEvent.event_id == event_id
-            ).first():
-                continue
-
-            event = create_security_event(
-                source="nuclei",
-                event_type="vulnerability_finding",
-                message=f"Nuclei detected {name} at {location}",
-                severity=severity,
-                target=target,
-                raw_event={
-                    "tool": "Nuclei",
-                    "finding": finding,
-                },
-                event_id=event_id,
-            )
-
-            event.update(ownership)
-            store_security_event(db, event)
-            notifications.append(event)
-            inserted += 1
-
+        summary, notifications = persist_nuclei_result(db, result, user_id, client_id, job_id)
         db.commit()
-
     except Exception:
         db.rollback()
         raise
     finally:
         db.close()
-
+    result['assessment_id'] = summary['assessment_id']
+    result['persistence'] = dict(summary, status='saved')
     for event in notifications:
         try:
             notify_security_event(event)
         except Exception as exc:
-            print(f"[SOC NUCLEI EVENT] Notification failed: {exc}")
-
-    return inserted
+            result.setdefault('execution_status', result.get('status'))
+            if result.get('status') == 'completed':
+                result['status'] = 'completed_with_errors'
+            result.setdefault('notification_errors', []).append('Live notification failed; saved findings remain available by refresh.')
+            print('[SOC NUCLEI EVENT] Notification failed:', type(exc).__name__)
+    return summary['new_events']
 
 
 router = APIRouter(
@@ -219,72 +159,26 @@ def _new_nuclei_job(
     return job_id
 
 
-async def _run_nuclei_job(
-    job_id: str,
-    target: str,
-):
+async def _run_nuclei_job(job_id: str, target: str):
+    from nuclei_workflow import mark_persistence_failure
     job = NUCLEI_JOBS.get(job_id)
-
     if not job:
         return
-
     try:
-        job.update(
-            status="running",
-            progress=10,
-            stage="Starting Nuclei",
-            updated_at=time.time(),
-        )
-
-        await asyncio.sleep(0)
-
-        job.update(
-            status="running",
-            progress=20,
-            stage="Running vulnerability discovery",
-            updated_at=time.time(),
-        )
-
-        result = await asyncio.to_thread(
-            run_nuclei,
-            target,
-        )
-
+        job.update(status='running', progress=20, stage='Running vulnerability discovery', updated_at=time.time())
+        result = await asyncio.to_thread(run_nuclei, target)
+        job['result'] = result
         try:
-            job["security_events_persisted"] = await asyncio.to_thread(
-                _persist_nuclei_security_events,
-                result,
-                job["user_id"],
-                job.get("client_id"),
-            )
-        except Exception as event_exc:
-            job["security_event_persistence_error"] = str(event_exc)
-            print(f"[SOC NUCLEI EVENT] Persistence failed: {event_exc}")
-
-        job["result"] = result
-
-        job.update(
-            status=result.get("status", "failed"),
-            progress=100,
-            stage=(
-                "Completed"
-                if result.get("status") == "completed"
-                else (
-                    "Completed with warnings"
-                    if result.get("status") == "completed_with_errors"
-                    else "Finished with errors"
-                )
-            ),
-            updated_at=time.time(),
-        )
-
+            job['security_events_persisted'] = await asyncio.to_thread(
+                _persist_nuclei_security_events, result, job['user_id'], job.get('client_id'), job_id)
+        except Exception as exc:
+            job['security_event_persistence_error'] = type(exc).__name__
+            mark_persistence_failure(result)
+        status = result.get('status', 'failed')
+        job.update(status=status, progress=100, stage=('Completed' if status == 'completed' else
+            'Completed with warnings' if status == 'completed_with_errors' else 'Finished with errors'), updated_at=time.time())
     except Exception as exc:
-        job.update(
-            status="failed",
-            error=str(exc),
-            stage="Failed",
-            updated_at=time.time(),
-        )
+        job.update(status='failed', error=str(exc), progress=100, stage='Failed', updated_at=time.time())
 
 
 @router.post("/tools/nuclei/run-async")
@@ -375,6 +269,7 @@ async def run_nuclei_tool(
 
     target = validate_nuclei_target(request.target)
     scan_user_id, scan_client_id = current_user.id, current_user.client_id
+    scan_job_id = str(uuid.uuid4())
 
     try:
         result = await __import__("asyncio").to_thread(
@@ -393,15 +288,17 @@ async def run_nuclei_tool(
             result,
             scan_user_id,
             scan_client_id,
+            scan_job_id,
         )
         persistence_error = None
     except Exception as event_exc:
         security_events_persisted = 0
-        persistence_error = str(event_exc)
-        print(f"[SOC NUCLEI EVENT] Persistence failed: {event_exc}")
+        from nuclei_workflow import mark_persistence_failure
+        persistence_error = type(event_exc).__name__
+        mark_persistence_failure(result)
 
     return {
-        "message": "Nuclei scan completed",
+        "message": "Nuclei scan completed" if result.get("status") == "completed" else "Nuclei scan finished with warnings or errors",
         "tool": "Nuclei",
         "username": current_user.username,
         "target": target,
