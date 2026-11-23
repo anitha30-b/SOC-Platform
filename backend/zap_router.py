@@ -159,74 +159,11 @@ def validate_target(target: str) -> str:
 
 
 
-def get_or_create_assessment(
-
-    db: Session,
-
-    current_user: User,
-
-    target: str,
-
-) -> Assessment:
-
-    assessment = (
-
-        db.query(Assessment)
-
-        .filter(
-
-            Assessment.user_id == current_user.id,
-
-            Assessment.target == target,
-
-        )
-
-        .order_by(
-
-            Assessment.created_at.desc()
-
-        )
-
-        .first()
-
-    )
-
-
-
-    if assessment is None:
-
-        assessment = Assessment(
-
-            user_id=current_user.id,
-
-            target=target,
-
-            vapt_status="running",
-
-            vapt_findings_count=0,
-
-            qa_status="not_started",
-
-            qa_score=None,
-
-            monitoring_status="not_started",
-
-            report_status="not_generated",
-
-            overall_status="active",
-
-        )
-
-
-
-        db.add(assessment)
-
-        db.commit()
-
-        db.refresh(assessment)
-
-
-
+def get_or_create_assessment(db: Session, current_user: User, target: str) -> Assessment:
+    assessment = Assessment(user_id=current_user.id, target=target, vapt_status='running', vapt_findings_count=0, qa_status='not_started', monitoring_status='not_started', report_status='not_generated', overall_status='active')
+    db.add(assessment)
+    db.commit()
+    db.refresh(assessment)
     return assessment
 
 
@@ -387,21 +324,26 @@ async def zap_status(current_user: User=Depends(require_role(1))):
 @router.post("/scan")
 
 async def start_zap_scan(request: ZapScanRequest, current_user: User=Depends(require_role(1)), db: Session=Depends(get_db)):
+    from uuid import uuid4
     _check_zap_start_permission(db, current_user)
     target = validate_target(request.target)
+    if len(target) > 500:
+        raise HTTPException(status_code=400, detail='ZAP target is too long')
     try:
         access_result = await zap_get('/JSON/core/action/accessUrl/', {'url': target, 'followRedirects': str(request.followRedirects).lower()})
         scan_result = await zap_get('/JSON/ascan/action/scan/', {'url': target, 'recurse': str(request.recurse).lower(), 'inScopeOnly': str(request.inScopeOnly).lower(), 'scanPolicyName': request.scanPolicyName or 'Dev CICD'})
-        scan_id = scan_result.get('scan')
-        if scan_id is None:
-            raise HTTPException(status_code=502, detail='ZAP did not return a scan ID')
+        raw_id = scan_result.get('scan')
+        if raw_id is None:
+            raise ValueError('ZAP did not return an active scan ID')
         assessment = get_or_create_assessment(db, current_user, target)
-        ZAP_JOBS[str(scan_id)] = {'scan_id': str(scan_id), 'target': target, 'user_id': current_user.id, 'client_id': current_user.client_id, 'assessment_id': assessment.id, 'status': 'running', 'access_result': access_result, 'created_at': datetime.utcnow().isoformat(), 'results_synced': False}
-        return {'status': 'started', 'target': target, 'scan_id': str(scan_id), 'assessment_id': assessment.id}
+        scan_id = str(uuid4())
+        ZAP_JOBS[scan_id] = {'scan_id': scan_id, 'zap_scan_id': str(raw_id), 'target': target, 'user_id': current_user.id, 'client_id': current_user.client_id, 'assessment_id': assessment.id, 'status': 'running', 'access_result': access_result, 'created_at': datetime.utcnow().isoformat(), 'results_synced': False}
+        return {'status': 'started', 'target': target, 'scan_id': scan_id, 'assessment_id': assessment.id}
     except HTTPException:
         raise
     except Exception:
-        raise HTTPException(status_code=502, detail='Unable to start ZAP scan')
+        db.rollback()
+        raise HTTPException(status_code=502, detail='Unable to start or record ZAP scan')
 
 
 
@@ -421,15 +363,24 @@ async def start_zap_scan(request: ZapScanRequest, current_user: User=Depends(req
 
 )
 
-async def zap_scan_progress(scan_id: str, current_user: User=Depends(require_role(1))):
-    job = _owned_zap_job(scan_id, current_user)
+async def zap_scan_progress(scan_id: str, current_user: User=Depends(require_role(1)), db: Session=Depends(get_db)):
+    if scan_id in ZAP_JOBS:
+        job = _owned_zap_job(scan_id, current_user)
+    else:
+        job = None
+    saved = _saved_zap_result(db, scan_id, current_user)
+    if saved:
+        return {'scan_id': scan_id, 'status': 100, 'state': saved['status'], 'assessment_id': saved['assessment_id']}
+    if job is None:
+        raise HTTPException(status_code=404, detail='ZAP scan not found')
+    if job.get('status') == 'cancelled':
+        return {'scan_id': scan_id, 'status': 0, 'state': 'cancelled'}
     try:
-        result = await zap_get('/JSON/ascan/view/status/', {'scanId': scan_id})
+        result = await zap_get('/JSON/ascan/view/status/', {'scanId': job.get('zap_scan_id', scan_id)})
         progress = int(result['status'])
         if not 0 <= progress <= 100:
             raise ValueError('Invalid ZAP progress')
-        job['status'] = 'completed' if progress == 100 else 'running'
-        return {'scan_id': str(scan_id), 'status': progress, 'state': job['status']}
+        return {'scan_id': scan_id, 'status': progress, 'state': 'completed' if progress == 100 else 'running'}
     except Exception:
         raise HTTPException(status_code=502, detail='Unable to read valid ZAP scan progress')
 
@@ -445,15 +396,16 @@ async def zap_scan_progress(scan_id: str, current_user: User=Depends(require_rol
 
 
 @router.post("/scan/{scan_id}/cancel")
-async def cancel_zap_scan(scan_id: str, current_user: User=Depends(require_role(1))):
+async def cancel_zap_scan(scan_id: str, current_user: User=Depends(require_role(1)), db: Session=Depends(get_db)):
     job = _owned_zap_job(scan_id, current_user)
+    if _saved_zap_result(db, scan_id, current_user):
+        raise HTTPException(status_code=409, detail='ZAP scan already has saved results')
     try:
-        result = await zap_get('/JSON/ascan/action/stop/', {'scanId': scan_id})
-        if result.get('Result') != 'OK':
+        response = await zap_get('/JSON/ascan/action/stop/', {'scanId': job.get('zap_scan_id', scan_id)})
+        if response.get('Result') != 'OK':
             raise ValueError('ZAP did not confirm cancellation')
         job['status'] = 'cancelled'
-        job['cancelled_at'] = datetime.utcnow().isoformat()
-        return {'status': 'cancelled', 'scan_id': str(scan_id), 'zap_response': result}
+        return {'status': 'cancelled', 'scan_id': scan_id, 'zap_response': response}
     except Exception:
         raise HTTPException(status_code=502, detail='Unable to confirm ZAP scan cancellation')
 
@@ -471,28 +423,40 @@ async def cancel_zap_scan(scan_id: str, current_user: User=Depends(require_role(
 )
 
 async def zap_scan_results(scan_id: str, current_user: User=Depends(require_role(1)), db: Session=Depends(get_db)):
-    job = _owned_zap_job(scan_id, current_user)
+    job = _owned_zap_job(scan_id, current_user) if scan_id in ZAP_JOBS else None
     try:
-        progress = await zap_get('/JSON/ascan/view/status/', {'scanId': scan_id})
+        saved = _saved_zap_result(db, scan_id, current_user)
+        if saved:
+            return saved
+        if job is None:
+            raise HTTPException(status_code=404, detail='ZAP scan not found')
+        if job.get('status') == 'cancelled':
+            return {'status': 'cancelled', 'scan_id': scan_id, 'alerts': [], 'findings': []}
+        progress = await zap_get('/JSON/ascan/view/status/', {'scanId': job.get('zap_scan_id', scan_id)})
         status = int(progress['status'])
         if not 0 <= status <= 100:
             raise ValueError('Invalid ZAP progress')
         if status < 100:
-            return {'status': 'running', 'scan_id': str(scan_id), 'progress': status, 'target': job['target'], 'alerts': []}
-        alerts = await _zap_scan_alerts(scan_id)
-        assessment = db.query(Assessment).filter(Assessment.id == job['assessment_id'], Assessment.user_id == current_user.id).first()
-        if not assessment:
-            raise HTTPException(status_code=404, detail='ZAP assessment not found')
-        findings = sync_zap_findings(db, current_user, assessment, alerts)
-        job['status'] = 'completed'
+            return {'status': 'running', 'scan_id': scan_id, 'progress': status, 'target': job['target'], 'alerts': []}
+        alerts = await _zap_scan_alerts(job.get('zap_scan_id', scan_id))
+        from zap_workflow import persist_zap_result
+        result, events = persist_zap_result(db, job, alerts)
+        db.commit()
         job['results_synced'] = True
-        return {'status': 'completed', 'scan_id': str(scan_id), 'target': job['target'], 'assessment_id': assessment.id, 'progress': 100, 'total_alerts': len(alerts), 'total_findings': len(findings), 'alerts': alerts, 'findings': [{'id': finding.id, 'finding_id': finding.finding_id, 'title': finding.title, 'severity': finding.severity, 'risk_level': finding.risk_level, 'tool_name': finding.tool_name, 'cwe_id': finding.cwe_id, 'affected_url': finding.affected_url, 'parameter': finding.parameter, 'evidence': finding.evidence, 'description': finding.description, 'remediation': finding.remediation, 'owasp_category': finding.owasp_category, 'status': finding.status} for finding in findings]}
+        job['status'] = 'completed'
     except HTTPException:
         raise
     except Exception:
         db.rollback()
-        job['status'] = 'completed_with_errors'
+        if job is not None:
+            job['status'] = 'completed_with_errors'
         raise HTTPException(status_code=502, detail='Unable to retrieve or save valid ZAP results')
+    try:
+        await asyncio.to_thread(_publish_zap_events, events)
+    except Exception:
+        result = dict(result, status='completed_with_errors', execution_status='completed', notification_errors=['Saved ZAP evidence; live publication was not confirmed.'])
+        job['status'] = 'completed_with_errors'
+    return result
 
 
 
@@ -521,8 +485,8 @@ async def start_zap_active_scan(request: ZapScanRequest, current_user: User=Depe
 
 )
 
-async def zap_active_progress(scan_id: str, current_user: User=Depends(require_role(1))):
-    return await zap_scan_progress(scan_id, current_user)
+async def zap_active_progress(scan_id: str, current_user: User=Depends(require_role(1)), db: Session=Depends(get_db)):
+    return await zap_scan_progress(scan_id, current_user, db)
 
 
 
@@ -533,11 +497,13 @@ async def zap_active_progress(scan_id: str, current_user: User=Depends(require_r
 async def zap_alerts(target: str | None=None, scan_id: str | None=None, current_user: User=Depends(require_role(1)), db: Session=Depends(get_db)):
     if not scan_id:
         raise HTTPException(status_code=400, detail='An owned scan_id is required')
-    job = _owned_zap_job(scan_id, current_user)
+    job = _owned_zap_job(scan_id, current_user) if scan_id in ZAP_JOBS else _saved_zap_result(db, scan_id, current_user)
+    if job is None:
+        raise HTTPException(status_code=404, detail='ZAP scan not found')
     if target is not None and validate_target(target) != job['target']:
         raise HTTPException(status_code=400, detail='Target does not match the owned ZAP scan')
     result = await zap_scan_results(scan_id, current_user, db)
-    return {'alerts': result.get('alerts', []), 'status': result.get('status'), 'scan_id': str(scan_id)}
+    return {'alerts': result.get('alerts', []), 'status': result.get('status'), 'scan_id': scan_id}
 
 
 
@@ -549,8 +515,8 @@ async def zap_alerts(target: str | None=None, scan_id: str | None=None, current_
 
 )
 
-async def stop_zap_active_scan(scan_id: str, current_user: User=Depends(require_role(1))):
-    return await cancel_zap_scan(scan_id, current_user)
+async def stop_zap_active_scan(scan_id: str, current_user: User=Depends(require_role(1)), db: Session=Depends(get_db)):
+    return await cancel_zap_scan(scan_id, current_user, db)
 
 
 
@@ -624,3 +590,19 @@ async def _zap_scan_alerts(scan_id):
             raise ValueError('ZAP returned invalid scan-specific alert evidence')
         alerts.append(alert)
     return alerts
+
+
+def _saved_zap_result(db, scan_id, current_user):
+    from uuid import UUID
+    try:
+        if str(UUID(str(scan_id))) != str(scan_id):
+            return None
+    except (ValueError, TypeError, AttributeError):
+        return None
+    from zap_workflow import load_saved_zap_result
+    return load_saved_zap_result(db, scan_id, current_user.id, current_user.client_id)
+
+def _publish_zap_events(events):
+    from realtime_journal_listener import notify_security_event
+    for event in events:
+        notify_security_event(event)

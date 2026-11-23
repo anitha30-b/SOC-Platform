@@ -1,6 +1,7 @@
 """Current ZAP route bodies with actual FastAPI/RBAC, SQLite and mocked ZAP."""
 import ast
 import asyncio
+import asyncio
 from datetime import datetime
 import __future__
 import json
@@ -36,7 +37,7 @@ def build_routes():
     namespace = module.__dict__
     def unused_db():
         raise AssertionError('Test database override was not installed.')
-    namespace.update(APIRouter=APIRouter, Depends=Depends, HTTPException=HTTPException,
+    namespace.update(asyncio=asyncio, APIRouter=APIRouter, Depends=Depends, HTTPException=HTTPException,
         BaseModel=BaseModel, Session=Session, User=models.User, Assessment=models.Assessment,
         SecurityFinding=models.SecurityFinding, SecurityTool=models.SecurityTool,
         require_role=rbac.require_role, get_db=unused_db, datetime=datetime, urlparse=urlparse,
@@ -66,6 +67,7 @@ class ZapAccessTests(unittest.TestCase):
         self.module, dependency = build_routes()
         self.ns = self.module.__dict__
         self.calls = []
+        self.published = []
         self.permission_calls = []
         self.permission_denied = False
         self.alert_ids = ['11']
@@ -95,6 +97,7 @@ class ZapAccessTests(unittest.TestCase):
             if self.permission_denied:
                 raise HTTPException(status_code=403, detail='Tool permission denied')
         self.ns['zap_get'] = mock_get
+        self.ns['_publish_zap_events'] = lambda events: self.published.extend(events)
         self.ns['_check_zap_start_permission'] = permission
         self.app = FastAPI()
         self.app.include_router(self.ns['router'])
@@ -166,9 +169,11 @@ class ZapAccessTests(unittest.TestCase):
         self.assertFalse(self.calls)
 
     def test_start_captures_scope_and_legacy_alias_checks_permissions(self):
-        self.start(alias=True)
+        ident = self.start(alias=True)
         self.assertEqual(self.permission_calls, [1])
-        self.assertEqual(self.ns['ZAP_JOBS']['same-numeric-id']['client_id'], 10)
+        self.assertEqual(self.ns['ZAP_JOBS'][ident]['client_id'], 10)
+        self.assertEqual(self.ns['ZAP_JOBS'][ident]['zap_scan_id'], 'same-numeric-id')
+        self.assertNotEqual(ident, 'same-numeric-id')
         self.calls.clear()
         self.permission_denied = True
         for path in ('/scan','/active-scan','/spider'):
@@ -180,10 +185,12 @@ class ZapAccessTests(unittest.TestCase):
         ident = self.start()
         response = self.client.post('/vapt/zap/spider',json={'target':'https://synthetic.invalid'},headers={'X-Test-User':'2'})
         self.assertEqual(response.status_code,200,response.text)
+        spider_id = response.json()['spider_id']
         self.assertEqual(self.ns['ZAP_JOBS'][ident]['user_id'],1)
-        self.assertEqual(self.ns['ZAP_SPIDER_JOBS'][ident]['user_id'],2)
+        self.assertEqual(self.ns['ZAP_SPIDER_JOBS'][spider_id]['user_id'],2)
+        self.assertNotEqual(ident, spider_id)
         self.calls.clear()
-        self.assertEqual(self.client.get(f'/vapt/zap/spider/{ident}/progress',headers=self.headers).status_code,403)
+        self.assertEqual(self.client.get(f'/vapt/zap/spider/{spider_id}/progress',headers=self.headers).status_code,403)
         self.assertFalse(self.calls)
 
     def test_info_findings_save_to_owned_assessment_and_replay_without_duplicates(self):
@@ -200,7 +207,7 @@ class ZapAccessTests(unittest.TestCase):
             self.assertEqual((rows[0].user_id,rows[0].assessment_id),(1,self.assessment_id))
             self.assertIsNone(rows[0].cvss_score)
         self.assertFalse(any(path.endswith('/alerts/') for path, _ in self.calls))
-        self.assertTrue(any(path.endswith('/alertsIds/') and params=={'scanId':ident} for path,params in self.calls))
+        self.assertTrue(any(path.endswith('/alertsIds/') and params=={'scanId':'same-numeric-id'} for path,params in self.calls))
 
     def test_unrated_and_valid_zero_alert_results_are_preserved(self):
         ident = self.start()
@@ -210,6 +217,7 @@ class ZapAccessTests(unittest.TestCase):
         self.assertEqual(response.json()['findings'][0]['severity'],'UNRATED')
         self.assertEqual(response.json()['findings'][0]['risk_level'],'UNRATED')
         self.alert_ids = []
+        ident = self.start()
         self.assertEqual(self.client.get(f'/vapt/zap/scan/{ident}/results',headers=self.headers).json()['total_alerts'],0)
 
     def test_malformed_alert_or_id_list_is_not_clean_completion(self):
