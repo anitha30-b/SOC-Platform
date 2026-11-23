@@ -220,36 +220,26 @@ async def run_nuclei_tool_async(
 
 
 @router.get("/tools/nuclei/progress/{job_id}")
-async def get_nuclei_progress(
-    job_id: str,
-    current_user: User = Depends(require_role(1)),
-):
+async def get_nuclei_progress(job_id: str, current_user: User = Depends(require_role(1))):
     job = NUCLEI_JOBS.get(job_id)
-
+    if job and job.get('user_id') != current_user.id:
+        raise HTTPException(status_code=403, detail='You do not have access to this Nuclei job.')
+    if not job or (job.get('result') or {}).get('persistence', {}).get('status') == 'failed':
+        user_id, client_id = current_user.id, current_user.client_id
+        def stored_result():
+            from nuclei_workflow import load_saved_nuclei_job
+            db = SessionLocal()
+            try:
+                return load_saved_nuclei_job(db, job_id, user_id, client_id)
+            finally:
+                db.close()
+        stored = await asyncio.to_thread(stored_result)
+        if stored:
+            return dict(stored, username=current_user.username)
     if not job:
-        raise HTTPException(
-            status_code=404,
-            detail="Nuclei job not found or expired.",
-        )
-
-    if job.get("user_id") != current_user.id:
-        raise HTTPException(
-            status_code=403,
-            detail="You do not have access to this Nuclei job.",
-        )
-
-    return {
-        "job_id": job["job_id"],
-        "tool": "Nuclei",
-        "target": job["target"],
-        "status": job["status"],
-        "progress": job["progress"],
-        "stage": job["stage"],
-        "result": job["result"],
-        "error": job["error"],
-        "updated_at": job["updated_at"],
-        "username": current_user.username,
-    }
+        raise HTTPException(status_code=404, detail='Nuclei job not found or expired.')
+    return {key:job.get(key) for key in ('job_id','target','status','progress','stage','result','error','updated_at')} | {
+        'tool':'Nuclei','username':current_user.username}
 
 
 @router.post("/tools/nuclei/run")

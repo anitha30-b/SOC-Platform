@@ -124,6 +124,38 @@ class NucleiReportContractTests(unittest.TestCase):
         with support.Factory() as db:
             self.assertEqual(db.query(models.SecurityFinding).count(),2)
 
+    def test_background_storage_id_fits_existing_36_character_schema(self):
+        job='57f6da9a-7784-4ff0-8eab-70fdde449da7'
+        self.persist(job=job)
+        with support.Factory() as db:
+            record=db.query(models.BackgroundJob).one()
+            self.assertEqual(len(record.job_id),36)
+            self.assertEqual(uuid.UUID(record.job_id).version,5)
+
+
+    def test_completed_result_can_be_loaded_without_in_memory_job(self):
+        summary,_=self.persist(job='stored-scan')
+        with support.Factory() as db:
+            loaded=workflow.load_saved_nuclei_job(db,'stored-scan',1,10)
+        self.assertEqual(loaded['result']['assessment_id'],summary['assessment_id'])
+        self.assertEqual(loaded['result']['persistence']['status'],'saved')
+
+
+    def test_stored_result_is_not_visible_to_other_owner(self):
+        self.persist(job='stored-scan')
+        with support.Factory() as db:
+            self.assertIsNone(workflow.load_saved_nuclei_job(db,'stored-scan',2,20))
+            self.assertIsNone(workflow.load_saved_nuclei_job(db,'stored-scan',4,10))
+
+
+    def test_stored_result_cannot_follow_changed_client_scope(self):
+        self.persist(job='stored-scan')
+        with support.Factory() as db:
+            db.get(models.User,1).client_id=20
+            db.commit()
+            self.assertIsNone(workflow.load_saved_nuclei_job(db,'stored-scan',1,20))
+
+
     def test_two_owners_do_not_share_findings_or_events(self):
         self.persist(owner=1,client=10,job='owner-1')
         self.persist(owner=2,client=20,job='owner-2')

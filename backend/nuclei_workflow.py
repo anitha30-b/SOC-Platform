@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+from uuid import NAMESPACE_URL, uuid5
 
 from models import Assessment, BackgroundJob, SecurityEvent, SecurityFinding
 from scan_event_ownership import resolve_scan_event_owner
@@ -65,7 +66,9 @@ def persist_nuclei_result(db,result,user_id,client_id,job_id=None):
     scan_key='nuclei:'+str(job_id or hashlib.sha256(legacy_identity.encode()).hexdigest())
     if len(scan_key)>100:
         raise ValueError('Nuclei scan identity is too long.')
-    record=db.query(BackgroundJob).filter(BackgroundJob.job_id==scan_key).first()
+    # Event/finding identities retain the logical scan key; only storage is compact.
+    storage_key=str(uuid5(NAMESPACE_URL,'soc:nuclei-background:'+scan_key))
+    record=db.query(BackgroundJob).filter(BackgroundJob.job_id==storage_key).first()
     if record is not None:
         try:
             stored=json.loads(record.result_json)
@@ -120,10 +123,36 @@ def persist_nuclei_result(db,result,user_id,client_id,job_id=None):
         store_security_event(db,event)
         notifications.append(event)
     db.flush()
-    record=BackgroundJob(job_id=scan_key,tool='Nuclei',target=target,scan_type='http_templates',
+    record=BackgroundJob(job_id=storage_key,tool='Nuclei',target=target,scan_type='http_templates',
         user_id=user_id,status=result['status'],progress=100,stage='Saved',created_at=now,updated_at=now,
         result_json=json.dumps({'scope':scope,'assessment_id':assessment.id,'evidence':json.loads(evidence)},default=str))
     db.add(record)
     db.flush()
     return {'assessment_id':assessment.id,'scan_record_id':record.id,'new_events':len(notifications),
             'finding_count':len(unique),'replayed':False},notifications
+
+
+def load_saved_nuclei_job(db,job_id,user_id,client_id):
+    scope=resolve_scan_event_owner(db,user_id,client_id)
+    storage_key=str(uuid5(NAMESPACE_URL,'soc:nuclei-background:nuclei:'+job_id))
+    record=db.query(BackgroundJob).filter(BackgroundJob.job_id==storage_key,
+        BackgroundJob.user_id==user_id,BackgroundJob.tool=='Nuclei').first()
+    if record is None:
+        return None
+    try:
+        saved=json.loads(record.result_json)
+    except (ValueError,TypeError):
+        return None
+    if saved.get('scope')!=scope or not isinstance(saved.get('evidence'),dict):
+        return None
+    assessment=db.get(Assessment,saved.get('assessment_id'))
+    if assessment is None or assessment.user_id!=user_id:
+        return None
+    result=saved['evidence']
+    result['assessment_id']=assessment.id
+    result['persistence']={'status':'saved','assessment_id':assessment.id,'scan_record_id':record.id,
+                           'finding_count':assessment.vapt_findings_count,'stored':True}
+    return {'job_id':job_id,'tool':'Nuclei','target':record.target,'status':record.status,
+            'progress':100,'stage':'Stored result ready','result':result,'error':record.error,
+            'updated_at':record.updated_at.replace(tzinfo=timezone.utc).timestamp() if record.updated_at else None}
+
