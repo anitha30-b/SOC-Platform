@@ -1,7 +1,9 @@
+
+import { API_BASE_URL as SOC_DEPLOY_API_BASE } from "../deploymentApi.js";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 
-const API = "http://127.0.0.1:8000/assets";
+const API = (SOC_DEPLOY_API_BASE + "/assets");
 
 const EMPTY = {
   name: "",

@@ -1,8 +1,10 @@
+
+import { API_BASE_URL as SOC_DEPLOY_API_BASE } from "../deploymentApi.js";
 import { useCallback, useEffect, useState } from "react";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 
-const API = "http://127.0.0.1:8000";
+const API = SOC_DEPLOY_API_BASE;
 
 const FRAMEWORKS = [
   "All frameworks",

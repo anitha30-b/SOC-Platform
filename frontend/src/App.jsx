@@ -1,3 +1,5 @@
+
+import { API_BASE_URL as SOC_DEPLOY_API_BASE } from "./deploymentApi.js";
 import { useCallback as useAssetLoadCallback } from "react";
 import AccountProfile from "./AccountProfile";
 import AccountNotificationCenter from "./AccountNotificationCenter";
@@ -67,7 +69,7 @@ import AdminComplianceFramework from "./components/AdminComplianceFramework";
 import AdminComplianceReports from "./components/AdminComplianceReports";
 import AdminLicense from "./components/AdminLicense";
 
-const API_URL = "http://127.0.0.1:8000";
+const API_URL = SOC_DEPLOY_API_BASE;
 
 function escapeHtml(value) {
   return String(value ?? "")

@@ -1,6 +1,8 @@
+
+import { API_BASE_URL as SOC_DEPLOY_API_BASE } from "../deploymentApi.js";
 import React, { useEffect, useState } from "react";
 
-const API = "http://127.0.0.1:8000";
+const API = SOC_DEPLOY_API_BASE;
 
 export default function AdminAssetDiscovery({ onBack }) {
   const [target, setTarget] = useState("");

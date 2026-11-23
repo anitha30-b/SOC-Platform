@@ -1,7 +1,9 @@
+
+import { API_BASE_URL as SOC_DEPLOY_API_BASE } from "../deploymentApi.js";
 import { useCallback, useEffect, useState } from "react";
 import axios from "axios";
 
-const API_URL = "http://127.0.0.1:8000";
+const API_URL = SOC_DEPLOY_API_BASE;
 
 export default function AdminAPIHealth({ onBack }) {
   const [data, setData] = useState(null);
