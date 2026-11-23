@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
+import AdminDiscoveredServers from "./AdminDiscoveredServers";
 
 const API = "http://127.0.0.1:8000/assets";
 const emptyForm = {
@@ -138,7 +139,7 @@ export default function AdminAssetInventory({ onBack }) {
   }
 
   const stats = [
-    { label: "TOTAL ASSETS", value: assets.length, mark: "▣" },
+    { label: "REGISTERED ASSETS", value: assets.length, mark: "▣" },
     { label: "ACTIVE ASSETS", value: active, mark: "●" },
     { label: "CRITICAL ASSETS", value: critical, mark: "!" },
     { label: "INACTIVE / OTHER", value: inactive, mark: "◷" },
@@ -174,7 +175,7 @@ export default function AdminAssetInventory({ onBack }) {
               <span className="flex h-8 w-8 items-center justify-center rounded-md border border-red-500/20 bg-red-500/10 text-sm text-red-400">{s.mark}</span>
             </div>
             <div className="mt-4 text-3xl font-bold tabular-nums">{loading ? "—" : s.value}</div>
-            <div className="mt-2 text-[11px] text-gray-600">Database-backed count</div>
+            <div className="mt-2 text-[11px] text-gray-600">Registered inventory count</div>
           </div>
         ))}
       </div>
@@ -237,6 +238,8 @@ export default function AdminAssetInventory({ onBack }) {
           <span>Source: SOC Platform database</span><span>Authorized administrator access</span>
         </div>
       </div>
+
+      <AdminDiscoveredServers apiUrl={`${API}/discovered-servers`} />
 
       {detailsAsset && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm" onClick={() => setDetailsAsset(null)}>

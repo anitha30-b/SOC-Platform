@@ -229,3 +229,8 @@ def check_asset_reachability(
         "checked_at": row.checked_at.isoformat() + "Z",
         "duration_ms": row.duration_ms,
     }
+
+
+# Owned discovery observations share the administrative asset authorization boundary.
+from admin_discovered_servers import router as discovered_servers_router
+router.include_router(discovered_servers_router)
