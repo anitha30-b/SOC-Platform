@@ -186,6 +186,8 @@ async def _run_report(job_id, request, user_id):
         )
 
         db.add(record)
+        # Commit assessment status together with the saved report.
+        assessment.report_status = "completed"
         db.commit()
         db.refresh(record)
 

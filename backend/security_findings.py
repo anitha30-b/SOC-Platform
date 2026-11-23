@@ -1040,35 +1040,13 @@ def get_security_finding_statistics(
 
     total = len(findings)
 
-    critical = sum(
-        1
-        for f in findings
-        if f.severity == "CRITICAL"
-    )
-
-    high = sum(
-        1
-        for f in findings
-        if f.severity == "HIGH"
-    )
-
-    medium = sum(
-        1
-        for f in findings
-        if f.severity == "MEDIUM"
-    )
-
-    low = sum(
-        1
-        for f in findings
-        if f.severity == "LOW"
-    )
-
-    none_count = sum(
-        1
-        for f in findings
-        if f.severity == "NONE"
-    )
+    from finding_severity import severity_counts
+    counts = severity_counts((f.severity, 1) for f in findings)
+    critical = counts["CRITICAL"]
+    high = counts["HIGH"]
+    medium = counts["MEDIUM"]
+    low = counts["LOW"]
+    none_count = counts["NONE"]
 
     level_1 = sum(
         1
@@ -1152,6 +1130,8 @@ def get_security_finding_statistics(
             "medium": medium,
             "low": low,
             "none": none_count,
+            "info": counts["INFO"],
+            "unrated": counts["UNRATED"],
         },
 
         "risk_levels": {
@@ -1322,19 +1302,9 @@ def get_findings_by_severity(
         .all()
     )
 
-    severity_order = [
-        "CRITICAL",
-        "HIGH",
-        "MEDIUM",
-        "LOW",
-        "NONE",
-    ]
-
-    counts = {
-        str(severity).upper(): int(count)
-        for severity, count in rows
-        if severity
-    }
+    from finding_severity import SEVERITIES, severity_counts
+    severity_order = SEVERITIES
+    counts = severity_counts(rows)
 
     return {
         "assessment_id": assessment_id,
