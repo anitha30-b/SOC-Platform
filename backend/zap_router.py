@@ -234,34 +234,8 @@ def get_or_create_assessment(
 
 
 def zap_risk_to_severity(risk: str) -> str:
-
-    risk = (risk or "").upper()
-
-
-
-    if risk == "HIGH":
-
-        return "HIGH"
-
-
-
-    if risk == "MEDIUM":
-
-        return "MEDIUM"
-
-
-
-    if risk == "LOW":
-
-        return "LOW"
-
-
-
-    # ZAP Informational does not have a direct equivalent
-
-    # in the existing SecurityFinding severity model.
-
-    return "LOW"
+    from finding_severity import normalize_severity
+    return normalize_severity(risk)
 
 
 
@@ -327,373 +301,62 @@ def alert_identity(alert: dict) -> str:
 
 
 
-def sync_zap_findings(
-
-    db: Session,
-
-    current_user: User,
-
-    assessment: Assessment,
-
-    alerts: list[dict],
-
-) -> list[SecurityFinding]:
-
-
-
+def sync_zap_findings(db: Session, current_user: User, assessment: Assessment, alerts: list[dict]) -> list[SecurityFinding]:
+    if assessment.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail='Assessment owner mismatch')
+    if not isinstance(alerts, list) or any((not isinstance(alert, dict) for alert in alerts)):
+        raise ValueError('Invalid ZAP alerts')
     seed_security_tools(db)
-
-
-
-    tool = (
-
-        db.query(SecurityTool)
-
-        .filter(
-
-            SecurityTool.name == "OWASP ZAP"
-
-        )
-
-        .first()
-
-    )
-
-
-
+    tool = db.query(SecurityTool).filter(SecurityTool.name == 'OWASP ZAP').first()
     if tool is None:
-
-        raise HTTPException(
-
-            status_code=500,
-
-            detail="OWASP ZAP is not registered in the security tool catalog",
-
-        )
-
-
-
+        raise HTTPException(status_code=500, detail='OWASP ZAP is not registered in the security tool catalog')
     created_or_existing: list[SecurityFinding] = []
-
-
-
     for alert in alerts:
-
-        # ZAP Informational alerts are useful in raw scan results,
-        # but they are not vulnerability findings and must not affect
-        # SecurityFinding severity/risk/report statistics.
-        zap_risk = (alert.get("risk") or "").strip().upper()
-        if zap_risk == "INFORMATIONAL":
-            continue
-
-        title = (
-
-            alert.get("alert")
-
-            or alert.get("name")
-
-            or "OWASP ZAP Finding"
-
-        )
-
-
-
-        affected_url = alert.get("url")
-
-        parameter = alert.get("param") or None
-
-        evidence = alert.get("evidence") or None
-
-        description = alert.get("description") or None
-
-        remediation = alert.get("solution") or None
-
-        references = alert.get("reference") or None
-
-
-
-        cwe_id = alert.get("cweid")
-
-        if cwe_id in {None, "", "-1"}:
-
+        zap_risk = (alert.get('risk') or '').strip().upper()
+        title = alert.get('alert') or alert.get('name') or 'OWASP ZAP Finding'
+        affected_url = alert.get('url')
+        parameter = alert.get('param') or None
+        evidence = alert.get('evidence') or None
+        description = alert.get('description') or None
+        remediation = alert.get('solution') or None
+        references = alert.get('reference') or None
+        cwe_id = alert.get('cweid')
+        if cwe_id in {None, '', '-1'}:
             cwe_id = None
-
-        elif not str(cwe_id).upper().startswith("CWE-"):
-
-            cwe_id = f"CWE-{cwe_id}"
-
-
-
+        elif not str(cwe_id).upper().startswith('CWE-'):
+            cwe_id = f'CWE-{cwe_id}'
         owasp_category = zap_owasp_category(alert)
-
-
-
-        severity = zap_risk_to_severity(
-
-            alert.get("risk")
-
-        )
-
-
-
-        risk_level = calculate_risk_level(
-
-            severity
-
-        )
-
-
-
-        # Prevent duplicate ZAP findings when the
-
-        # results endpoint is requested more than once.
-
-        existing_findings = (
-
-            db.query(SecurityFinding)
-
-            .filter(
-
-                SecurityFinding.assessment_id
-
-                == assessment.id,
-
-
-
-                SecurityFinding.user_id
-
-                == current_user.id,
-
-
-
-                SecurityFinding.tool_name
-
-                == tool.name,
-
-
-
-                SecurityFinding.title
-
-                == title,
-
-
-
-                SecurityFinding.affected_url
-
-                == affected_url,
-
-
-
-                SecurityFinding.parameter
-
-                == parameter,
-
-            )
-
-            .all()
-
-        )
-
-
-
+        severity = zap_risk_to_severity(alert.get('risk'))
+        risk_level = 'UNRATED' if severity == 'UNRATED' else calculate_risk_level(severity)
+        existing_findings = db.query(SecurityFinding).filter(SecurityFinding.assessment_id == assessment.id, SecurityFinding.user_id == current_user.id, SecurityFinding.tool_name == tool.name, SecurityFinding.title == title, SecurityFinding.affected_url == affected_url, SecurityFinding.parameter == parameter).all()
         existing = None
-
-
-
         for item in existing_findings:
-
-            if (
-
-                (item.evidence or "")
-
-                == (evidence or "")
-
-            ):
-
+            if (item.evidence or '') == (evidence or ''):
                 existing = item
-
                 break
-
-
-
         now = datetime.utcnow()
-
-
-
         if existing:
-
             existing.description = description
-
             existing.cwe_id = cwe_id
-
             existing.severity = severity
-
             existing.risk_level = risk_level
-
             existing.owasp_category = owasp_category
-
             existing.evidence = evidence
-
             existing.remediation = remediation
-
             existing.references = references
-
             existing.updated_at = now
-
-
-
             created_or_existing.append(existing)
-
             continue
-
-
-
-        finding = SecurityFinding(
-
-            finding_id=generate_finding_id(db),
-
-
-
-            user_id=current_user.id,
-
-            assessment_id=assessment.id,
-
-
-
-            tool_name=tool.name,
-
-            tool_category=(
-
-                tool.category
-
-                or "Web Application Security"
-
-            ),
-
-
-
-            title=title,
-
-            vulnerability=title,
-
-            description=description,
-
-
-
-            owasp_category=owasp_category,
-
-            owasp_api_category=None,
-
-
-
-            cve_id=None,
-
-            cwe_id=cwe_id,
-
-
-
-            cvss_score=None,
-
-            severity=severity,
-
-            risk_level=risk_level,
-
-
-
-            affected_asset=affected_url,
-
-            affected_url=affected_url,
-
-
-
-            endpoint=affected_url,
-
-            parameter=parameter,
-
-
-
-            evidence=evidence,
-
-            request_data=None,
-
-            response_data=None,
-
-
-
-            impact=(
-
-                f"ZAP risk: {alert.get('risk')}"
-
-                if alert.get("risk")
-
-                else None
-
-            ),
-
-
-
-            remediation=remediation,
-
-            references=references,
-
-
-
-            status="OPEN",
-
-
-
-            detected_at=now,
-
-            created_at=now,
-
-            updated_at=now,
-
-        )
-
-
-
+        finding = SecurityFinding(finding_id=generate_finding_id(db), user_id=current_user.id, assessment_id=assessment.id, tool_name=tool.name, tool_category=tool.category or 'Web Application Security', title=title, vulnerability=title, description=description, owasp_category=owasp_category, owasp_api_category=None, cve_id=None, cwe_id=cwe_id, cvss_score=None, severity=severity, risk_level=risk_level, affected_asset=affected_url, affected_url=affected_url, endpoint=affected_url, parameter=parameter, evidence=evidence, request_data=None, response_data=None, impact=f"ZAP risk: {alert.get('risk')}" if alert.get('risk') else None, remediation=remediation, references=references, status='OPEN', detected_at=now, created_at=now, updated_at=now)
         db.add(finding)
-
         db.flush()
-
-
-
         created_or_existing.append(finding)
-
-
-
-    assessment.vapt_status = "completed"
-
-    assessment.vapt_findings_count = (
-
-        db.query(SecurityFinding)
-
-        .filter(
-
-            SecurityFinding.assessment_id
-
-            == assessment.id
-
-        )
-
-        .count()
-
-    )
-
-    assessment.overall_status = "active"
-
-
-
+    assessment.vapt_status = 'completed'
+    assessment.vapt_findings_count = db.query(SecurityFinding).filter(SecurityFinding.assessment_id == assessment.id).count()
+    assessment.overall_status = 'active'
     db.commit()
-
-
-
     for finding in created_or_existing:
-
         db.refresh(finding)
-
-
-
     return created_or_existing
 
 
@@ -702,41 +365,12 @@ def sync_zap_findings(
 
 @router.get("/status")
 
-async def zap_status():
-
+async def zap_status(current_user: User=Depends(require_role(1))):
     try:
-
-        version = await zap_get(
-
-            "/JSON/core/view/version/"
-
-        )
-
-
-
-        return {
-
-            "status": "running",
-
-            "version": version.get("version"),
-
-            "url": ZAP_URL,
-
-        }
-
-
-
-    except Exception as exc:
-
-        return {
-
-            "status": "offline",
-
-            "url": ZAP_URL,
-
-            "error": str(exc),
-
-        }
+        version = await zap_get('/JSON/core/view/version/')
+        return {'status': 'running', 'version': version.get('version'), 'url': ZAP_URL}
+    except Exception:
+        return {'status': 'offline', 'url': ZAP_URL, 'error': 'Unable to reach the configured ZAP service'}
 
 
 
@@ -752,167 +386,22 @@ async def zap_status():
 
 @router.post("/scan")
 
-async def start_zap_scan(
-
-    request: ZapScanRequest,
-
-    current_user: User = Depends(
-
-        require_role(1)
-
-    ),
-
-    db: Session = Depends(get_db),
-
-):
-
-    target = validate_target(
-
-        request.target
-
-    )
-
-
-
+async def start_zap_scan(request: ZapScanRequest, current_user: User=Depends(require_role(1)), db: Session=Depends(get_db)):
+    _check_zap_start_permission(db, current_user)
+    target = validate_target(request.target)
     try:
-
-        # ----------------------------------------------------
-
-        # 1. Access the target through ZAP.
-
-        # This puts the target into ZAP's Sites Tree.
-
-        # ----------------------------------------------------
-
-
-
-        access_result = await zap_get(
-
-            "/JSON/core/action/accessUrl/",
-
-            {
-
-                "url": target,
-
-                "followRedirects": str(request.followRedirects).lower(),
-
-            },
-
-        )
-
-
-
-        # ----------------------------------------------------
-
-        # 2. Start the active scan.
-
-        # ----------------------------------------------------
-
-
-
-        scan_result = await zap_get(
-
-            "/JSON/ascan/action/scan/",
-
-            {
-
-                "url": target,
-
-                "recurse": str(request.recurse).lower(),
-                "inScopeOnly": str(request.inScopeOnly).lower(),
-                "scanPolicyName": request.scanPolicyName or "Dev CICD",
-
-            },
-
-        )
-
-
-
-        scan_id = scan_result.get("scan")
-
-
-
+        access_result = await zap_get('/JSON/core/action/accessUrl/', {'url': target, 'followRedirects': str(request.followRedirects).lower()})
+        scan_result = await zap_get('/JSON/ascan/action/scan/', {'url': target, 'recurse': str(request.recurse).lower(), 'inScopeOnly': str(request.inScopeOnly).lower(), 'scanPolicyName': request.scanPolicyName or 'Dev CICD'})
+        scan_id = scan_result.get('scan')
         if scan_id is None:
-
-            raise HTTPException(
-
-                status_code=502,
-
-                detail={
-
-                    "message": "ZAP did not return a scan ID",
-
-                    "zap_response": scan_result,
-
-                },
-
-            )
-
-
-
-        assessment = get_or_create_assessment(
-
-            db,
-
-            current_user,
-
-            target,
-
-        )
-
-
-
-        ZAP_JOBS[str(scan_id)] = {
-
-            "scan_id": str(scan_id),
-
-            "target": target,
-
-            "user_id": current_user.id,
-
-            "assessment_id": assessment.id,
-
-            "status": "running",
-
-            "access_result": access_result,
-
-            "created_at": datetime.utcnow().isoformat(),
-
-            "results_synced": False,
-
-        }
-
-
-
-        return {
-
-            "status": "started",
-
-            "target": target,
-
-            "scan_id": str(scan_id),
-
-            "assessment_id": assessment.id,
-
-        }
-
-
-
+            raise HTTPException(status_code=502, detail='ZAP did not return a scan ID')
+        assessment = get_or_create_assessment(db, current_user, target)
+        ZAP_JOBS[str(scan_id)] = {'scan_id': str(scan_id), 'target': target, 'user_id': current_user.id, 'client_id': current_user.client_id, 'assessment_id': assessment.id, 'status': 'running', 'access_result': access_result, 'created_at': datetime.utcnow().isoformat(), 'results_synced': False}
+        return {'status': 'started', 'target': target, 'scan_id': str(scan_id), 'assessment_id': assessment.id}
     except HTTPException:
-
         raise
-
-
-
-    except Exception as exc:
-
-        raise HTTPException(
-
-            status_code=502,
-
-            detail=f"Unable to start ZAP scan: {exc}",
-
-        )
+    except Exception:
+        raise HTTPException(status_code=502, detail='Unable to start ZAP scan')
 
 
 
@@ -932,99 +421,17 @@ async def start_zap_scan(
 
 )
 
-async def zap_scan_progress(
-
-    scan_id: str,
-
-    current_user: User = Depends(
-
-        require_role(1)
-
-    ),
-
-):
-
-    job = ZAP_JOBS.get(str(scan_id))
-
-
-
-    if job and job["user_id"] != current_user.id:
-
-        raise HTTPException(
-
-            status_code=403,
-
-            detail="You do not have access to this ZAP scan",
-
-        )
-
-
-
+async def zap_scan_progress(scan_id: str, current_user: User=Depends(require_role(1))):
+    job = _owned_zap_job(scan_id, current_user)
     try:
-
-        result = await zap_get(
-
-            "/JSON/ascan/view/status/",
-
-            {
-
-                "scanId": scan_id,
-
-            },
-
-        )
-
-
-
-        status = int(
-
-            result.get("status", 0)
-
-        )
-
-
-
-        if job:
-
-            if status >= 100:
-
-                job["status"] = "completed"
-
-            else:
-
-                job["status"] = "running"
-
-
-
-        return {
-
-            "scan_id": str(scan_id),
-
-            "status": status,
-
-            "state": (
-
-                "completed"
-
-                if status >= 100
-
-                else "running"
-
-            ),
-
-        }
-
-
-
-    except Exception as exc:
-
-        raise HTTPException(
-
-            status_code=502,
-
-            detail=f"Unable to read ZAP scan progress: {exc}",
-
-        )
+        result = await zap_get('/JSON/ascan/view/status/', {'scanId': scan_id})
+        progress = int(result['status'])
+        if not 0 <= progress <= 100:
+            raise ValueError('Invalid ZAP progress')
+        job['status'] = 'completed' if progress == 100 else 'running'
+        return {'scan_id': str(scan_id), 'status': progress, 'state': job['status']}
+    except Exception:
+        raise HTTPException(status_code=502, detail='Unable to read valid ZAP scan progress')
 
 
 
@@ -1038,36 +445,17 @@ async def zap_scan_progress(
 
 
 @router.post("/scan/{scan_id}/cancel")
-async def cancel_zap_scan(
-    scan_id: str,
-    current_user: User = Depends(require_role(1)),
-):
-    job = ZAP_JOBS.get(str(scan_id))
-
-    if job and job["user_id"] != current_user.id:
-        raise HTTPException(
-            status_code=403,
-            detail="You do not have access to this ZAP scan",
-        )
-
+async def cancel_zap_scan(scan_id: str, current_user: User=Depends(require_role(1))):
+    job = _owned_zap_job(scan_id, current_user)
     try:
-        result = await zap_get(
-            "/JSON/ascan/action/stop/",
-            {"scanId": scan_id},
-        )
-        if job:
-            job["status"] = "cancelled"
-            job["cancelled_at"] = datetime.utcnow().isoformat()
-        return {
-            "status": "cancelled",
-            "scan_id": str(scan_id),
-            "zap_response": result,
-        }
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Unable to cancel ZAP scan: {exc}",
-        )
+        result = await zap_get('/JSON/ascan/action/stop/', {'scanId': scan_id})
+        if result.get('Result') != 'OK':
+            raise ValueError('ZAP did not confirm cancellation')
+        job['status'] = 'cancelled'
+        job['cancelled_at'] = datetime.utcnow().isoformat()
+        return {'status': 'cancelled', 'scan_id': str(scan_id), 'zap_response': result}
+    except Exception:
+        raise HTTPException(status_code=502, detail='Unable to confirm ZAP scan cancellation')
 
 
 # SCAN RESULTS + SECURITY FINDING SYNC
@@ -1082,255 +470,29 @@ async def cancel_zap_scan(
 
 )
 
-async def zap_scan_results(
-
-    scan_id: str,
-
-    current_user: User = Depends(
-
-        require_role(1)
-
-    ),
-
-    db: Session = Depends(get_db),
-
-):
-
-    job = ZAP_JOBS.get(str(scan_id))
-
-
-
-    if not job:
-
-        raise HTTPException(
-
-            status_code=404,
-
-            detail=(
-
-                "ZAP scan was not found in the "
-
-                "current backend session"
-
-            ),
-
-        )
-
-
-
-    if job["user_id"] != current_user.id:
-
-        raise HTTPException(
-
-            status_code=403,
-
-            detail="You do not have access to this ZAP scan",
-
-        )
-
-
-
+async def zap_scan_results(scan_id: str, current_user: User=Depends(require_role(1)), db: Session=Depends(get_db)):
+    job = _owned_zap_job(scan_id, current_user)
     try:
-
-        progress = await zap_get(
-
-            "/JSON/ascan/view/status/",
-
-            {
-
-                "scanId": scan_id,
-
-            },
-
-        )
-
-
-
-        status = int(
-
-            progress.get("status", 0)
-
-        )
-
-
-
+        progress = await zap_get('/JSON/ascan/view/status/', {'scanId': scan_id})
+        status = int(progress['status'])
+        if not 0 <= status <= 100:
+            raise ValueError('Invalid ZAP progress')
         if status < 100:
-
-            return {
-
-                "status": "running",
-
-                "scan_id": str(scan_id),
-
-                "progress": status,
-
-                "target": job["target"],
-
-                "alerts": [],
-
-            }
-
-
-
-        alert_result = await zap_get(
-
-            "/JSON/core/view/alerts/",
-
-            {
-
-                "start": "0",
-
-                "count": "9999",
-
-                "baseurl": job["target"],
-
-            },
-
-        )
-
-
-
-        alerts = alert_result.get(
-
-            "alerts",
-
-            [],
-
-        )
-
-
-
-        assessment = (
-
-            db.query(Assessment)
-
-            .filter(
-
-                Assessment.id
-
-                == job["assessment_id"],
-
-
-
-                Assessment.user_id
-
-                == current_user.id,
-
-            )
-
-            .first()
-
-        )
-
-
-
+            return {'status': 'running', 'scan_id': str(scan_id), 'progress': status, 'target': job['target'], 'alerts': []}
+        alerts = await _zap_scan_alerts(scan_id)
+        assessment = db.query(Assessment).filter(Assessment.id == job['assessment_id'], Assessment.user_id == current_user.id).first()
         if not assessment:
-
-            raise HTTPException(
-
-                status_code=404,
-
-                detail="ZAP assessment not found",
-
-            )
-
-
-
-        findings = sync_zap_findings(
-
-            db,
-
-            current_user,
-
-            assessment,
-
-            alerts,
-
-        )
-
-
-
-        job["status"] = "completed"
-
-        job["results_synced"] = True
-
-
-
-        return {
-
-            "status": "completed",
-
-            "scan_id": str(scan_id),
-
-            "target": job["target"],
-
-            "assessment_id": assessment.id,
-
-            "progress": 100,
-
-            "total_alerts": len(alerts),
-
-            "total_findings": len(findings),
-
-            "alerts": alerts,
-
-            "findings": [
-
-                {
-
-                    "id": finding.id,
-
-                    "finding_id": finding.finding_id,
-
-                    "title": finding.title,
-
-                    "severity": finding.severity,
-
-                    "risk_level": finding.risk_level,
-
-                    "tool_name": finding.tool_name,
-
-                    "cwe_id": finding.cwe_id,
-
-                    "affected_url": finding.affected_url,
-
-                    "parameter": finding.parameter,
-
-                    "evidence": finding.evidence,
-
-                    "description": finding.description,
-
-                    "remediation": finding.remediation,
-
-                    "owasp_category": finding.owasp_category,
-
-                    "status": finding.status,
-
-                }
-
-                for finding in findings
-
-            ],
-
-        }
-
-
-
+            raise HTTPException(status_code=404, detail='ZAP assessment not found')
+        findings = sync_zap_findings(db, current_user, assessment, alerts)
+        job['status'] = 'completed'
+        job['results_synced'] = True
+        return {'status': 'completed', 'scan_id': str(scan_id), 'target': job['target'], 'assessment_id': assessment.id, 'progress': 100, 'total_alerts': len(alerts), 'total_findings': len(findings), 'alerts': alerts, 'findings': [{'id': finding.id, 'finding_id': finding.finding_id, 'title': finding.title, 'severity': finding.severity, 'risk_level': finding.risk_level, 'tool_name': finding.tool_name, 'cwe_id': finding.cwe_id, 'affected_url': finding.affected_url, 'parameter': finding.parameter, 'evidence': finding.evidence, 'description': finding.description, 'remediation': finding.remediation, 'owasp_category': finding.owasp_category, 'status': finding.status} for finding in findings]}
     except HTTPException:
-
         raise
-
-
-
-    except Exception as exc:
-
-        raise HTTPException(
-
-            status_code=502,
-
-            detail=f"Unable to retrieve ZAP results: {exc}",
-
-        )
+    except Exception:
+        db.rollback()
+        job['status'] = 'completed_with_errors'
+        raise HTTPException(status_code=502, detail='Unable to retrieve or save valid ZAP results')
 
 
 
@@ -1346,63 +508,8 @@ async def zap_scan_results(
 
 @router.post("/active-scan")
 
-async def start_zap_active_scan(
-
-    request: ZapScanRequest,
-
-):
-
-    target = validate_target(
-
-        request.target
-
-    )
-
-
-
-    try:
-
-        result = await zap_get(
-
-            "/JSON/ascan/action/scan/",
-
-            {
-
-                "url": target,
-
-                "recurse": "true",
-
-                "inScopeOnly": "false",
-
-                "scanPolicyName": "Dev CICD",
-
-            },
-
-        )
-
-
-
-        return {
-
-            "status": "started",
-
-            "target": target,
-
-            "scan_id": result.get("scan"),
-
-        }
-
-
-
-    except Exception as exc:
-
-        raise HTTPException(
-
-            status_code=502,
-
-            detail=f"Unable to start ZAP active scan: {exc}",
-
-        )
+async def start_zap_active_scan(request: ZapScanRequest, current_user: User=Depends(require_role(1)), db: Session=Depends(get_db)):
+    return await start_zap_scan(request, current_user, db)
 
 
 
@@ -1414,23 +521,8 @@ async def start_zap_active_scan(
 
 )
 
-async def zap_active_progress(
-
-    scan_id: str,
-
-):
-
-    return await zap_get(
-
-        "/JSON/ascan/view/status/",
-
-        {
-
-            "scanId": scan_id,
-
-        },
-
-    )
+async def zap_active_progress(scan_id: str, current_user: User=Depends(require_role(1))):
+    return await zap_scan_progress(scan_id, current_user)
 
 
 
@@ -1438,35 +530,14 @@ async def zap_active_progress(
 
 @router.get("/alerts")
 
-async def zap_alerts(
-
-    target: str | None = None,
-
-):
-
-    params = {
-
-        "start": "0",
-
-        "count": "9999",
-
-    }
-
-
-
-    if target:
-
-        params["baseurl"] = target
-
-
-
-    return await zap_get(
-
-        "/JSON/core/view/alerts/",
-
-        params,
-
-    )
+async def zap_alerts(target: str | None=None, scan_id: str | None=None, current_user: User=Depends(require_role(1)), db: Session=Depends(get_db)):
+    if not scan_id:
+        raise HTTPException(status_code=400, detail='An owned scan_id is required')
+    job = _owned_zap_job(scan_id, current_user)
+    if target is not None and validate_target(target) != job['target']:
+        raise HTTPException(status_code=400, detail='Target does not match the owned ZAP scan')
+    result = await zap_scan_results(scan_id, current_user, db)
+    return {'alerts': result.get('alerts', []), 'status': result.get('status'), 'scan_id': str(scan_id)}
 
 
 
@@ -1478,23 +549,8 @@ async def zap_alerts(
 
 )
 
-async def stop_zap_active_scan(
-
-    scan_id: str,
-
-):
-
-    return await zap_get(
-
-        "/JSON/ascan/action/stop/",
-
-        {
-
-            "scanId": scan_id,
-
-        },
-
-    )
+async def stop_zap_active_scan(scan_id: str, current_user: User=Depends(require_role(1))):
+    return await cancel_zap_scan(scan_id, current_user)
 
 
 
@@ -1506,78 +562,65 @@ async def stop_zap_active_scan(
 
 @router.post("/spider")
 
-async def start_zap_spider(
-
-    request: ZapScanRequest,
-
-):
-
-    target = validate_target(
-
-        request.target
-
-    )
-
-
-
+async def start_zap_spider(request: ZapScanRequest, current_user: User=Depends(require_role(1)), db: Session=Depends(get_db)):
+    _check_zap_start_permission(db, current_user)
+    target = validate_target(request.target)
     try:
-
-        result = await zap_get(
-
-            "/JSON/spider/action/scan/",
-
-            {
-
-                "url": target,
-
-                "recurse": "true",
-
-            },
-
-        )
-
-
-
-        return {
-
-            "status": "started",
-
-            "target": target,
-
-            "spider_id": result.get("scan"),
-
-        }
-
-
-
-    except Exception as exc:
-        raise HTTPException(
-
-            status_code=502,
-
-            detail=f"Unable to start ZAP spider: {exc}",
-
-        )
+        result = await zap_get('/JSON/spider/action/scan/', {'url': target, 'recurse': str(request.recurse).lower()})
+        scan_id = result.get('scan')
+        if scan_id is None:
+            raise ValueError('Missing spider ID')
+        ZAP_SPIDER_JOBS[str(scan_id)] = {'scan_id': str(scan_id), 'target': target, 'user_id': current_user.id, 'client_id': current_user.client_id, 'status': 'running'}
+        return {'status': 'started', 'target': target, 'spider_id': str(scan_id)}
+    except Exception:
+        raise HTTPException(status_code=502, detail='Unable to start ZAP spider')
 @router.get(
 
     "/spider/{scan_id}/progress"
 
 )
 
-async def zap_spider_progress(
+async def zap_spider_progress(scan_id: str, current_user: User=Depends(require_role(1))):
+    job = _owned_zap_job(scan_id, current_user, spider=True)
+    try:
+        result = await zap_get('/JSON/spider/view/status/', {'scanId': scan_id})
+        progress = int(result['status'])
+        if not 0 <= progress <= 100:
+            raise ValueError('Invalid spider progress')
+        job['status'] = 'completed' if progress == 100 else 'running'
+        return {'status': progress, 'scan_id': str(scan_id)}
+    except Exception:
+        raise HTTPException(status_code=502, detail='Unable to read valid ZAP spider progress')
 
-    scan_id: str,
 
-):
+ZAP_SPIDER_JOBS = {}
 
-    return await zap_get(
 
-        "/JSON/spider/view/status/",
+def _check_zap_start_permission(db, current_user):
+    from vapt import require_user_tool_permission
+    require_user_tool_permission(db, current_user, 'OWASP ZAP')
 
-        {
+def _owned_zap_job(scan_id, current_user, spider=False):
+    jobs = ZAP_SPIDER_JOBS if spider else ZAP_JOBS
+    job = jobs.get(str(scan_id))
+    if not isinstance(job, dict):
+        raise HTTPException(status_code=404, detail='ZAP scan not found')
+    if job.get('user_id') != current_user.id:
+        raise HTTPException(status_code=403, detail='You do not have access to this ZAP scan')
+    if 'client_id' not in job or job['client_id'] != current_user.client_id:
+        raise HTTPException(status_code=404, detail='ZAP scan not found in the current customer scope')
+    return job
 
-            "scanId": scan_id,
-
-        },
-
-    )
+async def _zap_scan_alerts(scan_id):
+    response = await zap_get('/JSON/ascan/view/alertsIds/', {'scanId': str(scan_id)})
+    ids = response.get('alertsIds')
+    if not isinstance(ids, list) or any((isinstance(value, bool) or not str(value).isdigit() for value in ids)):
+        raise ValueError('ZAP did not return a valid scan-specific alert list')
+    alerts = []
+    for ident in dict.fromkeys((str(value) for value in ids)):
+        response = await zap_get('/JSON/core/view/alert/', {'id': ident})
+        alert = response.get('alert')
+        if not isinstance(alert, dict) or str(alert.get('id')) != ident or (not isinstance(alert.get('url'), str)) or (not alert['url']) or (not (alert.get('name') or alert.get('alert'))):
+            raise ValueError('ZAP returned invalid scan-specific alert evidence')
+        alerts.append(alert)
+    return alerts
