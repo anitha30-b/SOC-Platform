@@ -18,6 +18,7 @@ from models import (
     VAPTReportRun,
 )
 from rbac import require_role
+from report_snapshot_integrity import validate_report_snapshot, canonical_report_cvss
 
 
 router = APIRouter(
@@ -57,6 +58,8 @@ def _serialize(record):
 
 
 def _canonical_data(assessment, risk_run, findings):
+    validate_report_snapshot(risk_run, findings)
+    cvss = canonical_report_cvss(findings)
     return {
         "report_metadata": {
             "generated_at": datetime.utcnow().isoformat(),
@@ -68,8 +71,8 @@ def _canonical_data(assessment, risk_run, findings):
             "assessment_run_id": risk_run.assessment_run_id,
             "status": risk_run.status,
             "total_findings": risk_run.total_findings,
-            "average_cvss": risk_run.average_cvss,
-            "highest_cvss": risk_run.highest_cvss,
+            "average_cvss": cvss["average"],
+            "highest_cvss": cvss["highest"],
             "overall_risk": risk_run.overall_risk,
             "severity": json.loads(risk_run.severity_summary or "{}"),
             "risk_levels": json.loads(risk_run.risk_level_summary or "{}"),
