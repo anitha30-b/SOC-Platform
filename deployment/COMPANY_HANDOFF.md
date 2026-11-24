@@ -119,3 +119,8 @@ Use --postgres-bin /path/to/postgresql/bin if initdb/pg_ctl are not on PATH.
 The check runs full API import, schema bootstrap/idempotency, ASGI startup and
 shutdown, disabled-service guards, and a real loopback Uvicorn HTTP server. It
 creates/stops its own temporary database and never uses a company .env.
+
+The disposable startup verifier uses authenticated loopback TCP and disables
+Unix sockets, so it does not need write permission to the system PostgreSQL
+socket directory. A failed check preserves redacted PostgreSQL/API logs under
+.backups (or --diagnostics-dir) before deleting its temporary cluster.

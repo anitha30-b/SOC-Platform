@@ -20,6 +20,29 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def configure_private_cluster(data):
+    # All test connections use authenticated loopback TCP. Avoid the package's
+    # Unix socket directory, which may be writable only by the postgres user.
+    with (data / "postgresql.conf").open("a", encoding="utf-8") as handle:
+        handle.write("\n# Disposable SOC startup verification only.\n")
+        handle.write("unix_socket_directories = ''\n")
+
+
+def preserve_logs(paths, secret, destination):
+    destination.mkdir(parents=True, mode=0o700, exist_ok=True)
+    for label, path in paths:
+        if not path.is_file():
+            continue
+        with path.open("rb") as handle:
+            handle.seek(max(0, path.stat().st_size - 65536))
+            content = handle.read().decode("utf-8", errors="replace").replace(secret, "[test-secret]")
+        target = destination / (label + ".log")
+        target.write_text(content, encoding="utf-8")
+        target.chmod(0o600)
+        print(f"--- {label} diagnostic log ---\n{content}", file=sys.stderr, flush=True)
+    print("STARTUP_DIAGNOSTICS:", destination, file=sys.stderr, flush=True)
+
+
 def available_port():
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -29,6 +52,7 @@ def available_port():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--postgres-bin", type=Path, help="Directory containing initdb and pg_ctl")
+    parser.add_argument("--diagnostics-dir", type=Path, help="Preserve redacted failure logs outside the temporary cluster")
     args = parser.parse_args()
     suffix = ".exe" if os.name == "nt" else ""
     binary = args.postgres_bin.resolve() if args.postgres_bin else None
@@ -68,6 +92,8 @@ def main():
         password_file.write_text(password + "\n", encoding="utf-8")
         password_file.chmod(0o600)
         pg_port, api_port = available_port(), available_port()
+        while api_port == pg_port:
+            api_port = available_port()
         pg_started = False
         api = None
         pg_log = temp / "postgres.log"
@@ -83,6 +109,7 @@ def main():
                 "--encoding=UTF8", "--locale=C", "--auth-local=scram-sha-256",
                 "--auth-host=scram-sha-256", "--pwfile=" + str(password_file),
             ], env=env, check=True, stdout=None, stderr=subprocess.STDOUT, timeout=180)
+            configure_private_cluster(data)
             subprocess.run([
                 str(binary / ("pg_ctl" + suffix)), "-D", str(data), "-l", str(pg_log),
                 "-o", f"-h 127.0.0.1 -p {pg_port} -F", "-w", "-t", "30", "start",
@@ -116,8 +143,10 @@ def main():
                 print("UVICORN_REAL_HTTP_STARTUP: PASS", flush=True)
                 print("FIREWALL_COLLECTORS_AND_MONITORING_DISABLED: PASS", flush=True)
         except Exception:
-            if api_log.is_file():
-                print(api_log.read_text(encoding="utf-8", errors="replace").replace(password, "[test-secret]"), file=sys.stderr)
+            destination = args.diagnostics_dir or (
+                ROOT / ".backups" / f"startup_diagnostics_{time.time_ns()}"
+            )
+            preserve_logs((("postgres", pg_log), ("api", api_log)), password, destination)
             raise
         finally:
             if api is not None and api.poll() is None:
