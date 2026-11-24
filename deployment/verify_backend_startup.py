@@ -116,7 +116,7 @@ def main():
             ], env=env, check=True, stdout=None, stderr=subprocess.STDOUT, timeout=45)
             pg_started = True
             print("Disposable PostgreSQL cluster ready; running startup regressions...", flush=True)
-            for name in ("startup_controls_regression.py", "backend_startup_regression.py"):
+            for name in ("database_driver_regression.py", "startup_controls_regression.py", "backend_startup_regression.py"):
                 subprocess.run([sys.executable, str(ROOT / "backend/tests" / name)], env=env, cwd=ROOT, check=True, timeout=180)
             env.pop("SOC_STARTUP_TEST_DATABASE_URL")
             with api_log.open("w", encoding="utf-8") as log:

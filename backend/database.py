@@ -3,6 +3,7 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
+from database_urls import psycopg2_url, sqlalchemy_url
 
 
 # Load variables from .env
@@ -16,9 +17,15 @@ if not DATABASE_URL:
     raise ValueError("DATABASE_URL is not set in the .env file")
 
 
+# Pin ORM selection explicitly; leave a libpq-compatible URL for the existing
+# psycopg2 notification publishers/listeners that import DATABASE_URL.
+SQLALCHEMY_DATABASE_URL = sqlalchemy_url(DATABASE_URL)
+DATABASE_URL = psycopg2_url(DATABASE_URL)
+
+
 # Create database engine
 engine = create_engine(
-    DATABASE_URL,
+    SQLALCHEMY_DATABASE_URL,
     pool_pre_ping=True
 )
 

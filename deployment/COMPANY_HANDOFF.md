@@ -103,9 +103,11 @@ HTTP APIs work, but PostgreSQL-driven live push is unavailable. Monitoring and
 collector panels need their corresponding services enabled for new observations.
 The API does not need root simply to serve dashboards.
 
-For live PostgreSQL listeners, DATABASE_URL must also be accepted by psycopg2
-(e.g. postgresql://... rather than a SQLAlchemy-only driver-qualified URL).
-Use one worker. Host collectors require their own approved OS privileges and
+Both postgresql://... and postgresql+psycopg2://... are supported. The ORM
+explicitly selects the installed psycopg2 driver, including under SQLAlchemy 2.1.
+The database module supplies libpq-compatible URLs to notification listeners,
+preserving encoded credentials and connection options. The private environment
+file is not rewritten. Use one worker. Host collectors require their own approved OS privileges and
 shutdown terminates only child processes owned by this API instance.
 
 For clean startup verification, create a new virtual environment, install the
