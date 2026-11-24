@@ -7,6 +7,7 @@ from platform_config_router import router as platform_config_router
 from security_posture_router import router as security_posture_router
 from risk_overview_router import router as risk_overview_router
 import asyncio
+from contextlib import asynccontextmanager
 from network_realtime_router import router as network_realtime_router
 from credential_realtime_router import router as credential_realtime_router
 from metasploit_realtime_router import router as metasploit_realtime_router
@@ -108,19 +109,36 @@ from agent_health_router import SecurityAgent
 from agent_health_router import router as agent_health_router
 from background_jobs_router import router as background_jobs_router
 
-Base.metadata.create_all(bind=engine)
-with engine.begin() as connection:
-    from sqlalchemy import text
-    connection.execute(text(
-        "ALTER TABLE soc_assets ADD COLUMN IF NOT EXISTS url VARCHAR(2048)"
-    ))
+from startup_settings import StartupSettings
+from schema_initialization import initialize_database, verify_database_schema
+
+# dotenv is loaded by database/security before these controls are evaluated.
+# Shared-server defaults leave DDL, host operations and listeners disabled.
+STARTUP_SETTINGS = StartupSettings.from_environment()
 
 
 # ============================================================
 # FASTAPI APPLICATION
 # ============================================================
 
+@asynccontextmanager
+async def application_lifespan(app):
+    prepare_database()
+    try:
+        await start_siem_ingestion()
+        await start_snort_journal_listener()
+        start_postgres_event_listener()
+        await start_server_monitor()
+        yield
+    finally:
+        await stop_server_monitor()
+        await stop_snort_journal_listener()
+        await stop_siem_ingestion()
+        stop_postgres_event_listener()
+
+
 app = FastAPI(
+    lifespan=application_lifespan,
     title="SOC Platform API",
     description="Security Operations Center Platform API",
     version="1.0.0",
@@ -138,14 +156,24 @@ _siem_ingestion_task = None
 _snort_journal_task = None
 
 
-@app.on_event("startup")
+def prepare_database():
+    if STARTUP_SETTINGS.initialize_database:
+        initialize_database()
+    verify_database_schema()
+    # Loading saved detection configuration is a read-only database operation.
+    loaded = load_persistent_rule_configs()
+    app.state.startup_controls = STARTUP_SETTINGS
+    print(f"[SOC STARTUP] Schema verified; loaded {loaded} saved rule configuration(s).", flush=True)
+
+
 async def start_siem_ingestion():
+    if not STARTUP_SETTINGS.siem_ingestion:
+        return
     global _siem_ingestion_task
     if _siem_ingestion_task is None or _siem_ingestion_task.done():
         _siem_ingestion_task = asyncio.create_task(siem_ingestion_loop())
 
 
-@app.on_event("shutdown")
 async def stop_siem_ingestion():
     global _siem_ingestion_task
     if _siem_ingestion_task is not None:
@@ -157,8 +185,9 @@ async def stop_siem_ingestion():
         _siem_ingestion_task = None
 
 
-@app.on_event("startup")
 async def start_snort_journal_listener():
+    if not STARTUP_SETTINGS.snort_collector:
+        return
     global _snort_journal_task
     if _snort_journal_task is None or _snort_journal_task.done():
         _snort_journal_task = asyncio.create_task(
@@ -166,7 +195,6 @@ async def start_snort_journal_listener():
         )
 
 
-@app.on_event("shutdown")
 async def stop_snort_journal_listener():
     global _snort_journal_task
     if _snort_journal_task is not None:
@@ -178,33 +206,17 @@ async def stop_snort_journal_listener():
         _snort_journal_task = None
 
 
-@app.on_event("startup")
 def start_postgres_event_listener():
-    try:
-        loaded = load_persistent_rule_configs()
-        print(f"[SOC SIEM] Loaded {loaded} persistent rule configuration(s).", flush=True)
-    except Exception as exc:
-        print(f"[SOC SIEM] Rule config load failed; using in-code defaults: {exc}", flush=True)
-
-    from siem_response import ensure_firewall_chain
-
-    try:
+    if STARTUP_SETTINGS.firewall_operations:
+        from siem_response import ensure_firewall_chain
         firewall_status = ensure_firewall_chain()
-        if firewall_status["success"]:
-            print("[SOC SIEM] Firewall response chain ready.", flush=True)
-        else:
-            print(
-                "[SOC SIEM] Firewall response unavailable: "
-                f"{firewall_status.get('reason', 'unknown error')}",
-                flush=True,
-            )
-    except Exception as exc:
-        # Firewall setup failure must not prevent the SOC listeners from starting.
-        print(f"[SOC SIEM] Firewall setup error: {exc}", flush=True)
-
-    postgres_event_listener.start()
-    start_realtime_journal_listener()
-    client_security_event_listener.start()
+        if not firewall_status["success"]:
+            raise RuntimeError("Configured SOC firewall setup failed; check service permissions.")
+    if STARTUP_SETTINGS.postgres_listeners:
+        postgres_event_listener.start()
+        client_security_event_listener.start()
+    if STARTUP_SETTINGS.host_collectors:
+        start_realtime_journal_listener()
 
 
 # ============================================================
@@ -243,14 +255,14 @@ async def server_monitor_loop():
         await asyncio.sleep(60)
 
 
-@app.on_event("startup")
 async def start_server_monitor():
+    if not STARTUP_SETTINGS.server_monitor:
+        return
     global _server_monitor_task
     if _server_monitor_task is None or _server_monitor_task.done():
         _server_monitor_task = asyncio.create_task(server_monitor_loop())
 
 
-@app.on_event("shutdown")
 async def stop_server_monitor():
     global _server_monitor_task
     if _server_monitor_task is not None:
@@ -429,6 +441,10 @@ def health_check():
     }
 
 # Gracefully stop the PostgreSQL event listener on application shutdown.
-@app.on_event("shutdown")
 def stop_postgres_event_listener():
-    postgres_event_listener.stop()
+    if STARTUP_SETTINGS.postgres_listeners:
+        postgres_event_listener.stop()
+        client_security_event_listener.stop()
+    if STARTUP_SETTINGS.host_collectors:
+        from realtime_journal_listener import stop_listener
+        stop_listener()

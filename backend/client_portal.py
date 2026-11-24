@@ -11,7 +11,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import SessionLocal, get_db
-from models import AssetDiscoveryRun, Assessment, Client, DatabaseAsset, EndpointAsset, EndpointProcess, EndpointService, EndpointFirewallRule, EndpointSystemHardening, EndpointServerConfiguration, ExternalAttackSurfaceRun, DomainDiscoveryRun, SubdomainDiscoveryRun, InternalAttackSurfaceRun, NetworkDeviceAsset, Report, SecurityFinding, SecurityEvent, ServerAsset, TelemetrySource, User, DNSSecurityRun, SSLTLSRun, SecurityHeadersRun, ReportIssue
+from models import AssetDiscoveryRun, AssetGroupMember, Assessment, Client, DatabaseAsset, EndpointAsset, EndpointProcess, EndpointService, EndpointFirewallRule, EndpointSystemHardening, EndpointServerConfiguration, ExternalAttackSurfaceRun, DomainDiscoveryRun, SubdomainDiscoveryRun, InternalAttackSurfaceRun, NetworkDeviceAsset, Report, SecurityFinding, SecurityEvent, ServerAsset, TelemetrySource, User, DNSSecurityRun, SSLTLSRun, SecurityHeadersRun, ReportIssue
 from rbac import require_role
 from telemetry_router import _hash_token
 from vapt import _execute_masscan_command, _execute_nmap_command, validate_nmap_target

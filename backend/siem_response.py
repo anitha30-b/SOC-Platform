@@ -1,6 +1,8 @@
 import ipaddress
 import subprocess
 
+from startup_settings import enabled
+
 
 SIEM_CHAIN = "SIEM-BLOCK"
 
@@ -27,6 +29,8 @@ def validate_source_ip(source_ip):
 
 
 def _run_iptables(*args):
+    if not enabled("SOC_ENABLE_FIREWALL_OPERATIONS"):
+        raise RuntimeError("SOC firewall operations are disabled by server configuration")
     return subprocess.run(
         ["sudo", "-n", "/usr/local/sbin/soc-siem-firewall", *args],
         capture_output=True,
@@ -37,6 +41,8 @@ def _run_iptables(*args):
 
 def ensure_firewall_chain():
     """Create the SIEM chain and INPUT hook once, preserving other chains."""
+    if not enabled("SOC_ENABLE_FIREWALL_OPERATIONS"):
+        return {"success": False, "reason": "SOC firewall operations are disabled by server configuration"}
     chain_check = _run_iptables("-S", SIEM_CHAIN)
 
     if chain_check.returncode != 0:

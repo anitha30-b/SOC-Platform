@@ -5,6 +5,8 @@ import shlex
 import subprocess
 import threading
 import time
+
+from host_collector_runtime import spawn_collector, reset_collectors, stop_collectors
 from datetime import datetime, timedelta, timezone
 
 import psycopg2
@@ -773,7 +775,7 @@ def run_linux_security_listener():
         "short-iso",
     ]
 
-    process = subprocess.Popen(
+    process = spawn_collector(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -827,7 +829,7 @@ def run_listener():
         "short-iso",
     ]
 
-    process = subprocess.Popen(
+    process = spawn_collector(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -1105,7 +1107,7 @@ def run_tshark_security_listener():
 
     print("[SOC TSHARK] Starting real-time network listener...", flush=True)
 
-    process = subprocess.Popen(
+    process = spawn_collector(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -1246,7 +1248,7 @@ def run_tshark_dns_listener():
 
     print("[SOC DNS] Starting real-time DNS query listener...", flush=True)
 
-    process = subprocess.Popen(
+    process = spawn_collector(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -1451,6 +1453,10 @@ def start_listener():
     global _dns_listener_thread
 
     with _listener_lock:
+        if not any(thread is not None and thread.is_alive() for thread in (
+            _listener_thread, _linux_listener_thread, _tshark_listener_thread, _dns_listener_thread
+        )):
+            reset_collectors()
         if _dns_listener_thread is None or not _dns_listener_thread.is_alive():
             _dns_listener_thread = threading.Thread(
                 target=run_tshark_dns_listener,
@@ -1499,5 +1505,18 @@ def start_listener():
             )
 
 
+def stop_listener():
+    """Stop only journal/tshark subprocesses owned by these collector threads."""
+    with _listener_lock:
+        stop_collectors()
+        for thread in (_listener_thread, _linux_listener_thread, _tshark_listener_thread, _dns_listener_thread):
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=5)
+
+
 if __name__ == "__main__":
-    run_listener()
+    reset_collectors()
+    try:
+        run_listener()
+    finally:
+        stop_collectors()

@@ -130,10 +130,7 @@ class Incident(Base):
 # CREATE ONLY THE NEW INCIDENT TABLE
 # ==================================================
 
-Incident.__table__.create(
-    bind=engine,
-    checkfirst=True,
-)
+# Schema creation is owned by schema_initialization, after all models are registered.
 
 
 # ==================================================
@@ -231,7 +228,7 @@ class IncidentHistory(Base):
     )
 
 
-IncidentHistory.__table__.create(bind=engine, checkfirst=True)
+# Schema creation is owned by schema_initialization, after all models are registered.
 
 
 def _record_incident_history(db, case, current_user, action):

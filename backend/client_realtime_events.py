@@ -89,7 +89,7 @@ class ClientPostgreSQLEventListener:
     def run(self):
         while self.running:
             try:
-                self.connection = psycopg2.connect(DATABASE_URL)
+                self.connection = psycopg2.connect(DATABASE_URL, connect_timeout=5)
                 self.connection.autocommit = True
                 cursor = self.connection.cursor()
                 cursor.execute("LISTEN client_security_events;")
@@ -147,6 +147,8 @@ class ClientPostgreSQLEventListener:
                 self.connection.close()
             except Exception:
                 pass
+        if self.thread is not None and self.thread is not threading.current_thread():
+            self.thread.join(timeout=6)
 
 
 client_security_event_listener = ClientPostgreSQLEventListener()
