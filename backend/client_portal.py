@@ -5,7 +5,7 @@ import json
 from urllib.parse import urlparse
 from datetime import datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -5065,220 +5065,26 @@ class ClientSubdomainDiscoveryRequest(BaseModel):
     assessment_id: int
 
 
-def _parse_subdomain_discovery_output(
-    target_domain: str,
-    result: dict,
-) -> dict:
-    """Parse DNSRecon JSON output for in-scope discovered subdomains."""
-
-    import ipaddress
-
-    root_domain = target_domain.rstrip(".").lower()
-
-    # DNSRecon JSON output is authoritative when available.
-    records = result.get("json_output")
-
-    if not isinstance(records, list):
-        records = []
-
-    discovered_subdomains: set[str] = set()
-    discovered_hosts: set[str] = set()
-    discovered_ips: set[str] = set()
-
-    def normalize_name(value: object) -> str:
-        return str(value or "").strip().rstrip(".").lower()
-
-    def in_scope(name: str) -> bool:
-        return (
-            name == root_domain
-            or name.endswith("." + root_domain)
-        )
-
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-
-        record_type = str(record.get("type") or "").upper()
-        name = normalize_name(record.get("name"))
-
-        if not name or not in_scope(name):
-            continue
-
-        if record_type in {"A", "AAAA"}:
-            address = str(record.get("address") or "").strip()
-
-            if address:
-                try:
-                    ipaddress.ip_address(address)
-                except ValueError:
-                    pass
-                else:
-                    discovered_ips.add(address)
-
-        if name == root_domain:
-            discovered_hosts.add(name)
-        else:
-            discovered_subdomains.add(name)
-            discovered_hosts.add(name)
-
-    # Preserve the authorized assessment domain as discovery context.
-    discovered_hosts.add(root_domain)
-
-    return {
-        "target_domain": root_domain,
-        "discovered_subdomains": sorted(discovered_subdomains),
-        "discovered_hosts": sorted(discovered_hosts),
-        "discovered_ips": sorted(discovered_ips),
-    }
+def _parse_subdomain_discovery_output(target_domain: str, result: dict) -> dict:
+    from subdomain_workflow import parse_discovery
+    return parse_discovery(target_domain, result)
 
 
-async def _run_client_subdomain_discovery(
-    run_id: int,
-    target_domain: str,
-):
-    """Execute real DNSRecon brute-force subdomain discovery."""
-
-    db = SessionLocal()
-
-    try:
-        run = (
-            db.query(SubdomainDiscoveryRun)
-            .filter(SubdomainDiscoveryRun.id == run_id)
-            .first()
-        )
-
-        if not run:
-            return
-
-        run.status = "RUNNING"
-        run.started_at = datetime.utcnow()
-        run.updated_at = datetime.utcnow()
-        db.commit()
-
-        result = run_generic_tool(
-            tool_id="subdomain-discovery",
-            tool_name="Subdomain Discovery",
-            executable="/usr/bin/dnsrecon",
-            target=target_domain,
-            execution_type="scanner",
-            timeout_seconds=300,
-        )
-
-        parsed = _parse_subdomain_discovery_output(
-            target_domain,
-            result,
-        )
-
-        run.result_data = json.dumps(
-            {
-                "tool": "DNSRecon",
-                "workflow": "subdomain-discovery",
-                "execution": result,
-                "discovery": parsed,
-            },
-            default=str,
-        )
-
-        run.discovered_subdomain_count = len(
-            parsed["discovered_subdomains"]
-        )
-        run.discovered_host_count = len(
-            parsed["discovered_hosts"]
-        )
-        run.discovered_ip_count = len(
-            parsed["discovered_ips"]
-        )
-
-        execution_status = str(
-            result.get("status") or ""
-        ).lower()
-
-        if execution_status == "completed":
-            run.status = "COMPLETED"
-        else:
-            run.status = "FAILED"
-
-        run.completed_at = datetime.utcnow()
-        run.updated_at = datetime.utcnow()
-        db.commit()
-
-    except Exception as exc:
-        db.rollback()
-
-        run = (
-            db.query(SubdomainDiscoveryRun)
-            .filter(SubdomainDiscoveryRun.id == run_id)
-            .first()
-        )
-
-        if run:
-            run.status = "FAILED"
-            run.result_data = json.dumps(
-                {
-                    "tool": "DNSRecon",
-                    "workflow": "subdomain-discovery",
-                    "status": "failed",
-                    "target_domain": target_domain,
-                    "error": str(exc),
-                },
-                default=str,
-            )
-            run.completed_at = datetime.utcnow()
-            run.updated_at = datetime.utcnow()
-            db.commit()
-
-    finally:
-        db.close()
+async def _run_client_subdomain_discovery(run_id: int, target_domain: str):
+    from subdomain_workflow import execute_run
+    await asyncio.to_thread(execute_run, SessionLocal, run_generic_tool, run_id, target_domain)
 
 
 @router.get("/subdomain-discovery")
 async def get_client_subdomain_discovery(
+    q: str = Query(default='', max_length=200),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(require_role(1)),
     db: Session = Depends(get_db),
 ):
-    """Return subdomain discovery runs within the current client scope."""
-
-    scoped_users = db.query(User.id)
-
-    if current_user.client_id is not None:
-        scoped_users = scoped_users.filter(
-            User.client_id == current_user.client_id
-        )
-    else:
-        scoped_users = scoped_users.filter(
-            User.id == current_user.id
-        )
-
-    runs = (
-        db.query(SubdomainDiscoveryRun)
-        .filter(SubdomainDiscoveryRun.user_id.in_(scoped_users))
-        .order_by(SubdomainDiscoveryRun.created_at.desc())
-        .all()
-    )
-
-    return {
-        "runs": [
-            {
-                "id": run.id,
-                "job_id": run.job_id,
-                "user_id": run.user_id,
-                "assessment_id": run.assessment_id,
-                "target_domain": run.target_domain,
-                "status": run.status,
-                "discovered_subdomain_count": (
-                    run.discovered_subdomain_count
-                ),
-                "discovered_host_count": run.discovered_host_count,
-                "discovered_ip_count": run.discovered_ip_count,
-                "started_at": run.started_at,
-                "completed_at": run.completed_at,
-                "created_at": run.created_at,
-                "updated_at": run.updated_at,
-            }
-            for run in runs
-        ],
-        "count": len(runs),
-    }
+    from subdomain_workflow import list_runs
+    return list_runs(db, current_user, q=q, limit=limit, offset=offset)
 
 
 @router.post("/subdomain-discovery/run")
@@ -5294,6 +5100,9 @@ async def run_client_subdomain_discovery(
     Arbitrary domains cannot be supplied through this endpoint.
     """
 
+    from vapt import require_user_tool_permission
+    from subdomain_workflow import new_run
+    require_user_tool_permission(db, current_user, 'Subdomain Discovery')
     scoped_users = db.query(User.id)
 
     if current_user.client_id is not None:
@@ -5371,22 +5180,7 @@ async def run_client_subdomain_discovery(
             ),
         )
 
-    run = SubdomainDiscoveryRun(
-        job_id=(
-            f"client-subdomain-discovery-{current_user.id}-"
-            f"{assessment.id}-"
-            f"{int(datetime.utcnow().timestamp() * 1000)}"
-        ),
-        user_id=current_user.id,
-        assessment_id=assessment.id,
-        target_domain=target_domain,
-        status="QUEUED",
-        discovered_subdomain_count=0,
-        discovered_host_count=0,
-        discovered_ip_count=0,
-        started_at=None,
-        completed_at=None,
-    )
+    run = new_run(db, current_user, assessment, target_domain)
 
     db.add(run)
     db.commit()

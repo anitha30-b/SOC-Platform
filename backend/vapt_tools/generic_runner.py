@@ -1,3 +1,5 @@
+# SOC_SUBDOMAIN_PROFILES_V1
+import time
 import json
 import shutil
 import socket
@@ -27,6 +29,7 @@ def build_command(
     tool_id: str,
     executable: str,
     target: str,
+    discovery_profile: str = "full",
 ) -> list[str]:
     """
     Build an allowlisted command for registry tools.
@@ -72,6 +75,7 @@ def build_command(
         ]
 
     if tool_id == "subdomain-discovery":
+        from subdomain_profiles import profile_settings
         return [
             resolved,
             "-d",
@@ -79,7 +83,7 @@ def build_command(
             "-t",
             "brt",
             "-D",
-            "/usr/share/dnsrecon/dnsrecon/data/subdomains-top1mil-5000.txt",
+            profile_settings(discovery_profile)["wordlist"],
         ]
 
     if tool_id == "masscan":
@@ -137,6 +141,7 @@ def run_generic_tool(
     target: str,
     execution_type: str,
     timeout_seconds: int = 300,
+    discovery_profile: str = "full",
     progress_callback: Callable[[int, str, str], None] | None = None,
 ) -> dict[str, Any]:
     """
@@ -164,10 +169,17 @@ def run_generic_tool(
             f"Execution type '{execution_type}' requires a dedicated workflow."
         )
 
+    settings = None
+    if tool_id == 'subdomain-discovery':
+        from subdomain_profiles import profile_settings
+        settings = profile_settings(discovery_profile)
+        timeout_seconds = min(max(1, int(timeout_seconds)), settings['timeout_seconds'])
+
     command = build_command(
         tool_id=tool_id,
         executable=executable,
         target=target,
+        discovery_profile=discovery_profile,
     )
 
     json_output_path = None
@@ -189,6 +201,7 @@ def run_generic_tool(
             f"Running {tool_name}.",
         )
 
+    execution_started = time.monotonic()
     try:
         process = subprocess.Popen(
             command,
@@ -252,6 +265,11 @@ def run_generic_tool(
         "stderr": "".join(stderr_lines),
         "command": command,
     }
+
+    if settings is not None:
+        result.update(discovery_profile=settings['profile'], candidate_count=settings['candidate_count'],
+                      timeout_seconds=max(1, int(timeout_seconds)), coverage=settings['coverage'],
+                      elapsed_seconds=round(time.monotonic() - execution_started, 3))
 
     if json_output_path:
         try:

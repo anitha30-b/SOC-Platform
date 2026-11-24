@@ -302,6 +302,8 @@ SECURITY_TOOLS = [
         "description": "Generate evidence-based VAPT reports from actual assessment, finding and risk data.",
         "tool_type": "reporting",
     },
+
+    {'name': 'Subdomain Discovery', 'category': 'Network Security', 'description': 'DNSRecon subdomain discovery with shared customer and administrator history.', 'tool_type': 'discovery'},
 ]
 
 

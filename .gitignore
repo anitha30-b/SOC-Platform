@@ -56,3 +56,4 @@ backend/data/
 *.jsx.bak*
 *.py.*-backup
 *.jsx.*-backup
+/backend/.zap-runtime.local.json

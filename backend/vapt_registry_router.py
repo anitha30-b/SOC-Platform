@@ -312,6 +312,7 @@ GENERIC_TOOL_JOBS = {}
 
 class GenericToolRunRequest(BaseModel):
     target: str
+    discovery_profile: str = "full"
 
 
 def _get_registry_tool(tool_id: str):
@@ -403,6 +404,8 @@ async def _run_generic_job(
             target=target,
             execution_type=tool.get("execution_type", ""),
             progress_callback=update_progress,
+            **({'discovery_profile': job.get('discovery_profile', 'full')}
+               if tool.get('id') == 'subdomain-discovery' else {}),
         )
 
         update_progress(
@@ -410,6 +413,21 @@ async def _run_generic_job(
             "Finalizing",
             f"Collecting {tool['name']} results.",
         )
+
+        if tool.get("id") == "subdomain-discovery":
+            from subdomain_workflow import save_registry_result
+            try:
+                saved = await asyncio.to_thread(save_registry_result, SessionLocal, result,
+                    job['user_id'], job.get('client_id'), job_id, target)
+                result.update(discovery=saved['discovery'], assessment_id=saved['assessment_id'],
+                              discovery_run_id=saved['run_id'], status=saved['status'])
+                result['persistence'] = {'status': 'saved', 'run_id': saved['run_id']}
+            except Exception:
+                result['execution_status'] = result.get('status')
+                if result.get('status') == 'completed':
+                    result['status'] = 'completed_with_errors'
+                result['persistence'] = {'status': 'failed', 'error': 'Discovery evidence could not be saved.'}
+                job['error'] = 'Discovery evidence could not be saved. Check server diagnostics.'
 
         if tool.get("id") == "masscan":
             try:
@@ -480,6 +498,10 @@ async def run_registry_tool_async(
     Existing Nmap, Nikto and Nuclei execution routes remain
     separate specialized workflows.
     """
+    if request.discovery_profile not in {'full', 'quick'}:
+        raise HTTPException(status_code=400, detail='Discovery profile must be full or quick.')
+    if tool_id != 'subdomain-discovery' and request.discovery_profile != 'full':
+        raise HTTPException(status_code=400, detail='Discovery profiles apply only to Subdomain Discovery.')
     tool = _get_registry_tool(tool_id)
 
     if not tool.get("enabled", True):
@@ -504,6 +526,12 @@ async def run_registry_tool_async(
             detail="A target is required.",
         )
 
+    if tool_id == 'subdomain-discovery':
+        from subdomain_workflow import domain_name
+        try:
+            target = domain_name(target)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     target_type = _generic_target_type(target)
     supported_types = tool.get("target_types", [])
 
@@ -539,6 +567,8 @@ async def run_registry_tool_async(
         )
 
     job_id = _new_generic_job(tool_id, target, current_user.id, current_user.client_id)
+    if tool_id == 'subdomain-discovery':
+        GENERIC_TOOL_JOBS[job_id]['discovery_profile'] = request.discovery_profile
 
     asyncio.create_task(
         _run_generic_job(
@@ -555,6 +585,7 @@ async def run_registry_tool_async(
         "tool_name": tool["name"],
         "target": target,
         "target_type": target_type,
+        "discovery_profile": request.discovery_profile if tool_id == "subdomain-discovery" else None,
         "status": "queued",
     }
 
@@ -582,3 +613,17 @@ async def get_registry_tool_progress(
         )
 
     return job
+
+
+@router.get('/subdomain-profiles')
+def get_subdomain_profiles(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(1)),
+):
+    require_user_tool_permission(db, current_user, 'Subdomain Discovery')
+    from subdomain_profiles import profile_settings
+    return {'version': 1, 'default': 'full', 'profiles': [
+        {key: value for key, value in profile_settings(name).items() if key != 'wordlist'}
+        for name in ('full', 'quick')]}
+
+# SOC_SUBDOMAIN_PROFILE_REQUEST_V1

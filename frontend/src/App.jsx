@@ -1,3 +1,7 @@
+import { USER_NAV_GROUPS, createUserNavigationState, toggleUserNavigation, findUserNavigationGroup } from "./userNavigation.js";
+import SubdomainScanProgress from "./SubdomainScanProgress";
+import SubdomainVaptResults from "./SubdomainVaptResults";
+import SubdomainResults from "./SubdomainResults";
 
 import { API_BASE_URL as SOC_DEPLOY_API_BASE } from "./deploymentApi.js";
 import { useCallback as useAssetLoadCallback } from "react";
@@ -989,6 +993,7 @@ const ADMIN_NAV = [
     items: [
       ["Asset Inventory", "admin-asset-inventory"],
       ["Asset Discovery", "admin-asset-discovery"],
+      ["Subdomain Discovery", "admin-subdomain-discovery"],
       ["Servers", "admin-servers"],
       ["Server Monitoring", "admin-server-monitoring"],
       ["Endpoints", "admin-endpoints"],
@@ -4418,6 +4423,10 @@ function AdminDashboard({ onLogout }) {
       activeMenu === "admin-audit-export"
     ) {
       return <AuditTrail menu={activeMenu} />;
+    }
+
+    if (activeMenu === "admin-subdomain-discovery") {
+      return <SubdomainResults admin />;
     }
 
     if (activeMenu === "admin-asset-discovery") {
@@ -9457,37 +9466,21 @@ function UserDashboard({ onLogout }) {
   // User Dashboard SOC navigation groups.
   // Existing functional routes remain unchanged; this state only
   // controls expansion/collapse of the new dashboard navigation.
-  const [userNavOpen, setUserNavOpen] = useState({
-    "01": true,
-    "02": false,
-    "03": false,
-    "04": false,
-    "05": false,
-    "06": false,
-    "07": false,
-    "08": false,
-    "09": false,
-    "10": false,
-    "11": false,
-    "12": false,
-    "13": false,
-    "14": false,
-    "15": false,
-    "16": false,
-    "17": false,
-    "18": false,
-    "19": false,
-    "20": false,
-    "21": false,
-    "22": false,
-  });
+  const [userNavOpen, setUserNavOpen] = useState(() => createUserNavigationState("dashboard"));
+  const [userSidebarOpen, setUserSidebarOpen] = useState(false);
 
-  const toggleUserNav = (group) => {
-    setUserNavOpen((current) => ({
-      ...current,
-      [group]: !current[group],
-    }));
-  };
+  const toggleUserNav = (group) => setUserNavOpen(current => toggleUserNavigation(current, group));
+  useEffect(() => {
+    if (findUserNavigationGroup(activeMenu)) setUserNavOpen(createUserNavigationState(activeMenu));
+    setUserSidebarOpen(false);
+  }, [activeMenu]);
+  useEffect(() => {
+    if (!userSidebarOpen) return undefined;
+    const closeOnEscape = event => { if (event.key === 'Escape') setUserSidebarOpen(false); };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [userSidebarOpen]);
+
 
   const loadJuiceShop = async () => {
     setJuiceShopLoading(true);
@@ -9608,6 +9601,10 @@ function UserDashboard({ onLogout }) {
       <header className="fixed left-0 right-0 top-0 z-50 border-b border-white/10 bg-[#080808]">
         <div className="flex h-16 items-center justify-between px-6">
           <div className="flex items-center gap-3">
+            <button type="button" onClick={() => setUserSidebarOpen(value => !value)}
+              aria-label="Toggle navigation" aria-controls="user-workspace-navigation" aria-expanded={userSidebarOpen}
+              className="rounded border border-white/10 px-3 py-2 text-sm text-gray-300 lg:hidden">☰</button>
+
             <div className="flex h-9 w-9 items-center justify-center rounded-md bg-red-600 font-bold">
               S
             </div>
@@ -9645,349 +9642,16 @@ function UserDashboard({ onLogout }) {
       <div className="flex pt-16">
 
         {/* SIDEBAR */}
-        <aside className="fixed bottom-0 left-0 top-16 hidden w-72 border-r border-white/10 bg-[#0a0a0a] lg:block">
-          <div className="h-full overflow-y-auto p-4 pb-28">
+        {userSidebarOpen && <button type="button" aria-label="Close navigation"
+          onClick={() => setUserSidebarOpen(false)} className="fixed inset-x-0 bottom-0 top-16 z-30 bg-black/70 lg:hidden" />}
+        <aside id="user-workspace-navigation" aria-label="User navigation" className={`fixed bottom-0 left-0 top-16 z-40 w-72 flex-col border-r border-white/10 bg-[#0a0a0a] ${userSidebarOpen ? "flex" : "hidden"} lg:flex`}>
+          <div className="min-h-0 flex-1 overflow-y-auto p-4 [scrollbar-width:thin] [scrollbar-color:#3f3f46_#0a0a0a]">
 
             <p className="mb-5 px-3 text-[10px] uppercase tracking-[0.25em] text-gray-600">
               Security Workspace
             </p>
 
-            {[
-              {
-                id: "01",
-                icon: "🏠",
-                label: "SOC Overview",
-                items: [
-                  ["Security Dashboard", "dashboard"],
-                  ["Active Alerts", "alerts-open"],
-                  ["Active Incidents", "incidents-active"],
-                  ["Critical Threats", "alerts-critical"],
-                  ["Risk Overview", "risk-overview"],
-                  ["Environment Health", "environment-health"],
-                ],
-              },
-              {
-                id: "02",
-                icon: "🖥️",
-                label: "Asset Management",
-                items: [
-                  ["Asset Inventory", "asset-inventory"],
-                  ["Asset Discovery", "asset-discovery"],
-                  ["Servers", "servers"],
-                  ["Endpoints", "endpoints"],
-                  ["Network Devices", "network-devices"],
-                  ["Applications", "applications"],
-                  ["Databases", "databases"],
-                  ["Domains", "domains"],
-                  ["IP Addresses", "ip-addresses"],
-                  ["Asset Groups", "asset-groups"],
-                ],
-              },
-              {
-                id: "03",
-                icon: "🌐",
-                label: "Attack Surface",
-                items: [
-                  ["External Attack Surface", "external-attack-surface"],
-                  ["Internal Attack Surface", "internal-attack-surface"],
-                  ["Domain Discovery", "domain-discovery"],
-                  ["Subdomain Discovery", "subdomain-discovery"],
-                  ["DNS Security", "dns-security"],
-                  ["IP Intelligence", "ip-intelligence"],
-                  ["Open Ports", "open-ports"],
-                  ["Exposed Services", "exposed-services"],
-                  ["SSL/TLS", "ssl-tls"],
-                  ["Security Headers", "security-headers"],
-                ],
-              },
-              {
-                id: "04",
-                icon: "🔍",
-                label: "Vulnerability Management",
-                items: [
-                  ["Vulnerabilities", "findings"],
-                  ["CVE Database", "cve-database"],
-                  ["Vulnerability Scans", "vapt"],
-                  ["Network Scans", "vapt"],
-                  ["Web Scans", "vapt"],
-                  ["API Scans", "vapt"],
-                  ["Configuration Scans", "vapt"],
-                  ["Remediation", "remediation"],
-                ],
-              },
-              {
-                id: "06",
-                icon: "🖥️",
-                label: "Server Security",
-                items: [
-                  ["Server Dashboard", "server-dashboard"],
-                  ["Linux Security", "linux-security"],
-                  ["Windows Security", "windows-security"],
-                  ["SSH Security", "ssh-security"],
-                  ["User Accounts", "user-accounts"],
-                  ["Privileged Accounts", "privileged-accounts"],
-                  ["Running Processes", "running-processes"],
-                  ["Services", "services"],
-                  ["Firewall", "firewall"],
-                  ["System Hardening", "system-hardening"],
-                  ["Server Configuration", "server-config"],
-                ],
-              },
-              {
-                id: "07",
-                icon: "📊",
-                label: "SIEM",
-                items: [
-                  ["SIEM Dashboard", "logs"],
-                  ["Log Explorer", "log-explorer"],
-                  ["Security Events", "security-events"],
-                  ["Authentication Logs", "authentication-logs"],
-                  ["Network Logs", "network-logs"],
-                  ["Firewall Logs", "firewall-logs"],
-                  ["DNS Logs", "dns-logs"],
-                  ["Application Logs", "application-logs"],
-                  ["Windows Events", "windows-events"],
-                  ["Linux Logs", "linux-logs"],
-                  ["Log Sources", "log-sources"],
-                  ["Saved Searches", "saved-searches"],
-                ],
-              },
-              {
-                id: "08",
-                icon: "🚨",
-                label: "Detection",
-                items: [
-                  ["Detection Dashboard", "detection-dashboard"],
-                  ["Detection Rules", "detection-rules"],
-                  ["Sigma Rules", "sigma-rules"],
-                  ["Correlation Rules", "correlation-rules"],
-                  ["Behavioral Detection", "behavioral-detection"],
-                  ["Anomaly Detection", "anomaly-detection"],
-                  ["IOC Detection", "ioc-detection"],
-                  ["Detection Coverage", "detection-coverage"],
-                ],
-              },
-              {
-                id: "09",
-                icon: "🚨",
-                label: "Alerts",
-                items: [
-                  ["Alert Dashboard", "alerts"],
-                  ["All Alerts", "alerts-all"],
-                  ["Critical Alerts", "alerts-critical"],
-                  ["Open Alerts", "alerts-open"],
-                  ["Acknowledged", "alerts-acknowledged"],
-                  ["Suppressed", "alerts-suppressed"],
-                  ["Alert Correlation", "alerts-correlation"],
-                  ["Alert Tuning", "alerts-tuning"],
-                ],
-              },
-              {
-                id: "10",
-                icon: "🔥",
-                label: "Incidents",
-                items: [
-                  ["Incident Dashboard", "incidents"],
-                  ["Active Incidents", "incidents-active"],
-                  ["Critical Incidents", "incidents-critical"],
-                  ["Investigation", "incidents-investigation"],
-                  ["Evidence", "incidents-evidence"],
-                  ["Incident Timeline", "incidents-timeline"],
-                  ["Case Management", "incidents-cases"],
-                  ["Assignments", "incidents-assignments"],
-                  ["SLA Management", "incidents-sla"],
-                  ["Incident Playbooks", "incidents-playbooks"],
-                  ["Closed Incidents", "incidents-closed"],
-                ],
-              },
-              {
-                id: "11",
-                icon: "🧠",
-                label: "Threat Intelligence",
-                items: [
-                  ["Threat Intelligence Dashboard", "threat-intelligence"],
-                  ["Indicators", "threat-indicators"],
-                  ["IP Intelligence", "ip-intelligence"],
-                  ["Domain Intelligence", "threat-domains"],
-                  ["URL Intelligence", "threat-urls"],
-                  ["Hash Intelligence", "threat-hashes"],
-                  ["Threat Actors", "threat-actors"],
-                  ["Campaigns", "threat-campaigns"],
-                  ["Malware Intelligence", "threat-malware"],
-                  ["CVE Intelligence", "threat-cve"],
-                  ["Threat Feeds", "threat-feeds"],
-                ],
-              },
-              {
-                id: "12",
-                icon: "🎯",
-                label: "Threat Hunting",
-                items: [
-                  ["Hunting Dashboard", "hunt-dashboard"],
-                  ["Query Builder", "hunt-builder"],
-                  ["Event Search", "hunt-events"],
-                  ["IOC Hunting", "hunt-ioc"],
-                  ["User Hunting", "hunt-users"],
-                  ["Process Hunting", "hunt-processes"],
-                  ["Network Hunting", "hunt-network"],
-                  ["Timeline Analysis", "hunt-timeline"],
-                  ["Saved Hunts", "hunt-saved"],
-                ],
-              },
-              {
-                id: "13",
-                icon: "🧩",
-                label: "MITRE ATT&CK",
-                items: [
-                  ["ATT&CK Dashboard", "mitre-attack"],
-                  ["Tactics", "mitre-tactics"],
-                  ["Techniques", "mitre-techniques"],
-                  ["Sub-Techniques", "mitre-subtechniques"],
-                  ["Groups", "mitre-groups"],
-                  ["Software", "mitre-software"],
-                  ["Detection Coverage", "mitre-coverage"],
-                ],
-              },
-              {
-                id: "14",
-                icon: "🌐",
-                label: "Network Security",
-                items: [
-                  ["Network Dashboard", "network-dashboard"],
-                  ["Network Discovery", "network-discovery"],
-                  ["Network Topology", "network-topology"],
-                  ["Traffic Analysis", "network-traffic"],
-                  ["Connections", "network-connections"],
-                  ["Ports", "network-ports"],
-                  ["Protocols", "network-protocols"],
-                  ["Firewall", "network-firewall"],
-                  ["VPN", "network-vpn"],
-                  ["DNS Security", "network-dns"],
-                  ["IDS/IPS", "network-ids"],
-                  ["Network Anomalies", "network-anomalies"],
-                ],
-              },
-              {
-                id: "15",
-                icon: "🔐",
-                label: "Identity Security",
-                items: [
-                  ["Identity Dashboard", "identity-dashboard"],
-                  ["Users", "identity-users"],
-                  ["Groups", "identity-groups"],
-                  ["Privileged Users", "identity-privileged"],
-                  ["Authentication", "identity-authentication"],
-                  ["MFA", "identity-mfa"],
-                  ["Login Anomalies", "identity-anomalies"],
-                  ["Identity Risk", "identity-risk"],
-                ],
-              },
-              {
-                id: "16",
-                icon: "🔑",
-                label: "Secrets Security",
-                items: [
-                  ["Secrets Dashboard", "secrets-dashboard"],
-                  ["Exposed Secrets", "secrets-exposed"],
-                  ["API Keys", "secrets-api-keys"],
-                  ["Tokens", "secrets-tokens"],
-                  ["Credentials", "secrets-credentials"],
-                  ["Repository Scanning", "secrets-scanning"],
-                ],
-              },
-              {
-                id: "17",
-                icon: "⚙️",
-                label: "Security Configuration",
-                items: [
-                  ["Security Baselines", "config-baselines"],
-                  ["Hardening", "config-hardening"],
-                  ["CIS Benchmarks", "config-cis"],
-                  ["Linux Configuration", "config-linux"],
-                  ["Windows Configuration", "config-windows"],
-                  ["Web Server Configuration", "config-web"],
-                  ["Configuration Drift", "config-drift"],
-                ],
-              },
-              {
-                id: "18",
-                icon: "🤖",
-                label: "SOAR / Automation",
-                items: [
-                  ["Playbooks", "soar-playbooks"],
-                  ["Workflows", "soar-workflows"],
-                  ["Triggers", "soar-triggers"],
-                  ["Actions", "soar-actions"],
-                  ["Approvals", "soar-approvals"],
-                  ["Response Actions", "soar-responses"],
-                ],
-              },
-              {
-                id: "19",
-                icon: "📋",
-                label: "Risk Management",
-                items: [
-                  ["Risk Dashboard", "risk-dashboard"],
-                  ["Asset Risk", "risk-assets"],
-                  ["Vulnerability Risk", "risk-vulnerabilities"],
-                  ["Identity Risk", "risk-identity"],
-                  ["Risk Register", "risk-register"],
-                  ["Risk Trends", "risk-trends"],
-                ],
-              },
-              {
-                id: "20",
-                icon: "🔎",
-                label: "Security Assessment",
-                items: [
-                  ["VAPT", "vapt"],
-                  ["Web Application Testing", "vapt"],
-                  ["API Testing", "vapt"],
-                  ["Network Assessment", "assessment-network"],
-                  ["Configuration Assessment", "assessment-configuration"],
-                  ["Security Audit", "assessment-audit"],
-                  ["Findings", "findings"],
-                  ["Remediation", "assessment-remediation"],
-                  ["QA Testing", "qa"],
-                ],
-              },
-              {
-                id: "21",
-                icon: "🧪",
-                label: "Security Testing",
-                items: [
-                  ["Port Scanner", "testing-port-scanner"],
-                  ["Service Discovery", "testing-service-discovery"],
-                  ["Web Scanner", "vapt"],
-                  ["API Scanner", "vapt"],
-                  ["DNS Scanner", "dns-security"],
-                  ["TLS Scanner", "ssl-tls"],
-                  ["Header Scanner", "security-headers"],
-                  ["Code Security", "code-security"],
-                  ["Scan History", "testing-scan-history"],
-                ],
-              },
-              {
-                id: "23",
-                icon: "🔔",
-                label: "Notifications",
-                items: [
-                  ["Notification Center", "notifications"],
-                ],
-              },
-              {
-                id: "22",
-                icon: "📊",
-                label: "Reports",
-                items: [
-                  ["Security Reports", "reports-security"],
-                  ["Vulnerability Reports", "reports-vulnerability"],
-                  ["Incident Reports", "reports-incidents"],
-                  ["Risk Reports", "reports-risk"],
-                  ["Scheduled Reports", "reports-scheduled"],
-                ],
-              },
-            ].map((group) => {
+            {USER_NAV_GROUPS.map((group, index) => {
               const isOpen = userNavOpen[group.id];
 
               return (
@@ -9996,23 +9660,25 @@ function UserDashboard({ onLogout }) {
                     type="button"
                     onClick={() => toggleUserNav(group.id)}
                     className="flex w-full items-center gap-2 border-l-2 border-transparent px-3 py-2.5 text-left transition hover:bg-white/[0.03]"
-                  >
+                   aria-expanded={Boolean(isOpen)} aria-controls={`user-nav-${group.id}`}>
                     <span className="w-5 text-sm">{group.icon}</span>
                     <span className="flex-1 text-[11px] font-medium uppercase tracking-wide text-gray-400">
-                      {group.id}. {group.label}
+                      {String(index + 1).padStart(2, "0")}. {group.label}
                     </span>
                     <span className="text-[10px] text-gray-600">
-                      {isOpen ? "▼" : "▶"}
+                      {isOpen ? "▾" : "▸"}
                     </span>
                   </button>
 
                   {isOpen && (
-                    <div className="ml-4 border-l border-white/10 pl-2">
+                    <div className="ml-4 border-l border-white/10 pl-2" id={`user-nav-${group.id}`}>
                       {group.items.map(([label, route]) => (
                         <button
                           key={label}
                           type="button"
                           onClick={() => {
+                            setUserSidebarOpen(false);
+                            window.scrollTo({ top: 0, behavior: "auto" });
                             if (label === "SIEM Dashboard") {
                               setActiveSIEMPage("siem-dashboard");
                               setActiveMenu("logs");
@@ -10097,38 +9763,10 @@ function UserDashboard({ onLogout }) {
             })}
 
             {/* Existing modules preserved */}
-            <div className="mt-5 border-t border-white/10 pt-4">
-              <p className="mb-3 px-3 text-[10px] uppercase tracking-[0.2em] text-gray-600">
-                Existing Modules
-              </p>
-
-              <SidebarItem
-                label="Uptime Monitoring"
-                active={activeMenu === "uptime"}
-                onClick={() => setActiveMenu("uptime")}
-              />
-
-              <SidebarItem
-                label="Security Copilot"
-                active={activeMenu === "copilot"}
-                onClick={() => setActiveMenu("copilot")}
-              />
-
-              <SidebarItem
-                label="Complaints / Support"
-                active={activeMenu === "support"}
-                onClick={() => setActiveMenu("support")}
-              />
-
-              <SidebarItem
-                label="Profile"
-                active={activeMenu === "profile"}
-                onClick={() => setActiveMenu("profile")}
-              />
-            </div>
+            
           </div>
 
-          <div className="absolute bottom-0 left-0 right-0 border-t border-white/10 bg-[#0a0a0a] p-4">
+          <div className="shrink-0 border-t border-white/10 bg-[#0a0a0a] p-4">
             <p className="text-[10px] uppercase tracking-wider text-gray-600">
               Platform Status
             </p>
@@ -10144,7 +9782,7 @@ function UserDashboard({ onLogout }) {
 
 
         {/* CONTENT */}
-        <main className="min-w-0 w-full overflow-x-hidden p-4 sm:p-6 lg:ml-64 lg:w-[calc(100%-16rem)] lg:p-6 xl:p-8">
+        <main className="min-w-0 w-full overflow-x-hidden p-4 sm:p-6 lg:ml-72 lg:w-[calc(100%-18rem)] lg:p-6 xl:p-8">
           {error && (
             <div className="mb-6 border border-red-600/30 bg-red-600/10 px-5 py-4 text-sm text-red-400">
               {error}
@@ -11276,7 +10914,7 @@ function UserDashboard({ onLogout }) {
             <ExternalAttackSurface />
           )}
 
-          {activeMenu === "subdomain-discovery" && <SubdomainDiscovery />}
+          {activeMenu === "subdomain-discovery" && <><SubdomainDiscovery /><SubdomainResults /></>}
           {activeMenu === "domain-discovery" && (
             <DomainDiscovery />
           )}
@@ -18976,6 +18614,7 @@ function VAPTTesting({
   const [selectedTools, setSelectedTools] = useState([]);
   const [toolStatuses, setToolStatuses] = useState({});
   const [genericToolJobs, setGenericToolJobs] = useState({});
+  const [subdomainProfile, setSubdomainProfile] = useState("full");
   const [toolsPanelOpen, setToolsPanelOpen] = useState(false);
   const [activeToolCategory, setActiveToolCategory] = useState("Reconnaissance");
   const [nmapJobId, setNmapJobId] = useState(null);
@@ -19057,6 +18696,10 @@ function VAPTTesting({
   const [vaptRegistryLoading, setVaptRegistryLoading] = useState(true);
   const [vaptRegistryError, setVaptRegistryError] = useState("");
 
+  const genericPollingKey = Object.entries(genericToolJobs)
+    .filter(([, job]) => job?.jobId && !isTerminalToolStatus(job?.status))
+    .map(([toolId, job]) => `${toolId}:${job.jobId}`).sort().join("|");
+
   // Poll generic registry tool jobs.
   // This remains independent from the existing Nmap/Nikto/Nuclei pollers.
   useEffect(() => {
@@ -19120,7 +18763,7 @@ function VAPTTesting({
       stopped = true;
       window.clearInterval(intervalId);
     };
-  }, [genericToolJobs]);
+  }, [genericPollingKey]);
 
 
 
@@ -22043,10 +21686,24 @@ function VAPTTesting({
               [toolId]: "Running",
             }));
 
+            if (toolId === "subdomain-discovery") {
+              let capabilities;
+              try {
+                capabilities = await axios.get(`${API_URL}/vapt/registry/subdomain-profiles`, {
+                  headers: { Authorization: `Bearer ${token}` },
+                });
+              } catch (error) {
+                throw new Error("Discovery profile readiness failed. Restart the updated integration backend and check tool permission before scanning.");
+              }
+              if (capabilities.data?.version !== 1 || !capabilities.data?.profiles?.some(item => item.profile === subdomainProfile)) {
+                throw new Error("The backend does not support the selected discovery profile. No scan was requested.");
+              }
+            }
             const response = await axios.post(
               `${API_URL}/vapt/registry/tools/${encodeURIComponent(toolId)}/run-async`,
               {
                 target: genericTarget,
+                ...(toolId === "subdomain-discovery" ? { discovery_profile: subdomainProfile } : {}),
               },
               {
                 headers: {
@@ -22087,6 +21744,9 @@ function VAPTTesting({
               ...current,
               [toolId]: {
                 jobId,
+                target: genericTarget,
+                uiStartedAt: Date.now(),
+                discovery_profile: toolId === "subdomain-discovery" ? subdomainProfile : undefined,
                 status: "queued",
                 progress: 0,
                 stage: "Queued",
@@ -22624,6 +22284,20 @@ function VAPTTesting({
             by your administrator appear locked.
           </p>
         </div>
+
+        {selectedTools.includes("subdomain-discovery") && (
+          <div className="border-b border-white/10 p-5">
+            <label className="text-sm text-gray-300">Subdomain discovery profile
+              <select value={subdomainProfile} onChange={(event) => setSubdomainProfile(event.target.value)}
+                disabled={loading} className="ml-3 border border-white/10 bg-[#080808] px-3 py-2 text-white">
+                <option value="full">Full — installed 5,000-name wordlist</option>
+                <option value="quick">Quick — 250 names, limited coverage</option>
+              </select>
+            </label>
+            <p className="mt-2 text-xs text-gray-500">Quick uses fewer candidate names and a 60-second execution timeout. Full keeps the broader wordlist and a 300-second timeout. Duration depends on DNS responses.</p>
+            <p className="mt-2 text-xs text-gray-500">The entered domain defines the search scope. For example, www.example.com is a narrower scope than example.com. Use only your authorised domain.</p>
+          </div>
+        )}
 
         {/* 01 RECONNAISSANCE */}
         <div className="border-b border-white/10 p-5">
@@ -23944,6 +23618,9 @@ function VAPTTesting({
 
           <div className="space-y-4">
             {Object.entries(genericToolJobs).map(([toolId, job]) => {
+              if (toolId === "subdomain-discovery") {
+                return <SubdomainScanProgress key={job.jobId || toolId} job={job} />;
+              }
               const jobStatus = job?.status || "queued";
               const completed =
                 jobStatus === "completed" ||
@@ -24071,6 +23748,8 @@ function VAPTTesting({
           </div>
         </div>
       )}
+
+      <SubdomainVaptResults job={genericToolJobs["subdomain-discovery"]} scanRunning={loading} />
 
       {/* STATUS MESSAGE */}
       {message && (

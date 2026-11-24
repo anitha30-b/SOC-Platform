@@ -535,6 +535,8 @@ VAPT_PERMISSION_TOOL_NAMES = {
     'Access / Impact Validation',
     'Risk Assessment Engine',
     'VAPT Report Generator',
+
+    'Subdomain Discovery',
 }
 
 

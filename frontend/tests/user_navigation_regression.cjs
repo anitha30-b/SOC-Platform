@@ -1,0 +1,51 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const {pathToFileURL} = require('node:url');
+(async () => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/App.jsx'), 'utf8');
+  const nav = await import(pathToFileURL(path.join(__dirname, '../src/userNavigation.js')));
+  const groups = nav.USER_NAV_GROUPS;
+  assert(groups.length >= 20);
+  assert.equal(new Set(groups.map(group => group.id)).size, groups.length);
+  const routes = groups.flatMap(group => group.items.map(item => item[1]));
+  assert.equal(new Set(routes).size, routes.length, 'Duplicate destinations remain in the menu');
+  for (const route of ['dashboard', 'asset-inventory', 'subdomain-discovery', 'vapt', 'logs', 'security-events',
+    'mitre-attack', 'findings', 'uptime', 'copilot', 'support', 'profile']) assert(routes.includes(route), route);
+  const testing = nav.findUserNavigationGroup('vapt');
+  assert.equal(testing.label, 'Security Testing');
+  assert(testing.items.some(([label, route]) => label === 'VAPT Testing' && route === 'vapt'));
+  const reports = groups.findIndex(group => group.label === 'Reports');
+  const notifications = groups.findIndex(group => group.label === 'Notifications');
+  assert(reports < notifications);
+  assert.equal(groups.at(-1).label, 'Workspace');
+  const defaultState = nav.createUserNavigationState();
+  assert.equal(Object.values(defaultState).filter(Boolean).length, 1);
+  assert(defaultState[nav.findUserNavigationGroup('dashboard').id]);
+  const testingState = nav.toggleUserNavigation(defaultState, testing.id);
+  assert.equal(Object.values(testingState).filter(Boolean).length, 1);
+  assert(testingState[testing.id]);
+  assert.equal(Object.values(nav.toggleUserNavigation(testingState, testing.id)).filter(Boolean).length, 0);
+  assert(nav.createUserNavigationState('subdomain-discovery')[nav.findUserNavigationGroup('subdomain-discovery').id]);
+  const start = source.indexOf('function UserDashboard(');
+  const next = source.indexOf('\nfunction ', start + 1);
+  const user = source.slice(start, next < 0 ? source.length : next);
+  assert.match(user, /USER_NAV_GROUPS\.map\(\(group, index\)/);
+  assert.match(user, /String\(index \+ 1\)\.padStart\(2, "0"\)/);
+  assert(!user.includes('Existing Modules'));
+  assert.match(user, /lg:ml-72/);
+  assert.match(user, /lg:w-\[calc\(100%-18rem\)\]/);
+  assert(!user.includes('lg:ml-64'));
+  assert.match(user, /min-h-0 flex-1 overflow-y-auto/);
+  assert.match(user, /aria-label="Toggle navigation"/);
+  assert.match(user, /aria-label="Close navigation"/);
+  assert.match(user, /aria-expanded=\{Boolean\(isOpen\)\}/);
+  assert.match(user, /removeEventListener\('keydown', closeOnEscape\)/);
+  const reviewPath = process.argv[2];
+  if (reviewPath) {
+    const report = JSON.parse(fs.readFileSync(reviewPath, 'utf8'));
+    assert.deepEqual([...routes].sort(), report.sourceRoutes, 'A previous destination was lost or an unknown one was added');
+    assert.equal(report.originalUniqueRoutes, routes.length);
+  }
+  console.log(`PASS: ${groups.length} ordered groups, ${routes.length} preserved unique routes, VAPT grouping, accordion state, matching content offset and mobile navigation controls.`);
+})().catch(error => {console.error(error); process.exitCode = 1;});

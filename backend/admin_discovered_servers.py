@@ -67,3 +67,15 @@ def discovered_servers(
         })
     return {'total':total, 'limit':limit, 'offset':offset, 'servers':servers,
             'count_scope':'latest_by_owner_and_address', 'read_only':True}
+
+
+@router.get('/subdomain-discoveries')
+def subdomain_discoveries(
+    q: str = Query(default='', max_length=200),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(3)),
+):
+    from subdomain_workflow import list_runs
+    return list_runs(db, current_user, admin=True, q=q, limit=limit, offset=offset)

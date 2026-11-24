@@ -61,13 +61,13 @@ function finishNmap(status, multi=false) {
 }
 
 async function pollGeneric(status) {
-  const code = section('  useEffect(() => {\n    const runningJobs = Object.entries(genericToolJobs)', '  }, [genericToolJobs]);');
+  const code = section('  useEffect(() => {\n    const runningJobs = Object.entries(genericToolJobs)', '  }, [genericPollingKey]);');
   let effect;
   const state={jobs:{dig:{jobId:'fixture-job',status:'running'}},statuses:{},results:{},loading:true};
   const set = key=>value=>{state[key] = typeof value==='function' ? value(state[key]) : value;};
   vm.runInNewContext(code, {
     ...outcomeHelpers,
-    genericToolJobs:state.jobs,vaptRunTools:['dig'],API_URL:'http://synthetic.invalid',console,
+    genericPollingKey:'fixture-job',genericToolJobs:state.jobs,vaptRunTools:['dig'],API_URL:'http://synthetic.invalid',console,
     localStorage:{getItem:()=> 'synthetic-test-token'},
     axios:{get:async()=>({data:{job_id:'fixture-job',status,result:{status}}})},
     useEffect:callback=>{effect=callback;},

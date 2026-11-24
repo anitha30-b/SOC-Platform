@@ -2668,33 +2668,8 @@ def get_my_tool_permissions(
     current_user: User = Depends(require_role(1)),
     db: Session = Depends(get_db),
 ):
-    """Return the authenticated User/Client's current tool permissions."""
-    tools = (
-        db.query(SecurityTool)
-        .order_by(SecurityTool.category, SecurityTool.name)
-        .all()
-    )
-
-    permissions = (
-        db.query(UserToolPermission)
-        .filter(UserToolPermission.user_id == current_user.id)
-        .all()
-    )
-
-    permission_map = {p.tool_id: p.allowed for p in permissions}
-
-    return [
-        {
-            "tool_id": tool.id,
-            "tool_name": tool.name,
-            "category": tool.category,
-            "description": tool.description,
-            "tool_type": tool.tool_type,
-            "tool_enabled": tool.enabled,
-            "allowed": bool(tool.enabled and permission_map.get(tool.id, False)),
-        }
-        for tool in tools
-    ]
+    from subdomain_tool_catalogue import effective_tool_permissions
+    return effective_tool_permissions(db, current_user)
 
 
 def require_nmap_access(current_user: User = Depends(get_current_user)):

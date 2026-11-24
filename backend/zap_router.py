@@ -52,9 +52,9 @@ router = APIRouter(
 
 
 
-ZAP_URL = "http://127.0.0.1:8080"
+from zap_configuration import load_zap_configuration
+ZAP_URL, ZAP_API_KEY = load_zap_configuration()
 
-ZAP_API_KEY = "soc-zap-key"
 
 
 
